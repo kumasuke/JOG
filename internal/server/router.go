@@ -80,6 +80,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("versions") {
 					// GET /{bucket}?versions - ListObjectVersions
 					r.handler.ListObjectVersions(w, req)
+				} else if query.Has("acl") {
+					// GET /{bucket}?acl - GetBucketAcl
+					r.handler.GetBucketAcl(w, req)
 				} else {
 					// GET /{bucket} - ListObjectsV2
 					r.handler.ListObjectsV2(w, req)
@@ -93,6 +96,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 			} else if query.Has("tagging") {
 				// GET /{bucket}/{key}?tagging - GetObjectTagging
 				r.handler.GetObjectTagging(w, req)
+			} else if query.Has("acl") {
+				// GET /{bucket}/{key}?acl - GetObjectAcl
+				r.handler.GetObjectAcl(w, req)
 			} else {
 				// GET /{bucket}/{key} - GetObject
 				r.handler.GetObject(w, req)
@@ -109,6 +115,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("versioning") {
 					// PUT /{bucket}?versioning - PutBucketVersioning
 					r.handler.PutBucketVersioning(w, req)
+				} else if query.Has("acl") {
+					// PUT /{bucket}?acl - PutBucketAcl
+					r.handler.PutBucketAcl(w, req)
 				} else {
 					// PUT /{bucket} - CreateBucket
 					r.handler.CreateBucket(w, req)
@@ -126,6 +135,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("tagging") {
 					// PUT /{bucket}/{key}?tagging - PutObjectTagging
 					r.handler.PutObjectTagging(w, req)
+				} else if query.Has("acl") {
+					// PUT /{bucket}/{key}?acl - PutObjectAcl
+					r.handler.PutObjectAcl(w, req)
 				} else if req.Header.Get("x-amz-copy-source") != "" {
 					// PUT /{bucket}/{key} with x-amz-copy-source - CopyObject
 					r.handler.CopyObject(w, req)

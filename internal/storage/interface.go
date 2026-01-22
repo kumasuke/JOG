@@ -173,6 +173,59 @@ type ListObjectVersionsOutput struct {
 	NextVersionIdMarker string
 }
 
+// ACLPermission represents an ACL permission.
+type ACLPermission string
+
+const (
+	ACLPermissionFullControl ACLPermission = "FULL_CONTROL"
+	ACLPermissionWrite       ACLPermission = "WRITE"
+	ACLPermissionWriteACP    ACLPermission = "WRITE_ACP"
+	ACLPermissionRead        ACLPermission = "READ"
+	ACLPermissionReadACP     ACLPermission = "READ_ACP"
+)
+
+// ACLGranteeType represents the type of grantee.
+type ACLGranteeType string
+
+const (
+	ACLGranteeTypeCanonicalUser   ACLGranteeType = "CanonicalUser"
+	ACLGranteeTypeAmazonCustomer  ACLGranteeType = "AmazonCustomerByEmail"
+	ACLGranteeTypeGroup           ACLGranteeType = "Group"
+)
+
+// ACLGrant represents a single grant in an ACL.
+type ACLGrant struct {
+	Permission  ACLPermission
+	GranteeType ACLGranteeType
+	GranteeID   string // Canonical user ID
+	GranteeURI  string // Group URI (e.g., http://acs.amazonaws.com/groups/global/AllUsers)
+}
+
+// ACL represents an access control list.
+type ACL struct {
+	OwnerID      string
+	OwnerDisplay string
+	Grants       []ACLGrant
+}
+
+// CannedACL represents a predefined ACL.
+type CannedACL string
+
+const (
+	CannedACLPrivate           CannedACL = "private"
+	CannedACLPublicRead        CannedACL = "public-read"
+	CannedACLPublicReadWrite   CannedACL = "public-read-write"
+	CannedACLAuthenticatedRead CannedACL = "authenticated-read"
+	CannedACLBucketOwnerRead   CannedACL = "bucket-owner-read"
+	CannedACLBucketOwnerFC     CannedACL = "bucket-owner-full-control"
+)
+
+// AllUsersGroupURI is the URI for the AllUsers group.
+const AllUsersGroupURI = "http://acs.amazonaws.com/groups/global/AllUsers"
+
+// AuthenticatedUsersGroupURI is the URI for the AuthenticatedUsers group.
+const AuthenticatedUsersGroupURI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers"
+
 // Storage defines the interface for storage backends.
 type Storage interface {
 	// Bucket operations
@@ -220,6 +273,12 @@ type Storage interface {
 	GetObjectVersioned(ctx context.Context, bucket, key, versionID string) (*ObjectData, error)
 	DeleteObjectVersioned(ctx context.Context, bucket, key, versionID string) (string, bool, error)
 	ListObjectVersions(ctx context.Context, input *ListObjectVersionsInput) (*ListObjectVersionsOutput, error)
+
+	// ACL operations
+	PutBucketACL(ctx context.Context, bucket string, acl *ACL) error
+	GetBucketACL(ctx context.Context, bucket string) (*ACL, error)
+	PutObjectACL(ctx context.Context, bucket, key string, acl *ACL) error
+	GetObjectACL(ctx context.Context, bucket, key string) (*ACL, error)
 
 	// Close releases storage resources.
 	Close() error

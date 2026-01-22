@@ -159,6 +159,16 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Handle canned ACL header
+	cannedACL := r.Header.Get("x-amz-acl")
+	if cannedACL != "" {
+		acl := storage.CannedACLToACL(storage.CannedACL(cannedACL), storage.DefaultOwnerID, storage.DefaultOwnerDisplay)
+		if err := h.storage.PutObjectACL(r.Context(), bucket, key, acl); err != nil {
+			// Log error but don't fail the request as the object was already created
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("Failed to set object ACL")
+		}
+	}
+
 	w.Header().Set("ETag", "\""+obj.ETag+"\"")
 	if versionID != "" {
 		w.Header().Set("x-amz-version-id", versionID)

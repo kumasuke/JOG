@@ -22,7 +22,7 @@ type ListAllMyBucketsResult struct {
 // Owner represents bucket owner information.
 type Owner struct {
 	ID          string `xml:"ID"`
-	DisplayName string `xml:"DisplayName"`
+	DisplayName string `xml:"DisplayName,omitempty"`
 }
 
 // Buckets is a container for bucket list.
