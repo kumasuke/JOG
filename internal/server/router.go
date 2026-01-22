@@ -65,6 +65,24 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				if query.Has("uploads") {
 					// GET /{bucket}?uploads - ListMultipartUploads
 					r.handler.ListMultipartUploads(w, req)
+				} else if query.Has("location") {
+					// GET /{bucket}?location - GetBucketLocation
+					r.handler.GetBucketLocation(w, req)
+				} else if query.Has("tagging") {
+					// GET /{bucket}?tagging - GetBucketTagging
+					r.handler.GetBucketTagging(w, req)
+				} else if query.Has("cors") {
+					// GET /{bucket}?cors - GetBucketCors
+					r.handler.GetBucketCors(w, req)
+				} else if query.Has("versioning") {
+					// GET /{bucket}?versioning - GetBucketVersioning
+					r.handler.GetBucketVersioning(w, req)
+				} else if query.Has("versions") {
+					// GET /{bucket}?versions - ListObjectVersions
+					r.handler.ListObjectVersions(w, req)
+				} else if query.Has("acl") {
+					// GET /{bucket}?acl - GetBucketAcl
+					r.handler.GetBucketAcl(w, req)
 				} else {
 					// GET /{bucket} - ListObjectsV2
 					r.handler.ListObjectsV2(w, req)
@@ -75,6 +93,12 @@ func (r *Router) routeRequest() http.HandlerFunc {
 			} else if query.Has("attributes") {
 				// GET /{bucket}/{key}?attributes - GetObjectAttributes
 				r.handler.GetObjectAttributes(w, req)
+			} else if query.Has("tagging") {
+				// GET /{bucket}/{key}?tagging - GetObjectTagging
+				r.handler.GetObjectTagging(w, req)
+			} else if query.Has("acl") {
+				// GET /{bucket}/{key}?acl - GetObjectAcl
+				r.handler.GetObjectAcl(w, req)
 			} else {
 				// GET /{bucket}/{key} - GetObject
 				r.handler.GetObject(w, req)
@@ -82,8 +106,22 @@ func (r *Router) routeRequest() http.HandlerFunc {
 
 		case http.MethodPut:
 			if bucket != "" && key == "" {
-				// PUT /{bucket} - CreateBucket
-				r.handler.CreateBucket(w, req)
+				if query.Has("tagging") {
+					// PUT /{bucket}?tagging - PutBucketTagging
+					r.handler.PutBucketTagging(w, req)
+				} else if query.Has("cors") {
+					// PUT /{bucket}?cors - PutBucketCors
+					r.handler.PutBucketCors(w, req)
+				} else if query.Has("versioning") {
+					// PUT /{bucket}?versioning - PutBucketVersioning
+					r.handler.PutBucketVersioning(w, req)
+				} else if query.Has("acl") {
+					// PUT /{bucket}?acl - PutBucketAcl
+					r.handler.PutBucketAcl(w, req)
+				} else {
+					// PUT /{bucket} - CreateBucket
+					r.handler.CreateBucket(w, req)
+				}
 			} else if bucket != "" && key != "" {
 				if query.Has("partNumber") && query.Has("uploadId") {
 					// Check if this is UploadPartCopy (has x-amz-copy-source header)
@@ -94,6 +132,12 @@ func (r *Router) routeRequest() http.HandlerFunc {
 						// PUT /{bucket}/{key}?partNumber={partNumber}&uploadId={uploadId} - UploadPart
 						r.handler.UploadPart(w, req)
 					}
+				} else if query.Has("tagging") {
+					// PUT /{bucket}/{key}?tagging - PutObjectTagging
+					r.handler.PutObjectTagging(w, req)
+				} else if query.Has("acl") {
+					// PUT /{bucket}/{key}?acl - PutObjectAcl
+					r.handler.PutObjectAcl(w, req)
 				} else if req.Header.Get("x-amz-copy-source") != "" {
 					// PUT /{bucket}/{key} with x-amz-copy-source - CopyObject
 					r.handler.CopyObject(w, req)
@@ -129,12 +173,23 @@ func (r *Router) routeRequest() http.HandlerFunc {
 
 		case http.MethodDelete:
 			if bucket != "" && key == "" {
-				// DELETE /{bucket} - DeleteBucket
-				r.handler.DeleteBucket(w, req)
+				if query.Has("tagging") {
+					// DELETE /{bucket}?tagging - DeleteBucketTagging
+					r.handler.DeleteBucketTagging(w, req)
+				} else if query.Has("cors") {
+					// DELETE /{bucket}?cors - DeleteBucketCors
+					r.handler.DeleteBucketCors(w, req)
+				} else {
+					// DELETE /{bucket} - DeleteBucket
+					r.handler.DeleteBucket(w, req)
+				}
 			} else if bucket != "" && key != "" {
 				if query.Has("uploadId") {
 					// DELETE /{bucket}/{key}?uploadId={uploadId} - AbortMultipartUpload
 					r.handler.AbortMultipartUpload(w, req)
+				} else if query.Has("tagging") {
+					// DELETE /{bucket}/{key}?tagging - DeleteObjectTagging
+					r.handler.DeleteObjectTagging(w, req)
 				} else {
 					// DELETE /{bucket}/{key} - DeleteObject
 					r.handler.DeleteObject(w, req)
@@ -152,6 +207,14 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				r.handler.HeadObject(w, req)
 			} else {
 				api.WriteError(w, api.ErrInvalidRequest)
+			}
+
+		case http.MethodOptions:
+			// OPTIONS /{bucket} or /{bucket}/{key} - CORS preflight
+			if bucket != "" {
+				r.handler.HandleCorsPreflightRequest(w, req)
+			} else {
+				w.WriteHeader(http.StatusOK)
 			}
 
 		default:

@@ -108,6 +108,113 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create parts table: %w", err)
 	}
 
+	// Create object_tags table
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS object_tags (
+			bucket TEXT NOT NULL,
+			key TEXT NOT NULL,
+			tag_key TEXT NOT NULL,
+			tag_value TEXT NOT NULL,
+			PRIMARY KEY (bucket, key, tag_key),
+			FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create object_tags table: %w", err)
+	}
+
+	// Create bucket_tags table
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bucket_tags (
+			bucket TEXT NOT NULL,
+			tag_key TEXT NOT NULL,
+			tag_value TEXT NOT NULL,
+			PRIMARY KEY (bucket, tag_key),
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket_tags table: %w", err)
+	}
+
+	// Create bucket_cors table (stores CORS config as JSON)
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bucket_cors (
+			bucket TEXT PRIMARY KEY,
+			cors_config TEXT NOT NULL,
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket_cors table: %w", err)
+	}
+
+	// Create bucket_versioning table
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bucket_versioning (
+			bucket TEXT PRIMARY KEY,
+			status TEXT NOT NULL,
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket_versioning table: %w", err)
+	}
+
+	// Create object_versions table
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS object_versions (
+			bucket TEXT NOT NULL,
+			key TEXT NOT NULL,
+			version_id TEXT NOT NULL,
+			size INTEGER NOT NULL,
+			last_modified DATETIME NOT NULL,
+			etag TEXT NOT NULL,
+			content_type TEXT NOT NULL,
+			metadata TEXT,
+			is_delete_marker INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (bucket, key, version_id),
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create object_versions table: %w", err)
+	}
+
+	// Create index for version listing
+	_, err = m.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_object_versions_bucket_key ON object_versions(bucket, key, last_modified DESC)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create version index: %w", err)
+	}
+
+	// Create bucket_acls table (stores ACL as JSON)
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bucket_acls (
+			bucket TEXT PRIMARY KEY,
+			acl_config TEXT NOT NULL,
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket_acls table: %w", err)
+	}
+
+	// Create object_acls table (stores ACL as JSON)
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS object_acls (
+			bucket TEXT NOT NULL,
+			key TEXT NOT NULL,
+			acl_config TEXT NOT NULL,
+			PRIMARY KEY (bucket, key),
+			FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create object_acls table: %w", err)
+	}
+
 	return nil
 }
 
@@ -435,6 +542,376 @@ func (m *Metadata) ListMultipartUploadsByBucket(ctx context.Context, bucket, pre
 	}
 
 	return uploads, isTruncated, nextKeyMarker, nextUploadIDMarker, nil
+}
+
+// PutObjectTags stores tags for an object.
+func (m *Metadata) PutObjectTags(ctx context.Context, bucket, key string, tags []Tag) error {
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Delete existing tags
+	_, err = tx.ExecContext(ctx, `DELETE FROM object_tags WHERE bucket = ? AND key = ?`, bucket, key)
+	if err != nil {
+		return err
+	}
+
+	// Insert new tags
+	for _, tag := range tags {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO object_tags (bucket, key, tag_key, tag_value)
+			VALUES (?, ?, ?, ?)
+		`, bucket, key, tag.Key, tag.Value)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetObjectTags returns tags for an object.
+func (m *Metadata) GetObjectTags(ctx context.Context, bucket, key string) ([]Tag, error) {
+	rows, err := m.db.QueryContext(ctx, `
+		SELECT tag_key, tag_value FROM object_tags
+		WHERE bucket = ? AND key = ?
+		ORDER BY tag_key
+	`, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tags []Tag
+	for rows.Next() {
+		var tag Tag
+		if err := rows.Scan(&tag.Key, &tag.Value); err != nil {
+			return nil, err
+		}
+		tags = append(tags, tag)
+	}
+	return tags, rows.Err()
+}
+
+// DeleteObjectTags deletes all tags for an object.
+func (m *Metadata) DeleteObjectTags(ctx context.Context, bucket, key string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM object_tags WHERE bucket = ? AND key = ?`, bucket, key)
+	return err
+}
+
+// PutBucketTags stores tags for a bucket.
+func (m *Metadata) PutBucketTags(ctx context.Context, bucket string, tags []Tag) error {
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Delete existing tags
+	_, err = tx.ExecContext(ctx, `DELETE FROM bucket_tags WHERE bucket = ?`, bucket)
+	if err != nil {
+		return err
+	}
+
+	// Insert new tags
+	for _, tag := range tags {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO bucket_tags (bucket, tag_key, tag_value)
+			VALUES (?, ?, ?)
+		`, bucket, tag.Key, tag.Value)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetBucketTags returns tags for a bucket.
+func (m *Metadata) GetBucketTags(ctx context.Context, bucket string) ([]Tag, error) {
+	rows, err := m.db.QueryContext(ctx, `
+		SELECT tag_key, tag_value FROM bucket_tags
+		WHERE bucket = ?
+		ORDER BY tag_key
+	`, bucket)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tags []Tag
+	for rows.Next() {
+		var tag Tag
+		if err := rows.Scan(&tag.Key, &tag.Value); err != nil {
+			return nil, err
+		}
+		tags = append(tags, tag)
+	}
+	return tags, rows.Err()
+}
+
+// DeleteBucketTags deletes all tags for a bucket.
+func (m *Metadata) DeleteBucketTags(ctx context.Context, bucket string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM bucket_tags WHERE bucket = ?`, bucket)
+	return err
+}
+
+// PutBucketCors stores CORS configuration for a bucket.
+func (m *Metadata) PutBucketCors(ctx context.Context, bucket string, corsConfig string) error {
+	_, err := m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO bucket_cors (bucket, cors_config)
+		VALUES (?, ?)
+	`, bucket, corsConfig)
+	return err
+}
+
+// GetBucketCors returns CORS configuration for a bucket.
+func (m *Metadata) GetBucketCors(ctx context.Context, bucket string) (string, error) {
+	var corsConfig string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT cors_config FROM bucket_cors WHERE bucket = ?
+	`, bucket).Scan(&corsConfig)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return corsConfig, nil
+}
+
+// DeleteBucketCors deletes CORS configuration for a bucket.
+func (m *Metadata) DeleteBucketCors(ctx context.Context, bucket string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM bucket_cors WHERE bucket = ?`, bucket)
+	return err
+}
+
+// PutBucketVersioning sets the versioning status for a bucket.
+func (m *Metadata) PutBucketVersioning(ctx context.Context, bucket, status string) error {
+	_, err := m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO bucket_versioning (bucket, status)
+		VALUES (?, ?)
+	`, bucket, status)
+	return err
+}
+
+// GetBucketVersioning returns the versioning status for a bucket.
+func (m *Metadata) GetBucketVersioning(ctx context.Context, bucket string) (string, error) {
+	var status string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT status FROM bucket_versioning WHERE bucket = ?
+	`, bucket).Scan(&status)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return status, nil
+}
+
+// PutObjectVersion stores a new version of an object.
+func (m *Metadata) PutObjectVersion(ctx context.Context, bucket string, version *ObjectVersion) error {
+	metadata, err := json.Marshal(version.Metadata)
+	if err != nil {
+		return err
+	}
+
+	_, err = m.db.ExecContext(ctx, `
+		INSERT INTO object_versions (bucket, key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, bucket, version.Key, version.VersionID, version.Size, version.LastModified, version.ETag, version.ContentType, string(metadata), version.IsDeleteMarker)
+	return err
+}
+
+
+// GetObjectVersion returns a specific version of an object.
+func (m *Metadata) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (*ObjectVersion, error) {
+	var version ObjectVersion
+	var metadataStr string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
+		FROM object_versions WHERE bucket = ? AND key = ? AND version_id = ?
+	`, bucket, key, versionID).Scan(&version.Key, &version.VersionID, &version.Size, &version.LastModified, &version.ETag, &version.ContentType, &metadataStr, &version.IsDeleteMarker)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if metadataStr != "" {
+		if err := json.Unmarshal([]byte(metadataStr), &version.Metadata); err != nil {
+			return nil, err
+		}
+	}
+
+	return &version, nil
+}
+
+// GetLatestObjectVersion returns the latest version of an object.
+func (m *Metadata) GetLatestObjectVersion(ctx context.Context, bucket, key string) (*ObjectVersion, error) {
+	var version ObjectVersion
+	var metadataStr string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
+		FROM object_versions WHERE bucket = ? AND key = ?
+		ORDER BY last_modified DESC LIMIT 1
+	`, bucket, key).Scan(&version.Key, &version.VersionID, &version.Size, &version.LastModified, &version.ETag, &version.ContentType, &metadataStr, &version.IsDeleteMarker)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if metadataStr != "" {
+		if err := json.Unmarshal([]byte(metadataStr), &version.Metadata); err != nil {
+			return nil, err
+		}
+	}
+
+	return &version, nil
+}
+
+// DeleteObjectVersion deletes a specific version of an object.
+func (m *Metadata) DeleteObjectVersion(ctx context.Context, bucket, key, versionID string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM object_versions WHERE bucket = ? AND key = ? AND version_id = ?`, bucket, key, versionID)
+	return err
+}
+
+// ListObjectVersions returns all versions of objects in a bucket.
+func (m *Metadata) ListObjectVersions(ctx context.Context, bucket, prefix string, maxKeys int32, keyMarker, versionIDMarker string) ([]ObjectVersion, bool, string, string, error) {
+	if maxKeys <= 0 {
+		maxKeys = 1000
+	}
+
+	var rows *sql.Rows
+	var err error
+
+	if keyMarker == "" {
+		rows, err = m.db.QueryContext(ctx, `
+			SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
+			FROM object_versions
+			WHERE bucket = ? AND key LIKE ?
+			ORDER BY key, last_modified DESC
+			LIMIT ?
+		`, bucket, prefix+"%", maxKeys+1)
+	} else {
+		rows, err = m.db.QueryContext(ctx, `
+			SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
+			FROM object_versions
+			WHERE bucket = ? AND key LIKE ?
+			  AND (key > ? OR (key = ? AND version_id > ?))
+			ORDER BY key, last_modified DESC
+			LIMIT ?
+		`, bucket, prefix+"%", keyMarker, keyMarker, versionIDMarker, maxKeys+1)
+	}
+
+	if err != nil {
+		return nil, false, "", "", err
+	}
+	defer rows.Close()
+
+	var versions []ObjectVersion
+	for rows.Next() {
+		var version ObjectVersion
+		var metadataStr string
+		if err := rows.Scan(&version.Key, &version.VersionID, &version.Size, &version.LastModified, &version.ETag, &version.ContentType, &metadataStr, &version.IsDeleteMarker); err != nil {
+			return nil, false, "", "", err
+		}
+		if metadataStr != "" {
+			if err := json.Unmarshal([]byte(metadataStr), &version.Metadata); err != nil {
+				return nil, false, "", "", err
+			}
+		}
+		versions = append(versions, version)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, false, "", "", err
+	}
+
+	isTruncated := len(versions) > int(maxKeys)
+	var nextKeyMarker, nextVersionIDMarker string
+	if isTruncated {
+		lastVersion := versions[maxKeys-1]
+		nextKeyMarker = lastVersion.Key
+		nextVersionIDMarker = lastVersion.VersionID
+		versions = versions[:maxKeys]
+	}
+
+	return versions, isTruncated, nextKeyMarker, nextVersionIDMarker, nil
+}
+
+// PutBucketACL stores the ACL for a bucket.
+func (m *Metadata) PutBucketACL(ctx context.Context, bucket string, acl *ACL) error {
+	aclJSON, err := json.Marshal(acl)
+	if err != nil {
+		return err
+	}
+
+	_, err = m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO bucket_acls (bucket, acl_config) VALUES (?, ?)
+	`, bucket, string(aclJSON))
+	return err
+}
+
+// GetBucketACL returns the ACL for a bucket.
+func (m *Metadata) GetBucketACL(ctx context.Context, bucket string) (*ACL, error) {
+	var aclJSON string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT acl_config FROM bucket_acls WHERE bucket = ?
+	`, bucket).Scan(&aclJSON)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var acl ACL
+	if err := json.Unmarshal([]byte(aclJSON), &acl); err != nil {
+		return nil, err
+	}
+
+	return &acl, nil
+}
+
+// PutObjectACL stores the ACL for an object.
+func (m *Metadata) PutObjectACL(ctx context.Context, bucket, key string, acl *ACL) error {
+	aclJSON, err := json.Marshal(acl)
+	if err != nil {
+		return err
+	}
+
+	_, err = m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO object_acls (bucket, key, acl_config) VALUES (?, ?, ?)
+	`, bucket, key, string(aclJSON))
+	return err
+}
+
+// GetObjectACL returns the ACL for an object.
+func (m *Metadata) GetObjectACL(ctx context.Context, bucket, key string) (*ACL, error) {
+	var aclJSON string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT acl_config FROM object_acls WHERE bucket = ? AND key = ?
+	`, bucket, key).Scan(&aclJSON)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var acl ACL
+	if err := json.Unmarshal([]byte(aclJSON), &acl); err != nil {
+		return nil, err
+	}
+
+	return &acl, nil
 }
 
 // Close closes the database connection.

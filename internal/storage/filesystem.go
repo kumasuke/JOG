@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // FileSystem implements Storage using local file system.
@@ -1012,6 +1015,681 @@ func randomHex(length int) string {
 	return hex.EncodeToString(b)
 }
 
+// PutObjectTagging stores tags for an object.
+func (fs *FileSystem) PutObjectTagging(ctx context.Context, bucket, key string, tags []Tag) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	// Check if object exists
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return err
+	}
+	if obj == nil {
+		return ErrObjectNotFound
+	}
+
+	return fs.metadata.PutObjectTags(ctx, bucket, key, tags)
+}
+
+// GetObjectTagging returns tags for an object.
+func (fs *FileSystem) GetObjectTagging(ctx context.Context, bucket, key string) ([]Tag, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	// Check if object exists
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	if obj == nil {
+		return nil, ErrObjectNotFound
+	}
+
+	return fs.metadata.GetObjectTags(ctx, bucket, key)
+}
+
+// DeleteObjectTagging deletes all tags for an object.
+func (fs *FileSystem) DeleteObjectTagging(ctx context.Context, bucket, key string) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	// Check if object exists
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return err
+	}
+	if obj == nil {
+		return ErrObjectNotFound
+	}
+
+	return fs.metadata.DeleteObjectTags(ctx, bucket, key)
+}
+
+// PutBucketTagging stores tags for a bucket.
+func (fs *FileSystem) PutBucketTagging(ctx context.Context, bucket string, tags []Tag) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.PutBucketTags(ctx, bucket, tags)
+}
+
+// GetBucketTagging returns tags for a bucket.
+func (fs *FileSystem) GetBucketTagging(ctx context.Context, bucket string) ([]Tag, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	tags, err := fs.metadata.GetBucketTags(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+
+	// S3 returns NoSuchTagSet error when no tags are set
+	if len(tags) == 0 {
+		return nil, ErrNoSuchTagSet
+	}
+
+	return tags, nil
+}
+
+// DeleteBucketTagging deletes all tags for a bucket.
+func (fs *FileSystem) DeleteBucketTagging(ctx context.Context, bucket string) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.DeleteBucketTags(ctx, bucket)
+}
+
+// PutBucketCors stores CORS configuration for a bucket.
+func (fs *FileSystem) PutBucketCors(ctx context.Context, bucket string, cors *CORSConfiguration) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	// Serialize CORS configuration to JSON
+	corsJSON, err := json.Marshal(cors)
+	if err != nil {
+		return err
+	}
+
+	return fs.metadata.PutBucketCors(ctx, bucket, string(corsJSON))
+}
+
+// GetBucketCors returns CORS configuration for a bucket.
+func (fs *FileSystem) GetBucketCors(ctx context.Context, bucket string) (*CORSConfiguration, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	corsJSON, err := fs.metadata.GetBucketCors(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if corsJSON == "" {
+		return nil, ErrNoSuchCORSConfiguration
+	}
+
+	var cors CORSConfiguration
+	if err := json.Unmarshal([]byte(corsJSON), &cors); err != nil {
+		return nil, err
+	}
+
+	return &cors, nil
+}
+
+// DeleteBucketCors deletes CORS configuration for a bucket.
+func (fs *FileSystem) DeleteBucketCors(ctx context.Context, bucket string) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.DeleteBucketCors(ctx, bucket)
+}
+
+// PutBucketVersioning sets the versioning status for a bucket.
+func (fs *FileSystem) PutBucketVersioning(ctx context.Context, bucket string, status VersioningStatus) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.PutBucketVersioning(ctx, bucket, string(status))
+}
+
+// GetBucketVersioning returns the versioning status for a bucket.
+func (fs *FileSystem) GetBucketVersioning(ctx context.Context, bucket string) (VersioningStatus, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return "", ErrBucketNotFound
+	}
+
+	status, err := fs.metadata.GetBucketVersioning(ctx, bucket)
+	if err != nil {
+		return "", err
+	}
+
+	return VersioningStatus(status), nil
+}
+
+// PutObjectVersioned stores a versioned object.
+func (fs *FileSystem) PutObjectVersioned(ctx context.Context, bucket, key string, body io.Reader, size int64, contentType string, userMetadata map[string]string) (*Object, string, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, "", err
+	}
+	if !exists {
+		return nil, "", ErrBucketNotFound
+	}
+
+	// Generate version ID
+	versionID := generateVersionID()
+
+	// Create object path with version
+	objectPath := filepath.Join(fs.dataDir, bucket, ".versions", key, versionID)
+	objectDir := filepath.Dir(objectPath)
+	if err := os.MkdirAll(objectDir, 0755); err != nil {
+		return nil, "", fmt.Errorf("failed to create object directory: %w", err)
+	}
+
+	// Create temporary file
+	tmpFile, err := os.CreateTemp(objectDir, ".tmp-*")
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+	}()
+
+	// Write data and calculate MD5
+	hash := md5.New()
+	writer := io.MultiWriter(tmpFile, hash)
+
+	written, err := io.Copy(writer, body)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to write object: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return nil, "", fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// Calculate ETag
+	etag := hex.EncodeToString(hash.Sum(nil))
+
+	// Rename temp file to final path
+	if err := os.Rename(tmpPath, objectPath); err != nil {
+		return nil, "", fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	// Set default content type
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	now := time.Now()
+
+	// Save version metadata
+	version := &ObjectVersion{
+		Key:          key,
+		VersionID:    versionID,
+		Size:         written,
+		LastModified: now,
+		ETag:         etag,
+		ContentType:  contentType,
+		Metadata:     userMetadata,
+	}
+
+	if err := fs.metadata.PutObjectVersion(ctx, bucket, version); err != nil {
+		os.Remove(objectPath)
+		return nil, "", err
+	}
+
+	// Also update the regular objects table for compatibility
+	obj := &Object{
+		Key:          key,
+		Size:         written,
+		LastModified: now,
+		ETag:         etag,
+		ContentType:  contentType,
+		Metadata:     userMetadata,
+	}
+
+	if err := fs.metadata.PutObject(ctx, bucket, obj); err != nil {
+		return nil, "", err
+	}
+
+	// Copy to current object path
+	currentPath := filepath.Join(fs.dataDir, bucket, key)
+	currentDir := filepath.Dir(currentPath)
+	if err := os.MkdirAll(currentDir, 0755); err != nil {
+		return nil, "", fmt.Errorf("failed to create current object directory: %w", err)
+	}
+
+	// Copy version file to current
+	if err := copyFile(objectPath, currentPath); err != nil {
+		return nil, "", fmt.Errorf("failed to copy version to current: %w", err)
+	}
+
+	return obj, versionID, nil
+}
+
+// GetObjectVersioned retrieves a specific version of an object.
+func (fs *FileSystem) GetObjectVersioned(ctx context.Context, bucket, key, versionID string) (*ObjectData, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	// Get version metadata
+	version, err := fs.metadata.GetObjectVersion(ctx, bucket, key, versionID)
+	if err != nil {
+		return nil, err
+	}
+	if version == nil {
+		return nil, ErrObjectNotFound
+	}
+
+	if version.IsDeleteMarker {
+		return nil, ErrObjectNotFound
+	}
+
+	// Open version file
+	objectPath := filepath.Join(fs.dataDir, bucket, ".versions", key, versionID)
+	file, err := os.Open(objectPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrObjectNotFound
+		}
+		return nil, fmt.Errorf("failed to open version file: %w", err)
+	}
+
+	return &ObjectData{
+		Object: Object{
+			Key:          version.Key,
+			Size:         version.Size,
+			LastModified: version.LastModified,
+			ETag:         version.ETag,
+			ContentType:  version.ContentType,
+			Metadata:     version.Metadata,
+		},
+		Body: file,
+	}, nil
+}
+
+// DeleteObjectVersioned deletes an object, creating a delete marker if versioning is enabled.
+func (fs *FileSystem) DeleteObjectVersioned(ctx context.Context, bucket, key, versionID string) (string, bool, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return "", false, err
+	}
+	if !exists {
+		return "", false, ErrBucketNotFound
+	}
+
+	// If versionID is specified, delete that specific version
+	if versionID != "" {
+		// Get version to check if it's a delete marker
+		version, err := fs.metadata.GetObjectVersion(ctx, bucket, key, versionID)
+		if err != nil {
+			return "", false, err
+		}
+		if version == nil {
+			return "", false, ErrObjectNotFound
+		}
+
+		// Delete version file
+		objectPath := filepath.Join(fs.dataDir, bucket, ".versions", key, versionID)
+		if err := os.Remove(objectPath); err != nil && !os.IsNotExist(err) {
+			return "", false, fmt.Errorf("failed to delete version file: %w", err)
+		}
+
+		// Delete version metadata
+		if err := fs.metadata.DeleteObjectVersion(ctx, bucket, key, versionID); err != nil {
+			return "", false, err
+		}
+
+		return versionID, version.IsDeleteMarker, nil
+	}
+
+	// No versionID - create a delete marker
+	deleteMarkerID := generateVersionID()
+	now := time.Now()
+
+	deleteMarker := &ObjectVersion{
+		Key:            key,
+		VersionID:      deleteMarkerID,
+		Size:           0,
+		LastModified:   now,
+		ETag:           "",
+		ContentType:    "",
+		IsDeleteMarker: true,
+	}
+
+	if err := fs.metadata.PutObjectVersion(ctx, bucket, deleteMarker); err != nil {
+		return "", false, err
+	}
+
+	// Remove from regular objects table
+	if err := fs.metadata.DeleteObject(ctx, bucket, key); err != nil {
+		return "", false, err
+	}
+
+	// Remove current file
+	currentPath := filepath.Join(fs.dataDir, bucket, key)
+	os.Remove(currentPath)
+
+	return deleteMarkerID, true, nil
+}
+
+// ListObjectVersions lists all versions of objects in a bucket.
+func (fs *FileSystem) ListObjectVersions(ctx context.Context, input *ListObjectVersionsInput) (*ListObjectVersionsOutput, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, input.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	versions, isTruncated, nextKeyMarker, nextVersionIDMarker, err := fs.metadata.ListObjectVersions(
+		ctx, input.Bucket, input.Prefix, input.MaxKeys, input.KeyMarker, input.VersionIdMarker,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	output := &ListObjectVersionsOutput{
+		IsTruncated:         isTruncated,
+		NextKeyMarker:       nextKeyMarker,
+		NextVersionIdMarker: nextVersionIDMarker,
+	}
+
+	// Find latest version for each key
+	latestVersions := make(map[string]string)
+	for _, v := range versions {
+		if _, exists := latestVersions[v.Key]; !exists {
+			latestVersions[v.Key] = v.VersionID
+		}
+	}
+
+	for _, v := range versions {
+		ov := ObjectVersion{
+			Key:            v.Key,
+			VersionID:      v.VersionID,
+			IsLatest:       v.VersionID == latestVersions[v.Key],
+			LastModified:   v.LastModified,
+			ETag:           v.ETag,
+			Size:           v.Size,
+			IsDeleteMarker: v.IsDeleteMarker,
+		}
+		if v.IsDeleteMarker {
+			output.DeleteMarkers = append(output.DeleteMarkers, ov)
+		} else {
+			output.Versions = append(output.Versions, ov)
+		}
+	}
+
+	return output, nil
+}
+
+// generateVersionID generates a unique version ID.
+func generateVersionID() string {
+	return uuid.New().String()
+}
+
+// copyFile copies a file from src to dst.
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	if _, err = io.Copy(dstFile, srcFile); err != nil {
+		return err
+	}
+	return dstFile.Sync()
+}
+
+// DefaultOwnerID is the default owner ID for ACLs.
+const DefaultOwnerID = "default-owner-id"
+
+// DefaultOwnerDisplay is the default owner display name for ACLs.
+const DefaultOwnerDisplay = "default-owner"
+
+// PutBucketACL stores the ACL for a bucket.
+func (fs *FileSystem) PutBucketACL(ctx context.Context, bucket string, acl *ACL) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.PutBucketACL(ctx, bucket, acl)
+}
+
+// GetBucketACL returns the ACL for a bucket.
+func (fs *FileSystem) GetBucketACL(ctx context.Context, bucket string) (*ACL, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	acl, err := fs.metadata.GetBucketACL(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return default ACL if none set
+	if acl == nil {
+		acl = &ACL{
+			OwnerID:      DefaultOwnerID,
+			OwnerDisplay: DefaultOwnerDisplay,
+			Grants: []ACLGrant{
+				{
+					Permission:  ACLPermissionFullControl,
+					GranteeType: ACLGranteeTypeCanonicalUser,
+					GranteeID:   DefaultOwnerID,
+				},
+			},
+		}
+	}
+
+	return acl, nil
+}
+
+// PutObjectACL stores the ACL for an object.
+func (fs *FileSystem) PutObjectACL(ctx context.Context, bucket, key string, acl *ACL) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	// Check if object exists
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return err
+	}
+	if obj == nil {
+		return ErrObjectNotFound
+	}
+
+	return fs.metadata.PutObjectACL(ctx, bucket, key, acl)
+}
+
+// GetObjectACL returns the ACL for an object.
+func (fs *FileSystem) GetObjectACL(ctx context.Context, bucket, key string) (*ACL, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	// Check if object exists
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	if obj == nil {
+		return nil, ErrObjectNotFound
+	}
+
+	acl, err := fs.metadata.GetObjectACL(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return default ACL if none set
+	if acl == nil {
+		acl = &ACL{
+			OwnerID:      DefaultOwnerID,
+			OwnerDisplay: DefaultOwnerDisplay,
+			Grants: []ACLGrant{
+				{
+					Permission:  ACLPermissionFullControl,
+					GranteeType: ACLGranteeTypeCanonicalUser,
+					GranteeID:   DefaultOwnerID,
+				},
+			},
+		}
+	}
+
+	return acl, nil
+}
+
+// CannedACLToACL converts a canned ACL to an ACL object.
+func CannedACLToACL(cannedACL CannedACL, ownerID, ownerDisplay string) *ACL {
+	acl := &ACL{
+		OwnerID:      ownerID,
+		OwnerDisplay: ownerDisplay,
+		Grants: []ACLGrant{
+			{
+				Permission:  ACLPermissionFullControl,
+				GranteeType: ACLGranteeTypeCanonicalUser,
+				GranteeID:   ownerID,
+			},
+		},
+	}
+
+	switch cannedACL {
+	case CannedACLPrivate:
+		// Default - owner has FULL_CONTROL
+	case CannedACLPublicRead:
+		acl.Grants = append(acl.Grants, ACLGrant{
+			Permission:  ACLPermissionRead,
+			GranteeType: ACLGranteeTypeGroup,
+			GranteeURI:  AllUsersGroupURI,
+		})
+	case CannedACLPublicReadWrite:
+		acl.Grants = append(acl.Grants, ACLGrant{
+			Permission:  ACLPermissionRead,
+			GranteeType: ACLGranteeTypeGroup,
+			GranteeURI:  AllUsersGroupURI,
+		})
+		acl.Grants = append(acl.Grants, ACLGrant{
+			Permission:  ACLPermissionWrite,
+			GranteeType: ACLGranteeTypeGroup,
+			GranteeURI:  AllUsersGroupURI,
+		})
+	case CannedACLAuthenticatedRead:
+		acl.Grants = append(acl.Grants, ACLGrant{
+			Permission:  ACLPermissionRead,
+			GranteeType: ACLGranteeTypeGroup,
+			GranteeURI:  AuthenticatedUsersGroupURI,
+		})
+	}
+
+	return acl
+}
+
 // Close releases storage resources.
 func (fs *FileSystem) Close() error {
 	return fs.metadata.Close()
@@ -1019,14 +1697,16 @@ func (fs *FileSystem) Close() error {
 
 // Errors
 var (
-	ErrBucketNotFound      = errors.New("bucket not found")
-	ErrBucketAlreadyExists = errors.New("bucket already exists")
-	ErrBucketNotEmpty      = errors.New("bucket not empty")
-	ErrObjectNotFound      = errors.New("object not found")
-	ErrInvalidBucketName   = errors.New("invalid bucket name")
-	ErrUploadNotFound      = errors.New("upload not found")
-	ErrInvalidPart         = errors.New("invalid part")
-	ErrInvalidRange        = errors.New("invalid range")
+	ErrBucketNotFound           = errors.New("bucket not found")
+	ErrBucketAlreadyExists      = errors.New("bucket already exists")
+	ErrBucketNotEmpty           = errors.New("bucket not empty")
+	ErrObjectNotFound           = errors.New("object not found")
+	ErrInvalidBucketName        = errors.New("invalid bucket name")
+	ErrUploadNotFound           = errors.New("upload not found")
+	ErrInvalidPart              = errors.New("invalid part")
+	ErrInvalidRange             = errors.New("invalid range")
+	ErrNoSuchTagSet             = errors.New("no such tag set")
+	ErrNoSuchCORSConfiguration  = errors.New("no such CORS configuration")
 )
 
 // BucketNotFoundError is an error that includes the bucket name.
