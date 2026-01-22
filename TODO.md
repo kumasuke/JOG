@@ -93,12 +93,30 @@ Each feature follows TDD (Test-Driven Development):
 
 ---
 
-## Phase 6: Future Enhancements
+### Phase 6: Object Lock & Retention ✅
 
-### Object Lock & Retention
-- [ ] GetObjectLockConfiguration / PutObjectLockConfiguration
-- [ ] GetObjectRetention / PutObjectRetention
-- [ ] GetObjectLegalHold / PutObjectLegalHold
+**Object Lock Configuration**
+- GetObjectLockConfiguration, PutObjectLockConfiguration
+- Support for ObjectLockEnabled flag at bucket creation
+- Default retention rules (GOVERNANCE/COMPLIANCE mode with Days/Years)
+
+**Object Retention**
+- PutObjectRetention, GetObjectRetention
+- Support for GOVERNANCE and COMPLIANCE modes
+- RetainUntilDate configuration
+
+**Object Legal Hold**
+- PutObjectLegalHold, GetObjectLegalHold
+- Support for ON/OFF status
+
+---
+
+## Phase 7: Future Enhancements
+
+### Additional Features (Planned)
+- [ ] Bucket Policy (GetBucketPolicy / PutBucketPolicy / DeleteBucketPolicy)
+- [ ] Bucket Notification (GetBucketNotification / PutBucketNotification)
+- [ ] Object Select (SelectObjectContent)
 
 ---
 

@@ -75,6 +75,21 @@ func (h *Handler) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if object lock should be enabled
+	objectLockEnabled := r.Header.Get("x-amz-bucket-object-lock-enabled")
+	if objectLockEnabled == "true" {
+		err = h.storage.SetBucketObjectLockEnabled(r.Context(), bucket, true)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to enable object lock for bucket")
+			// Delete the bucket since we couldn't enable object lock
+			if delErr := h.storage.DeleteBucket(r.Context(), bucket); delErr != nil {
+				log.Error().Err(delErr).Str("bucket", bucket).Msg("Failed to rollback bucket creation")
+			}
+			WriteErrorWithResource(w, ErrInternalError, "/"+bucket)
+			return
+		}
+	}
+
 	w.Header().Set("Location", "/"+bucket)
 	w.WriteHeader(http.StatusOK)
 }

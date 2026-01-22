@@ -1817,20 +1817,287 @@ func (fs *FileSystem) Close() error {
 	return fs.metadata.Close()
 }
 
+// SetBucketObjectLockEnabled sets whether object lock is enabled for a bucket.
+func (fs *FileSystem) SetBucketObjectLockEnabled(ctx context.Context, bucket string, enabled bool) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.SetBucketObjectLockEnabled(ctx, bucket, enabled)
+}
+
+// GetBucketObjectLockEnabled returns whether object lock is enabled for a bucket.
+func (fs *FileSystem) GetBucketObjectLockEnabled(ctx context.Context, bucket string) (bool, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, ErrBucketNotFound
+	}
+
+	return fs.metadata.GetBucketObjectLockEnabled(ctx, bucket)
+}
+
+// PutObjectLockConfiguration stores the object lock configuration for a bucket.
+func (fs *FileSystem) PutObjectLockConfiguration(ctx context.Context, bucket string, config *ObjectLockConfiguration) error {
+	// Validate input
+	if config == nil {
+		return ErrMalformedXML
+	}
+
+	// Validate default retention mode if rule exists
+	if config.Rule != nil && config.Rule.DefaultRetention != nil {
+		mode := string(config.Rule.DefaultRetention.Mode)
+		if mode != "GOVERNANCE" && mode != "COMPLIANCE" {
+			return ErrMalformedXML
+		}
+	}
+
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	// Check if object lock is enabled for this bucket
+	enabled, err := fs.metadata.GetBucketObjectLockEnabled(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return ErrObjectLockConfigurationNotFound
+	}
+
+	// Serialize configuration to JSON
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+
+	return fs.metadata.PutBucketObjectLockConfig(ctx, bucket, string(configJSON))
+}
+
+// GetObjectLockConfiguration returns the object lock configuration for a bucket.
+func (fs *FileSystem) GetObjectLockConfiguration(ctx context.Context, bucket string) (*ObjectLockConfiguration, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	// Check if object lock is enabled for this bucket
+	enabled, err := fs.metadata.GetBucketObjectLockEnabled(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !enabled {
+		return nil, ErrObjectLockConfigurationNotFound
+	}
+
+	configJSON, err := fs.metadata.GetBucketObjectLockConfig(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+
+	// If no config set but object lock is enabled, return basic enabled config
+	if configJSON == "" {
+		return &ObjectLockConfiguration{
+			ObjectLockEnabled: true,
+		}, nil
+	}
+
+	var config ObjectLockConfiguration
+	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+// PutObjectRetention stores the retention settings for an object.
+func (fs *FileSystem) PutObjectRetention(ctx context.Context, bucket, key string, retention *ObjectRetention) error {
+	// Validate input
+	if retention == nil || retention.RetainUntilDate == nil {
+		return ErrMalformedXML
+	}
+
+	// Validate retention mode
+	mode := string(retention.Mode)
+	if mode != "GOVERNANCE" && mode != "COMPLIANCE" {
+		return ErrMalformedXML
+	}
+
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	// Check if object lock is enabled for this bucket
+	enabled, err := fs.metadata.GetBucketObjectLockEnabled(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return ErrInvalidRequestObjectLock
+	}
+
+	// Check if object exists
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return err
+	}
+	if obj == nil {
+		return ErrObjectNotFound
+	}
+
+	return fs.metadata.PutObjectRetention(ctx, bucket, key, mode, *retention.RetainUntilDate)
+}
+
+// GetObjectRetention returns the retention settings for an object.
+func (fs *FileSystem) GetObjectRetention(ctx context.Context, bucket, key string) (*ObjectRetention, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	// Check if object exists
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	if obj == nil {
+		return nil, ErrObjectNotFound
+	}
+
+	mode, retainUntilDate, err := fs.metadata.GetObjectRetention(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	if retainUntilDate == nil {
+		return nil, ErrNoSuchObjectLockConfiguration
+	}
+
+	return &ObjectRetention{
+		Mode:            ObjectLockRetentionMode(mode),
+		RetainUntilDate: retainUntilDate,
+	}, nil
+}
+
+// PutObjectLegalHold stores the legal hold status for an object.
+func (fs *FileSystem) PutObjectLegalHold(ctx context.Context, bucket, key string, legalHold *ObjectLegalHold) error {
+	// Validate input
+	if legalHold == nil {
+		return ErrMalformedXML
+	}
+
+	// Validate legal hold status
+	status := string(legalHold.Status)
+	if status != "ON" && status != "OFF" {
+		return ErrMalformedXML
+	}
+
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	// Check if object lock is enabled for this bucket
+	enabled, err := fs.metadata.GetBucketObjectLockEnabled(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return ErrInvalidRequestObjectLock
+	}
+
+	// Check if object exists
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return err
+	}
+	if obj == nil {
+		return ErrObjectNotFound
+	}
+
+	return fs.metadata.PutObjectLegalHold(ctx, bucket, key, status)
+}
+
+// GetObjectLegalHold returns the legal hold status for an object.
+func (fs *FileSystem) GetObjectLegalHold(ctx context.Context, bucket, key string) (*ObjectLegalHold, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	// Check if object exists
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	if obj == nil {
+		return nil, ErrObjectNotFound
+	}
+
+	status, err := fs.metadata.GetObjectLegalHold(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	if status == "" {
+		return nil, ErrNoSuchObjectLockConfiguration
+	}
+
+	return &ObjectLegalHold{
+		Status: ObjectLegalHoldStatus(status),
+	}, nil
+}
+
 // Errors
 var (
-	ErrBucketNotFound                = errors.New("bucket not found")
-	ErrBucketAlreadyExists           = errors.New("bucket already exists")
-	ErrBucketNotEmpty                = errors.New("bucket not empty")
-	ErrObjectNotFound                = errors.New("object not found")
-	ErrInvalidBucketName             = errors.New("invalid bucket name")
-	ErrUploadNotFound                = errors.New("upload not found")
-	ErrInvalidPart                   = errors.New("invalid part")
-	ErrInvalidRange                  = errors.New("invalid range")
-	ErrNoSuchTagSet                  = errors.New("no such tag set")
-	ErrNoSuchCORSConfiguration       = errors.New("no such CORS configuration")
-	ErrNoSuchEncryptionConfiguration = errors.New("no such encryption configuration")
-	ErrNoSuchLifecycleConfiguration  = errors.New("no such lifecycle configuration")
+	ErrBucketNotFound                   = errors.New("bucket not found")
+	ErrBucketAlreadyExists              = errors.New("bucket already exists")
+	ErrBucketNotEmpty                   = errors.New("bucket not empty")
+	ErrObjectNotFound                   = errors.New("object not found")
+	ErrInvalidBucketName                = errors.New("invalid bucket name")
+	ErrUploadNotFound                   = errors.New("upload not found")
+	ErrInvalidPart                      = errors.New("invalid part")
+	ErrInvalidRange                     = errors.New("invalid range")
+	ErrNoSuchTagSet                     = errors.New("no such tag set")
+	ErrNoSuchCORSConfiguration          = errors.New("no such CORS configuration")
+	ErrNoSuchEncryptionConfiguration    = errors.New("no such encryption configuration")
+	ErrNoSuchLifecycleConfiguration     = errors.New("no such lifecycle configuration")
+	ErrObjectLockConfigurationNotFound  = errors.New("object lock configuration not found")
+	ErrNoSuchObjectLockConfiguration    = errors.New("no such object lock configuration")
+	ErrInvalidRequestObjectLock         = errors.New("bucket is not object lock enabled")
+	ErrMalformedXML                     = errors.New("malformed XML")
 )
 
 // BucketNotFoundError is an error that includes the bucket name.
