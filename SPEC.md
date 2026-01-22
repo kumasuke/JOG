@@ -159,7 +159,7 @@ jog/
 ├── go.mod
 ├── go.sum
 ├── Makefile
-├── Dockerfile
+├── Dockerfile               # (将来追加予定)
 ├── README.md
 └── SPEC.md
 ```
@@ -406,10 +406,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
-          go-version: '1.22'
+          go-version: '1.25'
       - name: Run unit tests
         run: make test
       - name: Run S3 compatibility tests
