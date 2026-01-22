@@ -20,7 +20,7 @@ Each feature follows TDD (Test-Driven Development):
 - [ ] Create project directory structure
 - [x] Create Makefile
 - [x] Create .gitignore
-- [ ] Create GitHub Actions workflow
+- [x] Create GitHub Actions workflow
 
 ### Test Infrastructure
 - [ ] Write `test/testutil/server.go` - Test server helper
