@@ -269,13 +269,13 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 10. [x] GetBucketCors / PutBucketCors / DeleteBucketCors - CORS support
 
 ### Low Priority (Advanced Features)
+- [x] Lifecycle management (GetBucketLifecycleConfiguration, PutBucketLifecycleConfiguration, DeleteBucketLifecycle)
+- [x] Encryption configuration (GetBucketEncryption, PutBucketEncryption, DeleteBucketEncryption)
 - Object Lock / Retention
-- Lifecycle management
 - Replication
 - Analytics / Metrics
 - Intelligent-Tiering
 - Website hosting
-- Encryption configuration
 
 ---
 
