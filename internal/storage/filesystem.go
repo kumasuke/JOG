@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1133,6 +1134,67 @@ func (fs *FileSystem) DeleteBucketTagging(ctx context.Context, bucket string) er
 	return fs.metadata.DeleteBucketTags(ctx, bucket)
 }
 
+// PutBucketCors stores CORS configuration for a bucket.
+func (fs *FileSystem) PutBucketCors(ctx context.Context, bucket string, cors *CORSConfiguration) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	// Serialize CORS configuration to JSON
+	corsJSON, err := json.Marshal(cors)
+	if err != nil {
+		return err
+	}
+
+	return fs.metadata.PutBucketCors(ctx, bucket, string(corsJSON))
+}
+
+// GetBucketCors returns CORS configuration for a bucket.
+func (fs *FileSystem) GetBucketCors(ctx context.Context, bucket string) (*CORSConfiguration, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	corsJSON, err := fs.metadata.GetBucketCors(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if corsJSON == "" {
+		return nil, ErrNoSuchCORSConfiguration
+	}
+
+	var cors CORSConfiguration
+	if err := json.Unmarshal([]byte(corsJSON), &cors); err != nil {
+		return nil, err
+	}
+
+	return &cors, nil
+}
+
+// DeleteBucketCors deletes CORS configuration for a bucket.
+func (fs *FileSystem) DeleteBucketCors(ctx context.Context, bucket string) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.DeleteBucketCors(ctx, bucket)
+}
+
 // Close releases storage resources.
 func (fs *FileSystem) Close() error {
 	return fs.metadata.Close()
@@ -1140,15 +1202,16 @@ func (fs *FileSystem) Close() error {
 
 // Errors
 var (
-	ErrBucketNotFound      = errors.New("bucket not found")
-	ErrBucketAlreadyExists = errors.New("bucket already exists")
-	ErrBucketNotEmpty      = errors.New("bucket not empty")
-	ErrObjectNotFound      = errors.New("object not found")
-	ErrInvalidBucketName   = errors.New("invalid bucket name")
-	ErrUploadNotFound      = errors.New("upload not found")
-	ErrInvalidPart         = errors.New("invalid part")
-	ErrInvalidRange        = errors.New("invalid range")
-	ErrNoSuchTagSet        = errors.New("no such tag set")
+	ErrBucketNotFound           = errors.New("bucket not found")
+	ErrBucketAlreadyExists      = errors.New("bucket already exists")
+	ErrBucketNotEmpty           = errors.New("bucket not empty")
+	ErrObjectNotFound           = errors.New("object not found")
+	ErrInvalidBucketName        = errors.New("invalid bucket name")
+	ErrUploadNotFound           = errors.New("upload not found")
+	ErrInvalidPart              = errors.New("invalid part")
+	ErrInvalidRange             = errors.New("invalid range")
+	ErrNoSuchTagSet             = errors.New("no such tag set")
+	ErrNoSuchCORSConfiguration  = errors.New("no such CORS configuration")
 )
 
 // BucketNotFoundError is an error that includes the bucket name.

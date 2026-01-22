@@ -137,6 +137,18 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create bucket_tags table: %w", err)
 	}
 
+	// Create bucket_cors table (stores CORS config as JSON)
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bucket_cors (
+			bucket TEXT PRIMARY KEY,
+			cors_config TEXT NOT NULL,
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket_cors table: %w", err)
+	}
+
 	return nil
 }
 
@@ -577,6 +589,36 @@ func (m *Metadata) GetBucketTags(ctx context.Context, bucket string) ([]Tag, err
 // DeleteBucketTags deletes all tags for a bucket.
 func (m *Metadata) DeleteBucketTags(ctx context.Context, bucket string) error {
 	_, err := m.db.ExecContext(ctx, `DELETE FROM bucket_tags WHERE bucket = ?`, bucket)
+	return err
+}
+
+// PutBucketCors stores CORS configuration for a bucket.
+func (m *Metadata) PutBucketCors(ctx context.Context, bucket string, corsConfig string) error {
+	_, err := m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO bucket_cors (bucket, cors_config)
+		VALUES (?, ?)
+	`, bucket, corsConfig)
+	return err
+}
+
+// GetBucketCors returns CORS configuration for a bucket.
+func (m *Metadata) GetBucketCors(ctx context.Context, bucket string) (string, error) {
+	var corsConfig string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT cors_config FROM bucket_cors WHERE bucket = ?
+	`, bucket).Scan(&corsConfig)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return corsConfig, nil
+}
+
+// DeleteBucketCors deletes CORS configuration for a bucket.
+func (m *Metadata) DeleteBucketCors(ctx context.Context, bucket string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM bucket_cors WHERE bucket = ?`, bucket)
 	return err
 }
 

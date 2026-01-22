@@ -71,6 +71,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("tagging") {
 					// GET /{bucket}?tagging - GetBucketTagging
 					r.handler.GetBucketTagging(w, req)
+				} else if query.Has("cors") {
+					// GET /{bucket}?cors - GetBucketCors
+					r.handler.GetBucketCors(w, req)
 				} else {
 					// GET /{bucket} - ListObjectsV2
 					r.handler.ListObjectsV2(w, req)
@@ -94,6 +97,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				if query.Has("tagging") {
 					// PUT /{bucket}?tagging - PutBucketTagging
 					r.handler.PutBucketTagging(w, req)
+				} else if query.Has("cors") {
+					// PUT /{bucket}?cors - PutBucketCors
+					r.handler.PutBucketCors(w, req)
 				} else {
 					// PUT /{bucket} - CreateBucket
 					r.handler.CreateBucket(w, req)
@@ -149,6 +155,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				if query.Has("tagging") {
 					// DELETE /{bucket}?tagging - DeleteBucketTagging
 					r.handler.DeleteBucketTagging(w, req)
+				} else if query.Has("cors") {
+					// DELETE /{bucket}?cors - DeleteBucketCors
+					r.handler.DeleteBucketCors(w, req)
 				} else {
 					// DELETE /{bucket} - DeleteBucket
 					r.handler.DeleteBucket(w, req)
@@ -177,6 +186,14 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				r.handler.HeadObject(w, req)
 			} else {
 				api.WriteError(w, api.ErrInvalidRequest)
+			}
+
+		case http.MethodOptions:
+			// OPTIONS /{bucket} or /{bucket}/{key} - CORS preflight
+			if bucket != "" {
+				r.handler.HandleCorsPreflightRequest(w, req)
+			} else {
+				w.WriteHeader(http.StatusOK)
 			}
 
 		default:
