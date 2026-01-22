@@ -48,6 +48,40 @@ type ListObjectsOutput struct {
 	KeyCount              int32
 }
 
+// MultipartUpload represents a multipart upload in progress.
+type MultipartUpload struct {
+	UploadID    string
+	Bucket      string
+	Key         string
+	ContentType string
+	Metadata    map[string]string
+	Initiated   time.Time
+}
+
+// Part represents an uploaded part.
+type Part struct {
+	PartNumber   int32
+	Size         int64
+	ETag         string
+	LastModified time.Time
+}
+
+// ListPartsInput holds parameters for listing parts.
+type ListPartsInput struct {
+	Bucket           string
+	Key              string
+	UploadID         string
+	MaxParts         int32
+	PartNumberMarker int32
+}
+
+// ListPartsOutput holds the result of listing parts.
+type ListPartsOutput struct {
+	Parts                []Part
+	IsTruncated          bool
+	NextPartNumberMarker int32
+}
+
 // Storage defines the interface for storage backends.
 type Storage interface {
 	// Bucket operations
@@ -63,6 +97,13 @@ type Storage interface {
 	HeadObject(ctx context.Context, bucket, key string) (*Object, error)
 	DeleteObject(ctx context.Context, bucket, key string) error
 	ListObjectsV2(ctx context.Context, input *ListObjectsInput) (*ListObjectsOutput, error)
+
+	// Multipart upload operations
+	CreateMultipartUpload(ctx context.Context, bucket, key, contentType string, metadata map[string]string) (*MultipartUpload, error)
+	UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int32, body io.Reader, size int64) (*Part, error)
+	CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error)
+	AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error
+	ListParts(ctx context.Context, input *ListPartsInput) (*ListPartsOutput, error)
 
 	// Close releases storage resources.
 	Close() error

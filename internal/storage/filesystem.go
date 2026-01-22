@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"crypto/md5"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -419,6 +420,293 @@ func (fs *FileSystem) ListObjectsV2(ctx context.Context, input *ListObjectsInput
 	return output, nil
 }
 
+// CreateMultipartUpload initiates a multipart upload.
+func (fs *FileSystem) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string, metadata map[string]string) (*MultipartUpload, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	// Generate upload ID
+	uploadID := generateUploadID()
+
+	// Set default content type
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	upload := &MultipartUpload{
+		UploadID:    uploadID,
+		Bucket:      bucket,
+		Key:         key,
+		ContentType: contentType,
+		Metadata:    metadata,
+		Initiated:   time.Now(),
+	}
+
+	// Create directory for parts
+	partsDir := filepath.Join(fs.dataDir, ".uploads", uploadID)
+	if err := os.MkdirAll(partsDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create parts directory: %w", err)
+	}
+
+	// Save upload metadata
+	if err := fs.metadata.CreateMultipartUpload(ctx, upload); err != nil {
+		os.RemoveAll(partsDir)
+		return nil, err
+	}
+
+	return upload, nil
+}
+
+// UploadPart uploads a part for a multipart upload.
+func (fs *FileSystem) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int32, body io.Reader, size int64) (*Part, error) {
+	// Check if upload exists
+	upload, err := fs.metadata.GetMultipartUpload(ctx, uploadID)
+	if err != nil {
+		return nil, err
+	}
+	if upload == nil {
+		return nil, ErrUploadNotFound
+	}
+
+	// Verify bucket and key match
+	if upload.Bucket != bucket || upload.Key != key {
+		return nil, ErrUploadNotFound
+	}
+
+	// Create part file
+	partsDir := filepath.Join(fs.dataDir, ".uploads", uploadID)
+	partPath := filepath.Join(partsDir, fmt.Sprintf("%d", partNumber))
+
+	// Write to temp file first
+	tmpFile, err := os.CreateTemp(partsDir, ".tmp-*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+	}()
+
+	// Write data and calculate MD5
+	hash := md5.New()
+	writer := io.MultiWriter(tmpFile, hash)
+
+	written, err := io.Copy(writer, body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write part: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// Calculate ETag
+	etag := hex.EncodeToString(hash.Sum(nil))
+
+	// Rename temp file to part file
+	if err := os.Rename(tmpPath, partPath); err != nil {
+		return nil, fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	part := &Part{
+		PartNumber:   partNumber,
+		Size:         written,
+		ETag:         etag,
+		LastModified: time.Now(),
+	}
+
+	// Save part metadata
+	if err := fs.metadata.PutPart(ctx, uploadID, part); err != nil {
+		os.Remove(partPath)
+		return nil, err
+	}
+
+	return part, nil
+}
+
+// CompleteMultipartUpload completes a multipart upload.
+func (fs *FileSystem) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error) {
+	// Check if upload exists
+	upload, err := fs.metadata.GetMultipartUpload(ctx, uploadID)
+	if err != nil {
+		return nil, err
+	}
+	if upload == nil {
+		return nil, ErrUploadNotFound
+	}
+
+	// Verify bucket and key match
+	if upload.Bucket != bucket || upload.Key != key {
+		return nil, ErrUploadNotFound
+	}
+
+	// Verify all parts exist and ETags match
+	partsDir := filepath.Join(fs.dataDir, ".uploads", uploadID)
+	var totalSize int64
+	var partETags []string
+
+	for _, part := range parts {
+		storedPart, err := fs.metadata.GetPart(ctx, uploadID, part.PartNumber)
+		if err != nil {
+			return nil, err
+		}
+		if storedPart == nil {
+			return nil, ErrInvalidPart
+		}
+
+		// Clean up ETags for comparison (remove quotes if present)
+		expectedETag := strings.Trim(part.ETag, "\"")
+		storedETag := strings.Trim(storedPart.ETag, "\"")
+		if expectedETag != storedETag {
+			return nil, ErrInvalidPart
+		}
+
+		totalSize += storedPart.Size
+		partETags = append(partETags, storedPart.ETag)
+	}
+
+	// Create final object path
+	objectPath := filepath.Join(fs.dataDir, bucket, key)
+	objectDir := filepath.Dir(objectPath)
+	if err := os.MkdirAll(objectDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create object directory: %w", err)
+	}
+
+	// Create temp file for assembled object
+	tmpFile, err := os.CreateTemp(objectDir, ".tmp-*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+	}()
+
+	// Concatenate parts
+	for _, part := range parts {
+		partPath := filepath.Join(partsDir, fmt.Sprintf("%d", part.PartNumber))
+		partFile, err := os.Open(partPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open part file: %w", err)
+		}
+		_, err = io.Copy(tmpFile, partFile)
+		partFile.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to copy part: %w", err)
+		}
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// Rename temp file to final path
+	if err := os.Rename(tmpPath, objectPath); err != nil {
+		return nil, fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	// Calculate multipart ETag (MD5 of concatenated part MD5s + "-" + part count)
+	hash := md5.New()
+	for _, etag := range partETags {
+		data, _ := hex.DecodeString(etag)
+		hash.Write(data)
+	}
+	etag := fmt.Sprintf("%s-%d", hex.EncodeToString(hash.Sum(nil)), len(parts))
+
+	// Create object metadata
+	obj := &Object{
+		Key:          key,
+		Size:         totalSize,
+		LastModified: time.Now(),
+		ETag:         etag,
+		ContentType:  upload.ContentType,
+		Metadata:     upload.Metadata,
+	}
+
+	if err := fs.metadata.PutObject(ctx, bucket, obj); err != nil {
+		os.Remove(objectPath)
+		return nil, err
+	}
+
+	// Clean up upload
+	fs.metadata.DeleteMultipartUpload(ctx, uploadID)
+	os.RemoveAll(partsDir)
+
+	return obj, nil
+}
+
+// AbortMultipartUpload aborts a multipart upload.
+func (fs *FileSystem) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
+	// Check if upload exists
+	upload, err := fs.metadata.GetMultipartUpload(ctx, uploadID)
+	if err != nil {
+		return err
+	}
+	if upload == nil {
+		return ErrUploadNotFound
+	}
+
+	// Verify bucket and key match
+	if upload.Bucket != bucket || upload.Key != key {
+		return ErrUploadNotFound
+	}
+
+	// Delete parts directory
+	partsDir := filepath.Join(fs.dataDir, ".uploads", uploadID)
+	os.RemoveAll(partsDir)
+
+	// Delete upload metadata (parts will be deleted by cascade)
+	return fs.metadata.DeleteMultipartUpload(ctx, uploadID)
+}
+
+// ListParts lists parts for a multipart upload.
+func (fs *FileSystem) ListParts(ctx context.Context, input *ListPartsInput) (*ListPartsOutput, error) {
+	// Check if upload exists
+	upload, err := fs.metadata.GetMultipartUpload(ctx, input.UploadID)
+	if err != nil {
+		return nil, err
+	}
+	if upload == nil {
+		return nil, ErrUploadNotFound
+	}
+
+	// Verify bucket and key match
+	if upload.Bucket != input.Bucket || upload.Key != input.Key {
+		return nil, ErrUploadNotFound
+	}
+
+	parts, isTruncated, nextMarker, err := fs.metadata.ListParts(ctx, input.UploadID, input.MaxParts, input.PartNumberMarker)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ListPartsOutput{
+		Parts:                parts,
+		IsTruncated:          isTruncated,
+		NextPartNumberMarker: nextMarker,
+	}, nil
+}
+
+// generateUploadID generates a unique upload ID.
+func generateUploadID() string {
+	return fmt.Sprintf("%d-%s", time.Now().UnixNano(), randomHex(16))
+}
+
+// randomHex generates a random hex string of given length.
+func randomHex(length int) string {
+	b := make([]byte, length/2)
+	io.ReadFull(rand.Reader, b)
+	return hex.EncodeToString(b)
+}
+
 // Close releases storage resources.
 func (fs *FileSystem) Close() error {
 	return fs.metadata.Close()
@@ -431,4 +719,6 @@ var (
 	ErrBucketNotEmpty      = errors.New("bucket not empty")
 	ErrObjectNotFound      = errors.New("object not found")
 	ErrInvalidBucketName   = errors.New("invalid bucket name")
+	ErrUploadNotFound      = errors.New("upload not found")
+	ErrInvalidPart         = errors.New("invalid part")
 )
