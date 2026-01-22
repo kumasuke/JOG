@@ -211,7 +211,7 @@ func TestCorsPreflightRequest(t *testing.T) {
 
 	// Send OPTIONS preflight request
 	httpClient := &http.Client{}
-	req, err := http.NewRequest("OPTIONS", ts.URL()+"/"+bucketName, nil)
+	req, err := http.NewRequest("OPTIONS", ts.Endpoint+"/"+bucketName, nil)
 	require.NoError(t, err)
 
 	req.Header.Set("Origin", "http://example.com")
@@ -255,7 +255,7 @@ func TestCorsPreflightRequestNoMatch(t *testing.T) {
 
 	// Send OPTIONS preflight request with non-matching origin
 	httpClient := &http.Client{}
-	req, err := http.NewRequest("OPTIONS", ts.URL()+"/"+bucketName, nil)
+	req, err := http.NewRequest("OPTIONS", ts.Endpoint+"/"+bucketName, nil)
 	require.NoError(t, err)
 
 	req.Header.Set("Origin", "http://other-domain.com")

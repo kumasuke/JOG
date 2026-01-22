@@ -152,6 +152,12 @@ var (
 		Message:    "The TagSet does not exist.",
 		HTTPStatus: http.StatusNotFound,
 	}
+
+	ErrNoSuchCORSConfiguration = &S3Error{
+		Code:       "NoSuchCORSConfiguration",
+		Message:    "The CORS configuration does not exist.",
+		HTTPStatus: http.StatusNotFound,
+	}
 )
 
 // WriteError writes an S3 error response.

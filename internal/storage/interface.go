@@ -117,6 +117,20 @@ type Tag struct {
 	Value string
 }
 
+// CORSRule represents a CORS rule.
+type CORSRule struct {
+	AllowedOrigins []string
+	AllowedMethods []string
+	AllowedHeaders []string
+	ExposeHeaders  []string
+	MaxAgeSeconds  int32
+}
+
+// CORSConfiguration holds CORS rules for a bucket.
+type CORSConfiguration struct {
+	Rules []CORSRule
+}
+
 // Storage defines the interface for storage backends.
 type Storage interface {
 	// Bucket operations
@@ -151,6 +165,11 @@ type Storage interface {
 	PutBucketTagging(ctx context.Context, bucket string, tags []Tag) error
 	GetBucketTagging(ctx context.Context, bucket string) ([]Tag, error)
 	DeleteBucketTagging(ctx context.Context, bucket string) error
+
+	// CORS operations
+	PutBucketCors(ctx context.Context, bucket string, cors *CORSConfiguration) error
+	GetBucketCors(ctx context.Context, bucket string) (*CORSConfiguration, error)
+	DeleteBucketCors(ctx context.Context, bucket string) error
 
 	// Close releases storage resources.
 	Close() error
