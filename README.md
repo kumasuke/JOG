@@ -89,6 +89,8 @@ make lint
 - [SPEC.md](SPEC.md) - Detailed specification and architecture
 - [CLAUDE.md](CLAUDE.md) - Development guidelines for Claude Code
 - [TODO.md](TODO.md) - Implementation task list (TDD)
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) - Deployment guide and Litestream integration
+- [docs/S3_API_CHECKLIST.md](docs/S3_API_CHECKLIST.md) - S3 API implementation status
 
 ## License
 
