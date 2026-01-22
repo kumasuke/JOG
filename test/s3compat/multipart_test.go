@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -987,5 +988,351 @@ func TestCompleteMultipartUploadPartOutOfOrder(t *testing.T) {
 		Bucket:   aws.String(bucketName),
 		Key:      aws.String(key),
 		UploadId: createResult.UploadId,
+	})
+}
+
+func TestUploadPartCopy(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	// Create source object
+	srcKey := testutil.RandomObjectKey()
+	srcContent := bytes.Repeat([]byte("a"), 10*1024*1024) // 10MB
+	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(srcKey),
+		Body:   bytes.NewReader(srcContent),
+	})
+	require.NoError(t, err)
+
+	// Create multipart upload for destination
+	destKey := testutil.RandomObjectKey()
+	createResult, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(destKey),
+	})
+	require.NoError(t, err)
+
+	// Copy part from source object
+	copyResult, err := client.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(destKey),
+		UploadId:   createResult.UploadId,
+		PartNumber: aws.Int32(1),
+		CopySource: aws.String(bucketName + "/" + srcKey),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, copyResult.CopyPartResult)
+	require.NotNil(t, copyResult.CopyPartResult.ETag)
+	assert.NotEmpty(t, *copyResult.CopyPartResult.ETag)
+	require.NotNil(t, copyResult.CopyPartResult.LastModified)
+
+	// Complete multipart upload
+	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(destKey),
+		UploadId: createResult.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: []types.CompletedPart{
+				{
+					PartNumber: aws.Int32(1),
+					ETag:       copyResult.CopyPartResult.ETag,
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// Verify copied content
+	getResult, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(destKey),
+	})
+	require.NoError(t, err)
+	defer getResult.Body.Close()
+
+	copiedContent, err := io.ReadAll(getResult.Body)
+	require.NoError(t, err)
+	assert.Equal(t, srcContent, copiedContent)
+}
+
+func TestUploadPartCopyWithRange(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	// Create source object with identifiable content
+	srcKey := testutil.RandomObjectKey()
+	srcContent := bytes.Repeat([]byte("a"), 5*1024*1024)   // 5MB of 'a'
+	srcContent = append(srcContent, bytes.Repeat([]byte("b"), 5*1024*1024)...) // 5MB of 'b'
+	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(srcKey),
+		Body:   bytes.NewReader(srcContent),
+	})
+	require.NoError(t, err)
+
+	// Create multipart upload
+	destKey := testutil.RandomObjectKey()
+	createResult, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(destKey),
+	})
+	require.NoError(t, err)
+
+	// Copy only the second part (5MB-10MB) using range
+	copyResult, err := client.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
+		Bucket:          aws.String(bucketName),
+		Key:             aws.String(destKey),
+		UploadId:        createResult.UploadId,
+		PartNumber:      aws.Int32(1),
+		CopySource:      aws.String(bucketName + "/" + srcKey),
+		CopySourceRange: aws.String("bytes=5242880-10485759"), // 5MB-10MB
+	})
+	require.NoError(t, err)
+	require.NotNil(t, copyResult.CopyPartResult)
+	require.NotNil(t, copyResult.CopyPartResult.ETag)
+
+	// Complete multipart upload
+	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(destKey),
+		UploadId: createResult.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: []types.CompletedPart{
+				{
+					PartNumber: aws.Int32(1),
+					ETag:       copyResult.CopyPartResult.ETag,
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// Verify copied content is only the 'b' portion
+	getResult, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(destKey),
+	})
+	require.NoError(t, err)
+	defer getResult.Body.Close()
+
+	copiedContent, err := io.ReadAll(getResult.Body)
+	require.NoError(t, err)
+	expectedContent := bytes.Repeat([]byte("b"), 5*1024*1024)
+	assert.Equal(t, expectedContent, copiedContent)
+}
+
+func TestUploadPartCopySourceNotFound(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	// Create multipart upload
+	destKey := testutil.RandomObjectKey()
+	createResult, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(destKey),
+	})
+	require.NoError(t, err)
+
+	// Try to copy from non-existent source
+	_, err = client.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(destKey),
+		UploadId:   createResult.UploadId,
+		PartNumber: aws.Int32(1),
+		CopySource: aws.String(bucketName + "/non-existent-key"),
+	})
+	require.Error(t, err)
+
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "NoSuchKey", apiErr.ErrorCode())
+	}
+
+	// Cleanup
+	_, _ = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(destKey),
+		UploadId: createResult.UploadId,
+	})
+}
+
+func TestListMultipartUploads(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	// Create multiple multipart uploads
+	key1 := testutil.RandomObjectKey()
+	upload1, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key1),
+	})
+	require.NoError(t, err)
+
+	key2 := testutil.RandomObjectKey()
+	upload2, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key2),
+	})
+	require.NoError(t, err)
+
+	// List multipart uploads
+	listResult, err := client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+		Bucket: aws.String(bucketName),
+	})
+	require.NoError(t, err)
+
+	require.Len(t, listResult.Uploads, 2)
+
+	// Verify uploads are listed
+	uploadIDs := map[string]bool{
+		*upload1.UploadId: false,
+		*upload2.UploadId: false,
+	}
+	for _, upload := range listResult.Uploads {
+		require.NotNil(t, upload.Key)
+		require.NotNil(t, upload.UploadId)
+		require.NotNil(t, upload.Initiated)
+
+		if _, ok := uploadIDs[*upload.UploadId]; ok {
+			uploadIDs[*upload.UploadId] = true
+		}
+	}
+
+	// Verify both upload IDs were found
+	for uploadID, found := range uploadIDs {
+		assert.True(t, found, "Upload ID %s not found in list", uploadID)
+	}
+
+	// Cleanup
+	_, _ = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(key1),
+		UploadId: upload1.UploadId,
+	})
+	_, _ = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(key2),
+		UploadId: upload2.UploadId,
+	})
+}
+
+func TestListMultipartUploadsEmpty(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	// List multipart uploads on empty bucket
+	listResult, err := client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+		Bucket: aws.String(bucketName),
+	})
+	require.NoError(t, err)
+
+	assert.Empty(t, listResult.Uploads)
+	require.NotNil(t, listResult.IsTruncated)
+	assert.False(t, *listResult.IsTruncated)
+}
+
+func TestListMultipartUploadsPrefix(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	// Create uploads with different prefixes
+	upload1, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String("documents/file1.txt"),
+	})
+	require.NoError(t, err)
+
+	upload2, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String("documents/file2.txt"),
+	})
+	require.NoError(t, err)
+
+	upload3, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String("images/photo.jpg"),
+	})
+	require.NoError(t, err)
+
+	// List with prefix "documents/"
+	listResult, err := client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+		Bucket: aws.String(bucketName),
+		Prefix: aws.String("documents/"),
+	})
+	require.NoError(t, err)
+
+	require.Len(t, listResult.Uploads, 2)
+	for _, upload := range listResult.Uploads {
+		assert.True(t, strings.HasPrefix(*upload.Key, "documents/"))
+	}
+
+	// List with prefix "images/"
+	listResult2, err := client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+		Bucket: aws.String(bucketName),
+		Prefix: aws.String("images/"),
+	})
+	require.NoError(t, err)
+
+	require.Len(t, listResult2.Uploads, 1)
+	assert.Equal(t, "images/photo.jpg", *listResult2.Uploads[0].Key)
+
+	// Cleanup
+	_, _ = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String("documents/file1.txt"),
+		UploadId: upload1.UploadId,
+	})
+	_, _ = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String("documents/file2.txt"),
+		UploadId: upload2.UploadId,
+	})
+	_, _ = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String("images/photo.jpg"),
+		UploadId: upload3.UploadId,
 	})
 }
