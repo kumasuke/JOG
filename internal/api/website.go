@@ -143,30 +143,30 @@ func (h *Handler) DeleteBucketWebsite(w http.ResponseWriter, r *http.Request) {
 }
 
 // xmlToStorageWebsiteConfig converts XML website config to storage type.
-func xmlToStorageWebsiteConfig(xml *WebsiteConfigurationXML) *storage.WebsiteConfiguration {
+func xmlToStorageWebsiteConfig(xmlConfig *WebsiteConfigurationXML) *storage.WebsiteConfiguration {
 	config := &storage.WebsiteConfiguration{}
 
-	if xml.IndexDocument != nil {
+	if xmlConfig.IndexDocument != nil {
 		config.IndexDocument = &storage.IndexDocument{
-			Suffix: xml.IndexDocument.Suffix,
+			Suffix: xmlConfig.IndexDocument.Suffix,
 		}
 	}
 
-	if xml.ErrorDocument != nil {
+	if xmlConfig.ErrorDocument != nil {
 		config.ErrorDocument = &storage.ErrorDocument{
-			Key: xml.ErrorDocument.Key,
+			Key: xmlConfig.ErrorDocument.Key,
 		}
 	}
 
-	if xml.RedirectAllRequestsTo != nil {
+	if xmlConfig.RedirectAllRequestsTo != nil {
 		config.RedirectAllRequestsTo = &storage.RedirectAllRequestsTo{
-			HostName: xml.RedirectAllRequestsTo.HostName,
-			Protocol: xml.RedirectAllRequestsTo.Protocol,
+			HostName: xmlConfig.RedirectAllRequestsTo.HostName,
+			Protocol: xmlConfig.RedirectAllRequestsTo.Protocol,
 		}
 	}
 
-	if xml.RoutingRules != nil {
-		for _, rule := range xml.RoutingRules.RoutingRule {
+	if xmlConfig.RoutingRules != nil {
+		for _, rule := range xmlConfig.RoutingRules.RoutingRule {
 			storageRule := storage.RoutingRule{}
 
 			if rule.Condition != nil {
