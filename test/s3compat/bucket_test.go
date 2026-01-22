@@ -235,3 +235,46 @@ func TestDeleteBucketNotFound(t *testing.T) {
 	})
 	require.Error(t, err)
 }
+
+func TestGetBucketLocation(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+
+	// Create bucket
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String(bucketName),
+	})
+	require.NoError(t, err)
+
+	// Get bucket location
+	result, err := client.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
+		Bucket: aws.String(bucketName),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// S3 returns empty LocationConstraint for us-east-1
+	// or returns the actual region for other regions
+	// JOG defaults to us-east-1, so LocationConstraint should be empty or ""
+	assert.True(t, result.LocationConstraint == "",
+		"expected empty location constraint for us-east-1, got: %s", result.LocationConstraint)
+}
+
+func TestGetBucketLocationNotFound(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	// Get location for non-existent bucket
+	_, err := client.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
+		Bucket: aws.String("non-existent-bucket"),
+	})
+	require.Error(t, err)
+}
