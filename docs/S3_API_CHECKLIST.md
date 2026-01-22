@@ -6,7 +6,7 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 - [x] Implemented
 - [ ] Not implemented
 
-**Last updated:** 2025-01-22
+**Last updated:** 2026-01-22
 
 ---
 
@@ -16,10 +16,10 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 |----------|-------------|-------|----------|
 | Bucket - Basic | 4 | 4 | 100% |
 | Bucket - Configuration | 0 | 50+ | 0% |
-| Object - Basic | 5 | 9 | 56% |
+| Object - Basic | 7 | 9 | 78% |
 | Object - Advanced | 0 | 15+ | 0% |
-| Multipart Upload | 5 | 7 | 71% |
-| **Total (Core APIs)** | **14** | **~20** | **70%** |
+| Multipart Upload | 7 | 7 | 100% |
+| **Total (Core APIs)** | **18** | **~20** | **90%** |
 
 ---
 
@@ -181,8 +181,8 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 | GetObject | [x] | Download an object |
 | HeadObject | [x] | Get object metadata |
 | DeleteObject | [x] | Delete an object |
-| DeleteObjects | [ ] | Delete multiple objects (batch) |
-| CopyObject | [ ] | Copy an object |
+| DeleteObjects | [x] | Delete multiple objects (batch) |
+| CopyObject | [x] | Copy an object |
 | ListObjectsV2 | [x] | List objects in bucket |
 | ListObjects | [ ] | List objects (legacy v1) |
 
@@ -225,10 +225,10 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 |-----------|--------|-------------|
 | CreateMultipartUpload | [x] | Initiate multipart upload |
 | UploadPart | [x] | Upload a part |
-| UploadPartCopy | [ ] | Copy a part from existing object |
+| UploadPartCopy | [x] | Copy a part from existing object |
 | CompleteMultipartUpload | [x] | Complete multipart upload |
 | AbortMultipartUpload | [x] | Abort multipart upload |
-| ListMultipartUploads | [ ] | List in-progress uploads |
+| ListMultipartUploads | [x] | List in-progress uploads |
 | ListParts | [x] | List uploaded parts |
 
 ---
@@ -255,10 +255,10 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 ## Implementation Priority
 
 ### High Priority (Core S3 Compatibility)
-1. [ ] DeleteObjects - Batch delete (commonly used)
-2. [ ] CopyObject - Server-side copy (commonly used)
-3. [ ] ListMultipartUploads - List in-progress uploads
-4. [ ] UploadPartCopy - Copy part from existing object
+1. [x] DeleteObjects - Batch delete (commonly used)
+2. [x] CopyObject - Server-side copy (commonly used)
+3. [x] ListMultipartUploads - List in-progress uploads
+4. [x] UploadPartCopy - Copy part from existing object
 
 ### Medium Priority (Extended Features)
 5. [ ] GetBucketLocation - Return bucket region

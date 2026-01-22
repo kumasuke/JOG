@@ -62,8 +62,13 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				// GET / - ListBuckets
 				r.handler.ListBuckets(w, req)
 			} else if key == "" {
-				// GET /{bucket} - ListObjectsV2
-				r.handler.ListObjectsV2(w, req)
+				if query.Has("uploads") {
+					// GET /{bucket}?uploads - ListMultipartUploads
+					r.handler.ListMultipartUploads(w, req)
+				} else {
+					// GET /{bucket} - ListObjectsV2
+					r.handler.ListObjectsV2(w, req)
+				}
 			} else if query.Has("uploadId") {
 				// GET /{bucket}/{key}?uploadId={uploadId} - ListParts
 				r.handler.ListParts(w, req)
@@ -78,8 +83,17 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				r.handler.CreateBucket(w, req)
 			} else if bucket != "" && key != "" {
 				if query.Has("partNumber") && query.Has("uploadId") {
-					// PUT /{bucket}/{key}?partNumber={partNumber}&uploadId={uploadId} - UploadPart
-					r.handler.UploadPart(w, req)
+					// Check if this is UploadPartCopy (has x-amz-copy-source header)
+					if req.Header.Get("x-amz-copy-source") != "" {
+						// PUT /{bucket}/{key}?partNumber={partNumber}&uploadId={uploadId} with x-amz-copy-source - UploadPartCopy
+						r.handler.UploadPartCopy(w, req)
+					} else {
+						// PUT /{bucket}/{key}?partNumber={partNumber}&uploadId={uploadId} - UploadPart
+						r.handler.UploadPart(w, req)
+					}
+				} else if req.Header.Get("x-amz-copy-source") != "" {
+					// PUT /{bucket}/{key} with x-amz-copy-source - CopyObject
+					r.handler.CopyObject(w, req)
 				} else {
 					// PUT /{bucket}/{key} - PutObject
 					r.handler.PutObject(w, req)
@@ -96,6 +110,13 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("uploadId") {
 					// POST /{bucket}/{key}?uploadId={uploadId} - CompleteMultipartUpload
 					r.handler.CompleteMultipartUpload(w, req)
+				} else {
+					api.WriteError(w, api.ErrInvalidRequest)
+				}
+			} else if bucket != "" && key == "" {
+				if query.Has("delete") {
+					// POST /{bucket}?delete - DeleteObjects
+					r.handler.DeleteObjects(w, req)
 				} else {
 					api.WriteError(w, api.ErrInvalidRequest)
 				}
