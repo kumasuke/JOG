@@ -1012,6 +1012,127 @@ func randomHex(length int) string {
 	return hex.EncodeToString(b)
 }
 
+// PutObjectTagging stores tags for an object.
+func (fs *FileSystem) PutObjectTagging(ctx context.Context, bucket, key string, tags []Tag) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	// Check if object exists
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return err
+	}
+	if obj == nil {
+		return ErrObjectNotFound
+	}
+
+	return fs.metadata.PutObjectTags(ctx, bucket, key, tags)
+}
+
+// GetObjectTagging returns tags for an object.
+func (fs *FileSystem) GetObjectTagging(ctx context.Context, bucket, key string) ([]Tag, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	// Check if object exists
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	if obj == nil {
+		return nil, ErrObjectNotFound
+	}
+
+	return fs.metadata.GetObjectTags(ctx, bucket, key)
+}
+
+// DeleteObjectTagging deletes all tags for an object.
+func (fs *FileSystem) DeleteObjectTagging(ctx context.Context, bucket, key string) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	// Check if object exists
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return err
+	}
+	if obj == nil {
+		return ErrObjectNotFound
+	}
+
+	return fs.metadata.DeleteObjectTags(ctx, bucket, key)
+}
+
+// PutBucketTagging stores tags for a bucket.
+func (fs *FileSystem) PutBucketTagging(ctx context.Context, bucket string, tags []Tag) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.PutBucketTags(ctx, bucket, tags)
+}
+
+// GetBucketTagging returns tags for a bucket.
+func (fs *FileSystem) GetBucketTagging(ctx context.Context, bucket string) ([]Tag, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	tags, err := fs.metadata.GetBucketTags(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+
+	// S3 returns NoSuchTagSet error when no tags are set
+	if len(tags) == 0 {
+		return nil, ErrNoSuchTagSet
+	}
+
+	return tags, nil
+}
+
+// DeleteBucketTagging deletes all tags for a bucket.
+func (fs *FileSystem) DeleteBucketTagging(ctx context.Context, bucket string) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.DeleteBucketTags(ctx, bucket)
+}
+
 // Close releases storage resources.
 func (fs *FileSystem) Close() error {
 	return fs.metadata.Close()
@@ -1027,6 +1148,7 @@ var (
 	ErrUploadNotFound      = errors.New("upload not found")
 	ErrInvalidPart         = errors.New("invalid part")
 	ErrInvalidRange        = errors.New("invalid range")
+	ErrNoSuchTagSet        = errors.New("no such tag set")
 )
 
 // BucketNotFoundError is an error that includes the bucket name.

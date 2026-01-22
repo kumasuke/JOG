@@ -68,6 +68,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("location") {
 					// GET /{bucket}?location - GetBucketLocation
 					r.handler.GetBucketLocation(w, req)
+				} else if query.Has("tagging") {
+					// GET /{bucket}?tagging - GetBucketTagging
+					r.handler.GetBucketTagging(w, req)
 				} else {
 					// GET /{bucket} - ListObjectsV2
 					r.handler.ListObjectsV2(w, req)
@@ -78,6 +81,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 			} else if query.Has("attributes") {
 				// GET /{bucket}/{key}?attributes - GetObjectAttributes
 				r.handler.GetObjectAttributes(w, req)
+			} else if query.Has("tagging") {
+				// GET /{bucket}/{key}?tagging - GetObjectTagging
+				r.handler.GetObjectTagging(w, req)
 			} else {
 				// GET /{bucket}/{key} - GetObject
 				r.handler.GetObject(w, req)
@@ -85,8 +91,13 @@ func (r *Router) routeRequest() http.HandlerFunc {
 
 		case http.MethodPut:
 			if bucket != "" && key == "" {
-				// PUT /{bucket} - CreateBucket
-				r.handler.CreateBucket(w, req)
+				if query.Has("tagging") {
+					// PUT /{bucket}?tagging - PutBucketTagging
+					r.handler.PutBucketTagging(w, req)
+				} else {
+					// PUT /{bucket} - CreateBucket
+					r.handler.CreateBucket(w, req)
+				}
 			} else if bucket != "" && key != "" {
 				if query.Has("partNumber") && query.Has("uploadId") {
 					// Check if this is UploadPartCopy (has x-amz-copy-source header)
@@ -97,6 +108,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 						// PUT /{bucket}/{key}?partNumber={partNumber}&uploadId={uploadId} - UploadPart
 						r.handler.UploadPart(w, req)
 					}
+				} else if query.Has("tagging") {
+					// PUT /{bucket}/{key}?tagging - PutObjectTagging
+					r.handler.PutObjectTagging(w, req)
 				} else if req.Header.Get("x-amz-copy-source") != "" {
 					// PUT /{bucket}/{key} with x-amz-copy-source - CopyObject
 					r.handler.CopyObject(w, req)
@@ -132,12 +146,20 @@ func (r *Router) routeRequest() http.HandlerFunc {
 
 		case http.MethodDelete:
 			if bucket != "" && key == "" {
-				// DELETE /{bucket} - DeleteBucket
-				r.handler.DeleteBucket(w, req)
+				if query.Has("tagging") {
+					// DELETE /{bucket}?tagging - DeleteBucketTagging
+					r.handler.DeleteBucketTagging(w, req)
+				} else {
+					// DELETE /{bucket} - DeleteBucket
+					r.handler.DeleteBucket(w, req)
+				}
 			} else if bucket != "" && key != "" {
 				if query.Has("uploadId") {
 					// DELETE /{bucket}/{key}?uploadId={uploadId} - AbortMultipartUpload
 					r.handler.AbortMultipartUpload(w, req)
+				} else if query.Has("tagging") {
+					// DELETE /{bucket}/{key}?tagging - DeleteObjectTagging
+					r.handler.DeleteObjectTagging(w, req)
 				} else {
 					// DELETE /{bucket}/{key} - DeleteObject
 					r.handler.DeleteObject(w, req)
