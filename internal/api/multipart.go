@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/xml"
 	"errors"
 	"net/http"
@@ -103,11 +104,16 @@ func (h *Handler) CreateMultipartUpload(w http.ResponseWriter, r *http.Request) 
 		UploadId: upload.UploadID,
 	}
 
+	var buf bytes.Buffer
+	if err := xml.NewEncoder(&buf).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode CreateMultipartUpload response")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
-	if err := xml.NewEncoder(w).Encode(result); err != nil {
-		log.Error().Err(err).Msg("Failed to encode CreateMultipartUpload response")
-	}
+	_, _ = w.Write(buf.Bytes())
 }
 
 // UploadPart handles PUT /{bucket}/{key}?partNumber={partNumber}&uploadId={uploadId} - UploadPart.
@@ -165,6 +171,12 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Validate parts list is not empty
+	if len(req.Parts) == 0 {
+		WriteError(w, ErrMalformedXML)
+		return
+	}
+
 	// Validate parts are in order
 	for i := 1; i < len(req.Parts); i++ {
 		if req.Parts[i].PartNumber <= req.Parts[i-1].PartNumber {
@@ -214,11 +226,16 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 		ETag:     "\"" + obj.ETag + "\"",
 	}
 
+	var buf bytes.Buffer
+	if err := xml.NewEncoder(&buf).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode CompleteMultipartUpload response")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
-	if err := xml.NewEncoder(w).Encode(result); err != nil {
-		log.Error().Err(err).Msg("Failed to encode CompleteMultipartUpload response")
-	}
+	_, _ = w.Write(buf.Bytes())
 }
 
 // AbortMultipartUpload handles DELETE /{bucket}/{key}?uploadId={uploadId} - AbortMultipartUpload.
@@ -318,9 +335,14 @@ func (h *Handler) ListParts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var buf bytes.Buffer
+	if err := xml.NewEncoder(&buf).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode ListParts response")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
-	if err := xml.NewEncoder(w).Encode(result); err != nil {
-		log.Error().Err(err).Msg("Failed to encode ListParts response")
-	}
+	_, _ = w.Write(buf.Bytes())
 }
