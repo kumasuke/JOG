@@ -1751,6 +1751,67 @@ func (fs *FileSystem) DeleteBucketEncryption(ctx context.Context, bucket string)
 	return fs.metadata.DeleteBucketEncryption(ctx, bucket)
 }
 
+// PutBucketLifecycleConfiguration stores the lifecycle configuration for a bucket.
+func (fs *FileSystem) PutBucketLifecycleConfiguration(ctx context.Context, bucket string, config *LifecycleConfiguration) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	// Serialize lifecycle configuration to JSON
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+
+	return fs.metadata.PutBucketLifecycle(ctx, bucket, string(configJSON))
+}
+
+// GetBucketLifecycleConfiguration returns the lifecycle configuration for a bucket.
+func (fs *FileSystem) GetBucketLifecycleConfiguration(ctx context.Context, bucket string) (*LifecycleConfiguration, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	configJSON, err := fs.metadata.GetBucketLifecycle(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if configJSON == "" {
+		return nil, ErrNoSuchLifecycleConfiguration
+	}
+
+	var config LifecycleConfiguration
+	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+// DeleteBucketLifecycle deletes the lifecycle configuration for a bucket.
+func (fs *FileSystem) DeleteBucketLifecycle(ctx context.Context, bucket string) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.DeleteBucketLifecycle(ctx, bucket)
+}
+
 // Close releases storage resources.
 func (fs *FileSystem) Close() error {
 	return fs.metadata.Close()
@@ -1769,6 +1830,7 @@ var (
 	ErrNoSuchTagSet                  = errors.New("no such tag set")
 	ErrNoSuchCORSConfiguration       = errors.New("no such CORS configuration")
 	ErrNoSuchEncryptionConfiguration = errors.New("no such encryption configuration")
+	ErrNoSuchLifecycleConfiguration  = errors.New("no such lifecycle configuration")
 )
 
 // BucketNotFoundError is an error that includes the bucket name.

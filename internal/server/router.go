@@ -86,6 +86,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("encryption") {
 					// GET /{bucket}?encryption - GetBucketEncryption
 					r.handler.GetBucketEncryption(w, req)
+				} else if query.Has("lifecycle") {
+					// GET /{bucket}?lifecycle - GetBucketLifecycleConfiguration
+					r.handler.GetBucketLifecycleConfiguration(w, req)
 				} else {
 					// GET /{bucket} - ListObjectsV2
 					r.handler.ListObjectsV2(w, req)
@@ -124,6 +127,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("encryption") {
 					// PUT /{bucket}?encryption - PutBucketEncryption
 					r.handler.PutBucketEncryption(w, req)
+				} else if query.Has("lifecycle") {
+					// PUT /{bucket}?lifecycle - PutBucketLifecycleConfiguration
+					r.handler.PutBucketLifecycleConfiguration(w, req)
 				} else {
 					// PUT /{bucket} - CreateBucket
 					r.handler.CreateBucket(w, req)
@@ -188,6 +194,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("encryption") {
 					// DELETE /{bucket}?encryption - DeleteBucketEncryption
 					r.handler.DeleteBucketEncryption(w, req)
+				} else if query.Has("lifecycle") {
+					// DELETE /{bucket}?lifecycle - DeleteBucketLifecycle
+					r.handler.DeleteBucketLifecycle(w, req)
 				} else {
 					// DELETE /{bucket} - DeleteBucket
 					r.handler.DeleteBucket(w, req)

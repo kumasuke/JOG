@@ -252,6 +252,63 @@ type ServerSideEncryptionConfiguration struct {
 	Rules []ServerSideEncryptionRule
 }
 
+// LifecycleRuleFilter represents a lifecycle rule filter.
+type LifecycleRuleFilter struct {
+	Prefix                string
+	Tag                   *Tag
+	ObjectSizeGreaterThan *int64
+	ObjectSizeLessThan    *int64
+}
+
+// LifecycleExpiration represents expiration settings.
+type LifecycleExpiration struct {
+	Days                      *int32
+	Date                      *string
+	ExpiredObjectDeleteMarker *bool
+}
+
+// LifecycleTransition represents a transition to a different storage class.
+type LifecycleTransition struct {
+	Days         *int32
+	Date         *string
+	StorageClass string
+}
+
+// NoncurrentVersionExpiration represents expiration for noncurrent versions.
+type NoncurrentVersionExpiration struct {
+	NoncurrentDays          *int32
+	NewerNoncurrentVersions *int32
+}
+
+// NoncurrentVersionTransition represents transition for noncurrent versions.
+type NoncurrentVersionTransition struct {
+	NoncurrentDays          *int32
+	StorageClass            string
+	NewerNoncurrentVersions *int32
+}
+
+// AbortIncompleteMultipartUpload represents settings for aborting incomplete multipart uploads.
+type AbortIncompleteMultipartUpload struct {
+	DaysAfterInitiation *int32
+}
+
+// LifecycleRule represents a lifecycle rule.
+type LifecycleRule struct {
+	ID                             string
+	Status                         string
+	Filter                         *LifecycleRuleFilter
+	Expiration                     *LifecycleExpiration
+	Transitions                    []LifecycleTransition
+	NoncurrentVersionExpiration    *NoncurrentVersionExpiration
+	NoncurrentVersionTransitions   []NoncurrentVersionTransition
+	AbortIncompleteMultipartUpload *AbortIncompleteMultipartUpload
+}
+
+// LifecycleConfiguration represents a bucket lifecycle configuration.
+type LifecycleConfiguration struct {
+	Rules []LifecycleRule
+}
+
 // Storage defines the interface for storage backends.
 type Storage interface {
 	// Bucket operations
@@ -310,6 +367,11 @@ type Storage interface {
 	PutBucketEncryption(ctx context.Context, bucket string, config *ServerSideEncryptionConfiguration) error
 	GetBucketEncryption(ctx context.Context, bucket string) (*ServerSideEncryptionConfiguration, error)
 	DeleteBucketEncryption(ctx context.Context, bucket string) error
+
+	// Lifecycle operations
+	PutBucketLifecycleConfiguration(ctx context.Context, bucket string, config *LifecycleConfiguration) error
+	GetBucketLifecycleConfiguration(ctx context.Context, bucket string) (*LifecycleConfiguration, error)
+	DeleteBucketLifecycle(ctx context.Context, bucket string) error
 
 	// Close releases storage resources.
 	Close() error
