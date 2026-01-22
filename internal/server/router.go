@@ -89,6 +89,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("lifecycle") {
 					// GET /{bucket}?lifecycle - GetBucketLifecycleConfiguration
 					r.handler.GetBucketLifecycleConfiguration(w, req)
+				} else if query.Has("object-lock") {
+					// GET /{bucket}?object-lock - GetObjectLockConfiguration
+					r.handler.GetObjectLockConfiguration(w, req)
 				} else {
 					// GET /{bucket} - ListObjectsV2
 					r.handler.ListObjectsV2(w, req)
@@ -105,6 +108,12 @@ func (r *Router) routeRequest() http.HandlerFunc {
 			} else if query.Has("acl") {
 				// GET /{bucket}/{key}?acl - GetObjectAcl
 				r.handler.GetObjectAcl(w, req)
+			} else if query.Has("retention") {
+				// GET /{bucket}/{key}?retention - GetObjectRetention
+				r.handler.GetObjectRetention(w, req)
+			} else if query.Has("legal-hold") {
+				// GET /{bucket}/{key}?legal-hold - GetObjectLegalHold
+				r.handler.GetObjectLegalHold(w, req)
 			} else {
 				// GET /{bucket}/{key} - GetObject
 				r.handler.GetObject(w, req)
@@ -130,6 +139,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("lifecycle") {
 					// PUT /{bucket}?lifecycle - PutBucketLifecycleConfiguration
 					r.handler.PutBucketLifecycleConfiguration(w, req)
+				} else if query.Has("object-lock") {
+					// PUT /{bucket}?object-lock - PutObjectLockConfiguration
+					r.handler.PutObjectLockConfiguration(w, req)
 				} else {
 					// PUT /{bucket} - CreateBucket
 					r.handler.CreateBucket(w, req)
@@ -150,6 +162,12 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("acl") {
 					// PUT /{bucket}/{key}?acl - PutObjectAcl
 					r.handler.PutObjectAcl(w, req)
+				} else if query.Has("retention") {
+					// PUT /{bucket}/{key}?retention - PutObjectRetention
+					r.handler.PutObjectRetention(w, req)
+				} else if query.Has("legal-hold") {
+					// PUT /{bucket}/{key}?legal-hold - PutObjectLegalHold
+					r.handler.PutObjectLegalHold(w, req)
 				} else if req.Header.Get("x-amz-copy-source") != "" {
 					// PUT /{bucket}/{key} with x-amz-copy-source - CopyObject
 					r.handler.CopyObject(w, req)

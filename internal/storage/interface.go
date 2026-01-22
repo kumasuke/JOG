@@ -309,6 +309,51 @@ type LifecycleConfiguration struct {
 	Rules []LifecycleRule
 }
 
+// ObjectLockRetentionMode represents the retention mode for object lock.
+type ObjectLockRetentionMode string
+
+const (
+	ObjectLockRetentionModeGovernance ObjectLockRetentionMode = "GOVERNANCE"
+	ObjectLockRetentionModeCompliance ObjectLockRetentionMode = "COMPLIANCE"
+)
+
+// DefaultRetention represents the default retention settings for object lock.
+type DefaultRetention struct {
+	Mode  ObjectLockRetentionMode
+	Days  *int32
+	Years *int32
+}
+
+// ObjectLockRule represents the rule for object lock configuration.
+type ObjectLockRule struct {
+	DefaultRetention *DefaultRetention
+}
+
+// ObjectLockConfiguration represents the object lock configuration for a bucket.
+type ObjectLockConfiguration struct {
+	ObjectLockEnabled bool
+	Rule              *ObjectLockRule
+}
+
+// ObjectRetention represents the retention settings for an object.
+type ObjectRetention struct {
+	Mode            ObjectLockRetentionMode
+	RetainUntilDate *time.Time
+}
+
+// ObjectLegalHoldStatus represents the legal hold status.
+type ObjectLegalHoldStatus string
+
+const (
+	ObjectLegalHoldStatusOn  ObjectLegalHoldStatus = "ON"
+	ObjectLegalHoldStatusOff ObjectLegalHoldStatus = "OFF"
+)
+
+// ObjectLegalHold represents the legal hold settings for an object.
+type ObjectLegalHold struct {
+	Status ObjectLegalHoldStatus
+}
+
 // Storage defines the interface for storage backends.
 type Storage interface {
 	// Bucket operations
@@ -372,6 +417,16 @@ type Storage interface {
 	PutBucketLifecycleConfiguration(ctx context.Context, bucket string, config *LifecycleConfiguration) error
 	GetBucketLifecycleConfiguration(ctx context.Context, bucket string) (*LifecycleConfiguration, error)
 	DeleteBucketLifecycle(ctx context.Context, bucket string) error
+
+	// Object Lock operations
+	SetBucketObjectLockEnabled(ctx context.Context, bucket string, enabled bool) error
+	GetBucketObjectLockEnabled(ctx context.Context, bucket string) (bool, error)
+	PutObjectLockConfiguration(ctx context.Context, bucket string, config *ObjectLockConfiguration) error
+	GetObjectLockConfiguration(ctx context.Context, bucket string) (*ObjectLockConfiguration, error)
+	PutObjectRetention(ctx context.Context, bucket, key string, retention *ObjectRetention) error
+	GetObjectRetention(ctx context.Context, bucket, key string) (*ObjectRetention, error)
+	PutObjectLegalHold(ctx context.Context, bucket, key string, legalHold *ObjectLegalHold) error
+	GetObjectLegalHold(ctx context.Context, bucket, key string) (*ObjectLegalHold, error)
 
 	// Close releases storage resources.
 	Close() error
