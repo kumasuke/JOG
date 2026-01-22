@@ -92,9 +92,18 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("object-lock") {
 					// GET /{bucket}?object-lock - GetObjectLockConfiguration
 					r.handler.GetObjectLockConfiguration(w, req)
-				} else {
-					// GET /{bucket} - ListObjectsV2
+				} else if query.Has("policy") {
+					// GET /{bucket}?policy - GetBucketPolicy
+					r.handler.GetBucketPolicy(w, req)
+				} else if query.Has("website") {
+					// GET /{bucket}?website - GetBucketWebsite
+					r.handler.GetBucketWebsite(w, req)
+				} else if query.Get("list-type") == "2" {
+					// GET /{bucket}?list-type=2 - ListObjectsV2
 					r.handler.ListObjectsV2(w, req)
+				} else {
+					// GET /{bucket} - ListObjects (v1)
+					r.handler.ListObjects(w, req)
 				}
 			} else if query.Has("uploadId") {
 				// GET /{bucket}/{key}?uploadId={uploadId} - ListParts
@@ -142,6 +151,12 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("object-lock") {
 					// PUT /{bucket}?object-lock - PutObjectLockConfiguration
 					r.handler.PutObjectLockConfiguration(w, req)
+				} else if query.Has("policy") {
+					// PUT /{bucket}?policy - PutBucketPolicy
+					r.handler.PutBucketPolicy(w, req)
+				} else if query.Has("website") {
+					// PUT /{bucket}?website - PutBucketWebsite
+					r.handler.PutBucketWebsite(w, req)
 				} else {
 					// PUT /{bucket} - CreateBucket
 					r.handler.CreateBucket(w, req)
@@ -215,6 +230,12 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("lifecycle") {
 					// DELETE /{bucket}?lifecycle - DeleteBucketLifecycle
 					r.handler.DeleteBucketLifecycle(w, req)
+				} else if query.Has("policy") {
+					// DELETE /{bucket}?policy - DeleteBucketPolicy
+					r.handler.DeleteBucketPolicy(w, req)
+				} else if query.Has("website") {
+					// DELETE /{bucket}?website - DeleteBucketWebsite
+					r.handler.DeleteBucketWebsite(w, req)
 				} else {
 					// DELETE /{bucket} - DeleteBucket
 					r.handler.DeleteBucket(w, req)

@@ -15,11 +15,11 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 | Category | Implemented | Total | Progress |
 |----------|-------------|-------|----------|
 | Bucket - Basic | 5 | 6 | 83% |
-| Bucket - Configuration | 17 | 50+ | ~34% |
-| Object - Basic | 8 | 9 | 89% |
+| Bucket - Configuration | 23 | 50+ | ~46% |
+| Object - Basic | 9 | 9 | 100% |
 | Object - Advanced | 13 | 15+ | ~87% |
 | Multipart Upload | 7 | 7 | 100% |
-| **Total (Core APIs)** | **50** | **~87** | **~57%** |
+| **Total (Core APIs)** | **57** | **~87** | **~66%** |
 
 ---
 
@@ -42,9 +42,9 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 |-----------|--------|-------------|
 | GetBucketAcl | [x] | Get bucket ACL |
 | PutBucketAcl | [x] | Set bucket ACL |
-| GetBucketPolicy | [ ] | Get bucket policy |
-| PutBucketPolicy | [ ] | Set bucket policy |
-| DeleteBucketPolicy | [ ] | Delete bucket policy |
+| GetBucketPolicy | [x] | Get bucket policy |
+| PutBucketPolicy | [x] | Set bucket policy |
+| DeleteBucketPolicy | [x] | Delete bucket policy |
 | GetBucketPolicyStatus | [ ] | Check if bucket policy is public |
 | GetPublicAccessBlock | [ ] | Get public access block configuration |
 | PutPublicAccessBlock | [ ] | Set public access block configuration |
@@ -102,9 +102,9 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 
 | Operation | Status | Description |
 |-----------|--------|-------------|
-| GetBucketWebsite | [ ] | Get website configuration |
-| PutBucketWebsite | [ ] | Set website configuration |
-| DeleteBucketWebsite | [ ] | Delete website configuration |
+| GetBucketWebsite | [x] | Get website configuration |
+| PutBucketWebsite | [x] | Set website configuration |
+| DeleteBucketWebsite | [x] | Delete website configuration |
 
 ### Notifications
 
@@ -184,7 +184,7 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 | DeleteObjects | [x] | Delete multiple objects (batch) |
 | CopyObject | [x] | Copy an object |
 | ListObjectsV2 | [x] | List objects in bucket |
-| ListObjects | [ ] | List objects (legacy v1) |
+| ListObjects | [x] | List objects (legacy v1) |
 
 ### Object Attributes & Metadata
 
@@ -272,10 +272,12 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 - [x] Lifecycle management (GetBucketLifecycleConfiguration, PutBucketLifecycleConfiguration, DeleteBucketLifecycle)
 - [x] Encryption configuration (GetBucketEncryption, PutBucketEncryption, DeleteBucketEncryption)
 - [x] Object Lock / Retention (GetObjectLockConfiguration, PutObjectLockConfiguration, GetObjectRetention, PutObjectRetention, GetObjectLegalHold, PutObjectLegalHold)
+- [x] Website hosting (GetBucketWebsite, PutBucketWebsite, DeleteBucketWebsite)
+- [x] Bucket Policy (GetBucketPolicy, PutBucketPolicy, DeleteBucketPolicy)
+- [x] ListObjects v1 (Legacy list objects API)
 - Replication
 - Analytics / Metrics
 - Intelligent-Tiering
-- Website hosting
 
 ---
 

@@ -2080,6 +2080,116 @@ func (fs *FileSystem) GetObjectLegalHold(ctx context.Context, bucket, key string
 	}, nil
 }
 
+// PutBucketPolicy stores the policy for a bucket.
+func (fs *FileSystem) PutBucketPolicy(ctx context.Context, bucket string, policy string) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.PutBucketPolicy(ctx, bucket, policy)
+}
+
+// GetBucketPolicy returns the policy for a bucket.
+func (fs *FileSystem) GetBucketPolicy(ctx context.Context, bucket string) (string, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return "", ErrBucketNotFound
+	}
+
+	policy, err := fs.metadata.GetBucketPolicy(ctx, bucket)
+	if err != nil {
+		return "", err
+	}
+	if policy == "" {
+		return "", ErrNoSuchBucketPolicy
+	}
+
+	return policy, nil
+}
+
+// DeleteBucketPolicy deletes the policy for a bucket.
+func (fs *FileSystem) DeleteBucketPolicy(ctx context.Context, bucket string) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.DeleteBucketPolicy(ctx, bucket)
+}
+
+// PutBucketWebsite stores the website configuration for a bucket.
+func (fs *FileSystem) PutBucketWebsite(ctx context.Context, bucket string, config *WebsiteConfiguration) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+
+	return fs.metadata.PutBucketWebsite(ctx, bucket, string(configJSON))
+}
+
+// GetBucketWebsite returns the website configuration for a bucket.
+func (fs *FileSystem) GetBucketWebsite(ctx context.Context, bucket string) (*WebsiteConfiguration, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	configJSON, err := fs.metadata.GetBucketWebsite(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if configJSON == "" {
+		return nil, ErrNoSuchWebsiteConfiguration
+	}
+
+	var config WebsiteConfiguration
+	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+// DeleteBucketWebsite deletes the website configuration for a bucket.
+func (fs *FileSystem) DeleteBucketWebsite(ctx context.Context, bucket string) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.DeleteBucketWebsite(ctx, bucket)
+}
+
 // Errors
 var (
 	ErrBucketNotFound                   = errors.New("bucket not found")
@@ -2098,6 +2208,8 @@ var (
 	ErrNoSuchObjectLockConfiguration    = errors.New("no such object lock configuration")
 	ErrInvalidRequestObjectLock         = errors.New("bucket is not object lock enabled")
 	ErrMalformedXML                     = errors.New("malformed XML")
+	ErrNoSuchBucketPolicy               = errors.New("no such bucket policy")
+	ErrNoSuchWebsiteConfiguration       = errors.New("no such website configuration")
 )
 
 // BucketNotFoundError is an error that includes the bucket name.
