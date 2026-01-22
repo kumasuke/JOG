@@ -215,6 +215,30 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create object_acls table: %w", err)
 	}
 
+	// Create bucket_encryption table (stores encryption config as JSON)
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bucket_encryption (
+			bucket TEXT PRIMARY KEY,
+			encryption_config TEXT NOT NULL,
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket_encryption table: %w", err)
+	}
+
+	// Create bucket_lifecycle table (stores lifecycle config as JSON)
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bucket_lifecycle (
+			bucket TEXT PRIMARY KEY,
+			lifecycle_config TEXT NOT NULL,
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket_lifecycle table: %w", err)
+	}
+
 	return nil
 }
 
@@ -912,6 +936,66 @@ func (m *Metadata) GetObjectACL(ctx context.Context, bucket, key string) (*ACL, 
 	}
 
 	return &acl, nil
+}
+
+// PutBucketEncryption stores the encryption configuration for a bucket.
+func (m *Metadata) PutBucketEncryption(ctx context.Context, bucket string, encryptionConfig string) error {
+	_, err := m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO bucket_encryption (bucket, encryption_config)
+		VALUES (?, ?)
+	`, bucket, encryptionConfig)
+	return err
+}
+
+// GetBucketEncryption returns the encryption configuration for a bucket.
+func (m *Metadata) GetBucketEncryption(ctx context.Context, bucket string) (string, error) {
+	var encryptionConfig string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT encryption_config FROM bucket_encryption WHERE bucket = ?
+	`, bucket).Scan(&encryptionConfig)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return encryptionConfig, nil
+}
+
+// DeleteBucketEncryption deletes the encryption configuration for a bucket.
+func (m *Metadata) DeleteBucketEncryption(ctx context.Context, bucket string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM bucket_encryption WHERE bucket = ?`, bucket)
+	return err
+}
+
+// PutBucketLifecycle stores the lifecycle configuration for a bucket.
+func (m *Metadata) PutBucketLifecycle(ctx context.Context, bucket string, lifecycleConfig string) error {
+	_, err := m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO bucket_lifecycle (bucket, lifecycle_config)
+		VALUES (?, ?)
+	`, bucket, lifecycleConfig)
+	return err
+}
+
+// GetBucketLifecycle returns the lifecycle configuration for a bucket.
+func (m *Metadata) GetBucketLifecycle(ctx context.Context, bucket string) (string, error) {
+	var lifecycleConfig string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT lifecycle_config FROM bucket_lifecycle WHERE bucket = ?
+	`, bucket).Scan(&lifecycleConfig)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return lifecycleConfig, nil
+}
+
+// DeleteBucketLifecycle deletes the lifecycle configuration for a bucket.
+func (m *Metadata) DeleteBucketLifecycle(ctx context.Context, bucket string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM bucket_lifecycle WHERE bucket = ?`, bucket)
+	return err
 }
 
 // Close closes the database connection.
