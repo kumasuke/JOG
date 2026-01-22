@@ -44,6 +44,46 @@ type CommonPrefix struct {
 	Prefix string `xml:"Prefix"`
 }
 
+// CopyObjectResult is the response for CopyObject.
+type CopyObjectResult struct {
+	XMLName      xml.Name `xml:"CopyObjectResult"`
+	Xmlns        string   `xml:"xmlns,attr"`
+	LastModified string   `xml:"LastModified"`
+	ETag         string   `xml:"ETag"`
+}
+
+// DeleteRequest is the request for DeleteObjects.
+type DeleteRequest struct {
+	XMLName xml.Name           `xml:"Delete"`
+	Objects []ObjectIdentifier `xml:"Object"`
+	Quiet   bool               `xml:"Quiet,omitempty"`
+}
+
+// ObjectIdentifier identifies an object to delete.
+type ObjectIdentifier struct {
+	Key string `xml:"Key"`
+}
+
+// DeleteResult is the response for DeleteObjects.
+type DeleteResult struct {
+	XMLName xml.Name             `xml:"DeleteResult"`
+	Xmlns   string               `xml:"xmlns,attr"`
+	Deleted []DeletedObjectInfo  `xml:"Deleted,omitempty"`
+	Errors  []DeleteObjectsError `xml:"Error,omitempty"`
+}
+
+// DeletedObjectInfo represents a successfully deleted object.
+type DeletedObjectInfo struct {
+	Key string `xml:"Key"`
+}
+
+// DeleteObjectsError represents an error deleting an object.
+type DeleteObjectsError struct {
+	Key     string `xml:"Key"`
+	Code    string `xml:"Code"`
+	Message string `xml:"Message"`
+}
+
 // PutObject handles PUT /{bucket}/{key} - PutObject.
 func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
@@ -265,6 +305,130 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// DeleteObjects handles POST /{bucket}?delete - DeleteObjects.
+func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request) {
+	bucket := GetBucket(r)
+
+	// Parse request body
+	var deleteReq DeleteRequest
+	if err := xml.NewDecoder(r.Body).Decode(&deleteReq); err != nil {
+		WriteError(w, ErrMalformedXML)
+		return
+	}
+
+	// Extract keys from request
+	keys := make([]string, len(deleteReq.Objects))
+	for i, obj := range deleteReq.Objects {
+		keys[i] = obj.Key
+	}
+
+	// Delete objects
+	deleted, errs, err := h.storage.DeleteObjects(r.Context(), bucket, keys)
+	if err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	// Build response
+	result := DeleteResult{
+		Xmlns:   "http://s3.amazonaws.com/doc/2006-03-01/",
+		Deleted: make([]DeletedObjectInfo, len(deleted)),
+		Errors:  make([]DeleteObjectsError, len(errs)),
+	}
+
+	for i, d := range deleted {
+		result.Deleted[i] = DeletedObjectInfo{
+			Key: d.Key,
+		}
+	}
+
+	for i, e := range errs {
+		result.Errors[i] = DeleteObjectsError{
+			Key:     e.Key,
+			Code:    e.Code,
+			Message: e.Message,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	if err := xml.NewEncoder(w).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode DeleteObjects response")
+	}
+}
+
+// CopyObject handles PUT /{bucket}/{key} with x-amz-copy-source header - CopyObject.
+func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
+	dstBucket := GetBucket(r)
+	dstKey := GetKey(r)
+
+	// Get copy source from header
+	copySource := r.Header.Get("x-amz-copy-source")
+	if copySource == "" {
+		WriteError(w, ErrInvalidRequest)
+		return
+	}
+
+	// Parse copy source: /bucket/key or bucket/key
+	copySource = strings.TrimPrefix(copySource, "/")
+	parts := strings.SplitN(copySource, "/", 2)
+	if len(parts) != 2 {
+		WriteError(w, ErrInvalidRequest)
+		return
+	}
+	srcBucket := parts[0]
+	srcKey := parts[1]
+
+	// Get metadata directive (default is COPY)
+	metadataDirective := r.Header.Get("x-amz-metadata-directive")
+	if metadataDirective == "" {
+		metadataDirective = "COPY"
+	}
+
+	var metadata map[string]string
+	if metadataDirective == "REPLACE" {
+		// Use new metadata from request headers
+		metadata = make(map[string]string)
+		for key, values := range r.Header {
+			if strings.HasPrefix(strings.ToLower(key), "x-amz-meta-") {
+				metaKey := strings.TrimPrefix(strings.ToLower(key), "x-amz-meta-")
+				metadata[metaKey] = values[0]
+			}
+		}
+	}
+	// If COPY, pass nil to preserve original metadata
+
+	obj, err := h.storage.CopyObject(r.Context(), srcBucket, srcKey, dstBucket, dstKey, metadata)
+	if err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+srcBucket)
+			return
+		}
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchKey, "/"+srcBucket+"/"+srcKey)
+			return
+		}
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	result := CopyObjectResult{
+		Xmlns:        "http://s3.amazonaws.com/doc/2006-03-01/",
+		LastModified: obj.LastModified.Format(time.RFC3339),
+		ETag:         "\"" + obj.ETag + "\"",
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	if err := xml.NewEncoder(w).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode CopyObject response")
+	}
 }
 
 // ListObjectsV2 handles GET /{bucket} - ListObjectsV2.
