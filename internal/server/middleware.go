@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"runtime/debug"
+	"sync/atomic"
 	"time"
 
 	"github.com/kumasuke/jog/internal/api"
@@ -13,21 +14,21 @@ import (
 type responseWriter struct {
 	http.ResponseWriter
 	status      int
-	wroteHeader bool
+	wroteHeader atomic.Bool
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
-	if rw.wroteHeader {
+	if rw.wroteHeader.Swap(true) {
 		return
 	}
 	rw.status = code
-	rw.wroteHeader = true
 	rw.ResponseWriter.WriteHeader(code)
 }
 
 func (rw *responseWriter) Write(b []byte) (int, error) {
-	if !rw.wroteHeader {
-		rw.WriteHeader(http.StatusOK)
+	if rw.wroteHeader.CompareAndSwap(false, true) {
+		rw.status = http.StatusOK
+		rw.ResponseWriter.WriteHeader(http.StatusOK)
 	}
 	return rw.ResponseWriter.Write(b)
 }

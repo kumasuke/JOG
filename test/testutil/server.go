@@ -29,78 +29,25 @@ type TestServer struct {
 	storage  storage.Storage
 }
 
+// TestServerOptions contains options for creating a test server.
+type TestServerOptions struct {
+	EnableAuth bool
+}
+
 // NewTestServer creates and starts a test server on a random port.
 func NewTestServer(t *testing.T) *TestServer {
 	t.Helper()
-
-	// Create temp directory for data
-	dataDir, err := os.MkdirTemp("", "jog-test-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-
-	metadataDB := filepath.Join(dataDir, "metadata.db")
-
-	// Initialize storage
-	store, err := storage.NewFileSystem(dataDir, metadataDB)
-	if err != nil {
-		os.RemoveAll(dataDir)
-		t.Fatalf("failed to create storage: %v", err)
-	}
-
-	// Create API handler
-	apiHandler := api.NewHandler(store)
-
-	// Create auth middleware (disabled for basic tests, can be enabled per-test)
-	authMiddleware := auth.NewDisabledMiddleware()
-
-	// Create router
-	router := server.NewRouter(apiHandler, authMiddleware)
-
-	// Wrap with logging and recovery
-	handler := server.LoggingMiddleware(server.RecoveryMiddleware(router))
-
-	// Find available port
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		store.Close()
-		os.RemoveAll(dataDir)
-		t.Fatalf("failed to find available port: %v", err)
-	}
-
-	srv := &http.Server{
-		Handler: handler,
-	}
-
-	ts := &TestServer{
-		t:         t,
-		Endpoint:  fmt.Sprintf("http://%s", listener.Addr().String()),
-		AccessKey: "minioadmin",
-		SecretKey: "minioadmin",
-		DataDir:   dataDir,
-		listener:  listener,
-		server:    srv,
-		storage:   store,
-	}
-
-	// Start server in background
-	go func() {
-		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-			// Only log if not already cleaned up
-			if ts.storage != nil {
-				t.Logf("server error: %v", err)
-			}
-		}
-	}()
-
-	// Wait for server to be ready
-	ts.waitForReady()
-
-	return ts
+	return newTestServerWithOptions(t, TestServerOptions{EnableAuth: false})
 }
 
 // NewTestServerWithAuth creates a test server with authentication enabled.
 func NewTestServerWithAuth(t *testing.T) *TestServer {
+	t.Helper()
+	return newTestServerWithOptions(t, TestServerOptions{EnableAuth: true})
+}
+
+// newTestServerWithOptions creates a test server with the given options.
+func newTestServerWithOptions(t *testing.T, opts TestServerOptions) *TestServer {
 	t.Helper()
 
 	// Create temp directory for data
@@ -123,8 +70,13 @@ func NewTestServerWithAuth(t *testing.T) *TestServer {
 	// Create API handler
 	apiHandler := api.NewHandler(store)
 
-	// Create auth middleware with credentials
-	authMiddleware := auth.NewMiddleware(accessKey, secretKey)
+	// Create auth middleware based on options
+	var authMiddleware auth.Authenticator
+	if opts.EnableAuth {
+		authMiddleware = auth.NewMiddleware(accessKey, secretKey)
+	} else {
+		authMiddleware = auth.NewDisabledMiddleware()
+	}
 
 	// Create router
 	router := server.NewRouter(apiHandler, authMiddleware)
@@ -158,6 +110,7 @@ func NewTestServerWithAuth(t *testing.T) *TestServer {
 	// Start server in background
 	go func() {
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+			// Only log if not already cleaned up
 			if ts.storage != nil {
 				t.Logf("server error: %v", err)
 			}

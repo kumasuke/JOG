@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -225,12 +226,8 @@ func (m *Metadata) Close() error {
 }
 
 func ensureDir(dir string) error {
-	return createDirIfNotExists(dir)
-}
-
-func createDirIfNotExists(dir string) error {
 	if dir == "" || dir == "." {
 		return nil
 	}
-	return nil // Let the caller handle directory creation
+	return os.MkdirAll(dir, 0755)
 }
