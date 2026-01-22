@@ -65,6 +65,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				if query.Has("uploads") {
 					// GET /{bucket}?uploads - ListMultipartUploads
 					r.handler.ListMultipartUploads(w, req)
+				} else if query.Has("location") {
+					// GET /{bucket}?location - GetBucketLocation
+					r.handler.GetBucketLocation(w, req)
 				} else {
 					// GET /{bucket} - ListObjectsV2
 					r.handler.ListObjectsV2(w, req)
