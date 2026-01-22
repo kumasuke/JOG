@@ -182,6 +182,18 @@ var (
 		Message:    "The lifecycle configuration does not exist.",
 		HTTPStatus: http.StatusNotFound,
 	}
+
+	ErrObjectLockConfigurationNotFoundError = &S3Error{
+		Code:       "ObjectLockConfigurationNotFoundError",
+		Message:    "Object Lock configuration does not exist for this bucket.",
+		HTTPStatus: http.StatusNotFound,
+	}
+
+	ErrNoSuchObjectLockConfiguration = &S3Error{
+		Code:       "NoSuchObjectLockConfiguration",
+		Message:    "The specified object does not have an ObjectLock configuration.",
+		HTTPStatus: http.StatusNotFound,
+	}
 )
 
 // WriteError writes an S3 error response.
