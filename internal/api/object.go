@@ -14,6 +14,15 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// GetObjectAttributesResponse is the response for GetObjectAttributes.
+type GetObjectAttributesResponse struct {
+	XMLName      xml.Name `xml:"GetObjectAttributesResponse"`
+	Xmlns        string   `xml:"xmlns,attr"`
+	ETag         string   `xml:"ETag,omitempty"`
+	StorageClass string   `xml:"StorageClass,omitempty"`
+	ObjectSize   *int64   `xml:"ObjectSize,omitempty"`
+}
+
 // ListBucketResult is the response for ListObjectsV2.
 type ListBucketResult struct {
 	XMLName               xml.Name       `xml:"ListBucketResult"`
@@ -440,6 +449,59 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if err := xml.NewEncoder(w).Encode(result); err != nil {
 		log.Error().Err(err).Msg("Failed to encode CopyObject response")
+	}
+}
+
+// GetObjectAttributes handles GET /{bucket}/{key}?attributes - GetObjectAttributes.
+func (h *Handler) GetObjectAttributes(w http.ResponseWriter, r *http.Request) {
+	bucket := GetBucket(r)
+	key := GetKey(r)
+
+	// Parse requested attributes from x-amz-object-attributes header
+	// AWS SDK may send multiple headers with the same name, so use Header.Values()
+	attributesHeaders := r.Header.Values("x-amz-object-attributes")
+	requestedAttrs := make(map[string]bool)
+	for _, header := range attributesHeaders {
+		for _, attr := range strings.Split(header, ",") {
+			requestedAttrs[strings.TrimSpace(attr)] = true
+		}
+	}
+
+	// Get object metadata
+	obj, err := h.storage.HeadObject(r.Context(), bucket, key)
+	if err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchKey, "/"+bucket+"/"+key)
+			return
+		}
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	result := GetObjectAttributesResponse{
+		Xmlns: "http://s3.amazonaws.com/doc/2006-03-01/",
+	}
+
+	// Include requested attributes
+	if len(requestedAttrs) == 0 || requestedAttrs["ETag"] {
+		result.ETag = obj.ETag
+	}
+	if len(requestedAttrs) == 0 || requestedAttrs["ObjectSize"] {
+		result.ObjectSize = &obj.Size
+	}
+	if len(requestedAttrs) == 0 || requestedAttrs["StorageClass"] {
+		result.StorageClass = "STANDARD"
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("Last-Modified", obj.LastModified.Format(http.TimeFormat))
+	w.WriteHeader(http.StatusOK)
+	if err := xml.NewEncoder(w).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode GetObjectAttributes response")
 	}
 }
 
