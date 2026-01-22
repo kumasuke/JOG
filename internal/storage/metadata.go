@@ -281,6 +281,30 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create object_legal_hold table: %w", err)
 	}
 
+	// Create bucket_policy table
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bucket_policy (
+			bucket TEXT PRIMARY KEY,
+			policy TEXT NOT NULL,
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket_policy table: %w", err)
+	}
+
+	// Create bucket_website table (stores website config as JSON)
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bucket_website (
+			bucket TEXT PRIMARY KEY,
+			website_config TEXT NOT NULL,
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket_website table: %w", err)
+	}
+
 	return nil
 }
 
@@ -1147,6 +1171,66 @@ func (m *Metadata) GetObjectLegalHold(ctx context.Context, bucket, key string) (
 		return "", err
 	}
 	return status, nil
+}
+
+// PutBucketPolicy stores the policy for a bucket.
+func (m *Metadata) PutBucketPolicy(ctx context.Context, bucket string, policy string) error {
+	_, err := m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO bucket_policy (bucket, policy)
+		VALUES (?, ?)
+	`, bucket, policy)
+	return err
+}
+
+// GetBucketPolicy returns the policy for a bucket.
+func (m *Metadata) GetBucketPolicy(ctx context.Context, bucket string) (string, error) {
+	var policy string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT policy FROM bucket_policy WHERE bucket = ?
+	`, bucket).Scan(&policy)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return policy, nil
+}
+
+// DeleteBucketPolicy deletes the policy for a bucket.
+func (m *Metadata) DeleteBucketPolicy(ctx context.Context, bucket string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM bucket_policy WHERE bucket = ?`, bucket)
+	return err
+}
+
+// PutBucketWebsite stores the website configuration for a bucket.
+func (m *Metadata) PutBucketWebsite(ctx context.Context, bucket string, websiteConfig string) error {
+	_, err := m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO bucket_website (bucket, website_config)
+		VALUES (?, ?)
+	`, bucket, websiteConfig)
+	return err
+}
+
+// GetBucketWebsite returns the website configuration for a bucket.
+func (m *Metadata) GetBucketWebsite(ctx context.Context, bucket string) (string, error) {
+	var websiteConfig string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT website_config FROM bucket_website WHERE bucket = ?
+	`, bucket).Scan(&websiteConfig)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return websiteConfig, nil
+}
+
+// DeleteBucketWebsite deletes the website configuration for a bucket.
+func (m *Metadata) DeleteBucketWebsite(ctx context.Context, bucket string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM bucket_website WHERE bucket = ?`, bucket)
+	return err
 }
 
 // Close closes the database connection.
