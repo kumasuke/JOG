@@ -787,3 +787,93 @@ func TestDeleteObjectsBucketNotFound(t *testing.T) {
 		assert.Equal(t, "NoSuchBucket", apiErr.ErrorCode())
 	}
 }
+
+func TestGetObjectAttributes(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	key := testutil.RandomObjectKey()
+	content := "Hello, GetObjectAttributes!"
+
+	// Put object
+	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(bucketName),
+		Key:         aws.String(key),
+		Body:        strings.NewReader(content),
+		ContentType: aws.String("text/plain"),
+	})
+	require.NoError(t, err)
+
+	// Get object attributes
+	result, err := client.GetObjectAttributes(ctx, &s3.GetObjectAttributesInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+		ObjectAttributes: []types.ObjectAttributes{
+			types.ObjectAttributesEtag,
+			types.ObjectAttributesObjectSize,
+			types.ObjectAttributesStorageClass,
+		},
+	})
+	require.NoError(t, err)
+
+	// Verify attributes
+	require.NotNil(t, result.ETag)
+	require.NotNil(t, result.ObjectSize)
+	assert.Equal(t, int64(len(content)), *result.ObjectSize)
+	assert.Equal(t, types.StorageClassStandard, result.StorageClass)
+}
+
+func TestGetObjectAttributesNotFound(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	// Get attributes for non-existent object
+	_, err := client.GetObjectAttributes(ctx, &s3.GetObjectAttributesInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String("non-existent-key"),
+		ObjectAttributes: []types.ObjectAttributes{
+			types.ObjectAttributesEtag,
+		},
+	})
+	require.Error(t, err)
+
+	var noSuchKey *types.NoSuchKey
+	assert.ErrorAs(t, err, &noSuchKey)
+}
+
+func TestGetObjectAttributesBucketNotFound(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	// Get attributes from non-existent bucket
+	_, err := client.GetObjectAttributes(ctx, &s3.GetObjectAttributesInput{
+		Bucket: aws.String("non-existent-bucket"),
+		Key:    aws.String("some-key"),
+		ObjectAttributes: []types.ObjectAttributes{
+			types.ObjectAttributesEtag,
+		},
+	})
+	require.Error(t, err)
+
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "NoSuchBucket", apiErr.ErrorCode())
+	}
+}

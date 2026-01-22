@@ -72,6 +72,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 			} else if query.Has("uploadId") {
 				// GET /{bucket}/{key}?uploadId={uploadId} - ListParts
 				r.handler.ListParts(w, req)
+			} else if query.Has("attributes") {
+				// GET /{bucket}/{key}?attributes - GetObjectAttributes
+				r.handler.GetObjectAttributes(w, req)
 			} else {
 				// GET /{bucket}/{key} - GetObject
 				r.handler.GetObject(w, req)
