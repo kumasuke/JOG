@@ -37,6 +37,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func (r *Router) routeRequest() http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		path := req.URL.Path
+		query := req.URL.Query()
 
 		// Parse bucket and key from path
 		// S3 path-style: /{bucket} or /{bucket}/{key}
@@ -63,6 +64,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 			} else if key == "" {
 				// GET /{bucket} - ListObjectsV2
 				r.handler.ListObjectsV2(w, req)
+			} else if query.Has("uploadId") {
+				// GET /{bucket}/{key}?uploadId={uploadId} - ListParts
+				r.handler.ListParts(w, req)
 			} else {
 				// GET /{bucket}/{key} - GetObject
 				r.handler.GetObject(w, req)
@@ -73,8 +77,28 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				// PUT /{bucket} - CreateBucket
 				r.handler.CreateBucket(w, req)
 			} else if bucket != "" && key != "" {
-				// PUT /{bucket}/{key} - PutObject
-				r.handler.PutObject(w, req)
+				if query.Has("partNumber") && query.Has("uploadId") {
+					// PUT /{bucket}/{key}?partNumber={partNumber}&uploadId={uploadId} - UploadPart
+					r.handler.UploadPart(w, req)
+				} else {
+					// PUT /{bucket}/{key} - PutObject
+					r.handler.PutObject(w, req)
+				}
+			} else {
+				api.WriteError(w, api.ErrInvalidRequest)
+			}
+
+		case http.MethodPost:
+			if bucket != "" && key != "" {
+				if query.Has("uploads") {
+					// POST /{bucket}/{key}?uploads - CreateMultipartUpload
+					r.handler.CreateMultipartUpload(w, req)
+				} else if query.Has("uploadId") {
+					// POST /{bucket}/{key}?uploadId={uploadId} - CompleteMultipartUpload
+					r.handler.CompleteMultipartUpload(w, req)
+				} else {
+					api.WriteError(w, api.ErrInvalidRequest)
+				}
 			} else {
 				api.WriteError(w, api.ErrInvalidRequest)
 			}
@@ -84,8 +108,13 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				// DELETE /{bucket} - DeleteBucket
 				r.handler.DeleteBucket(w, req)
 			} else if bucket != "" && key != "" {
-				// DELETE /{bucket}/{key} - DeleteObject
-				r.handler.DeleteObject(w, req)
+				if query.Has("uploadId") {
+					// DELETE /{bucket}/{key}?uploadId={uploadId} - AbortMultipartUpload
+					r.handler.AbortMultipartUpload(w, req)
+				} else {
+					// DELETE /{bucket}/{key} - DeleteObject
+					r.handler.DeleteObject(w, req)
+				}
 			} else {
 				api.WriteError(w, api.ErrInvalidRequest)
 			}

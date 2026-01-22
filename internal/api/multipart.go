@@ -1,0 +1,348 @@
+package api
+
+import (
+	"bytes"
+	"encoding/xml"
+	"errors"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/kumasuke/jog/internal/storage"
+	"github.com/rs/zerolog/log"
+)
+
+// InitiateMultipartUploadResult is the response for CreateMultipartUpload.
+type InitiateMultipartUploadResult struct {
+	XMLName  xml.Name `xml:"InitiateMultipartUploadResult"`
+	Xmlns    string   `xml:"xmlns,attr"`
+	Bucket   string   `xml:"Bucket"`
+	Key      string   `xml:"Key"`
+	UploadId string   `xml:"UploadId"`
+}
+
+// CompleteMultipartUploadResult is the response for CompleteMultipartUpload.
+type CompleteMultipartUploadResult struct {
+	XMLName  xml.Name `xml:"CompleteMultipartUploadResult"`
+	Xmlns    string   `xml:"xmlns,attr"`
+	Location string   `xml:"Location"`
+	Bucket   string   `xml:"Bucket"`
+	Key      string   `xml:"Key"`
+	ETag     string   `xml:"ETag"`
+}
+
+// CompleteMultipartUploadRequest is the request body for CompleteMultipartUpload.
+type CompleteMultipartUploadRequest struct {
+	XMLName xml.Name       `xml:"CompleteMultipartUpload"`
+	Parts   []CompletePart `xml:"Part"`
+}
+
+// CompletePart represents a part in CompleteMultipartUpload request.
+type CompletePart struct {
+	PartNumber int32  `xml:"PartNumber"`
+	ETag       string `xml:"ETag"`
+}
+
+// ListPartsResult is the response for ListParts.
+type ListPartsResult struct {
+	XMLName              xml.Name   `xml:"ListPartsResult"`
+	Xmlns                string     `xml:"xmlns,attr"`
+	Bucket               string     `xml:"Bucket"`
+	Key                  string     `xml:"Key"`
+	UploadId             string     `xml:"UploadId"`
+	PartNumberMarker     int32      `xml:"PartNumberMarker"`
+	NextPartNumberMarker int32      `xml:"NextPartNumberMarker,omitempty"`
+	MaxParts             int32      `xml:"MaxParts"`
+	IsTruncated          bool       `xml:"IsTruncated"`
+	Parts                []PartInfo `xml:"Part"`
+}
+
+// PartInfo represents a part in ListParts response.
+type PartInfo struct {
+	PartNumber   int32  `xml:"PartNumber"`
+	LastModified string `xml:"LastModified"`
+	ETag         string `xml:"ETag"`
+	Size         int64  `xml:"Size"`
+}
+
+// CreateMultipartUpload handles POST /{bucket}/{key}?uploads - CreateMultipartUpload.
+func (h *Handler) CreateMultipartUpload(w http.ResponseWriter, r *http.Request) {
+	bucket := GetBucket(r)
+	key := GetKey(r)
+
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	// Parse custom metadata
+	metadata := make(map[string]string)
+	for k, values := range r.Header {
+		if strings.HasPrefix(strings.ToLower(k), "x-amz-meta-") {
+			metaKey := strings.TrimPrefix(strings.ToLower(k), "x-amz-meta-")
+			metadata[metaKey] = values[0]
+		}
+	}
+
+	upload, err := h.storage.CreateMultipartUpload(r.Context(), bucket, key, contentType, metadata)
+	if err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		log.Error().Err(err).Msg("Failed to create multipart upload")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	result := InitiateMultipartUploadResult{
+		Xmlns:    "http://s3.amazonaws.com/doc/2006-03-01/",
+		Bucket:   bucket,
+		Key:      key,
+		UploadId: upload.UploadID,
+	}
+
+	var buf bytes.Buffer
+	if err := xml.NewEncoder(&buf).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode CreateMultipartUpload response")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
+}
+
+// UploadPart handles PUT /{bucket}/{key}?partNumber={partNumber}&uploadId={uploadId} - UploadPart.
+func (h *Handler) UploadPart(w http.ResponseWriter, r *http.Request) {
+	bucket := GetBucket(r)
+	key := GetKey(r)
+
+	query := r.URL.Query()
+	uploadID := query.Get("uploadId")
+	partNumberStr := query.Get("partNumber")
+
+	partNumber, err := strconv.ParseInt(partNumberStr, 10, 32)
+	if err != nil || partNumber < 1 || partNumber > 10000 {
+		WriteError(w, ErrInvalidPart)
+		return
+	}
+
+	contentLength := r.ContentLength
+	if contentLength < 0 {
+		WriteError(w, ErrMissingContentLength)
+		return
+	}
+
+	part, err := h.storage.UploadPart(r.Context(), bucket, key, uploadID, int32(partNumber), r.Body, contentLength)
+	if err != nil {
+		if errors.Is(err, storage.ErrUploadNotFound) {
+			WriteError(w, ErrNoSuchUpload)
+			return
+		}
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		log.Error().Err(err).Msg("Failed to upload part")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	w.Header().Set("ETag", "\""+part.ETag+"\"")
+	w.WriteHeader(http.StatusOK)
+}
+
+// CompleteMultipartUpload handles POST /{bucket}/{key}?uploadId={uploadId} - CompleteMultipartUpload.
+func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request) {
+	bucket := GetBucket(r)
+	key := GetKey(r)
+
+	query := r.URL.Query()
+	uploadID := query.Get("uploadId")
+
+	// Parse request body
+	var req CompleteMultipartUploadRequest
+	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
+		WriteError(w, ErrInvalidRequest)
+		return
+	}
+
+	// Validate parts list is not empty
+	if len(req.Parts) == 0 {
+		WriteError(w, ErrMalformedXML)
+		return
+	}
+
+	// Validate parts are in order
+	for i := 1; i < len(req.Parts); i++ {
+		if req.Parts[i].PartNumber <= req.Parts[i-1].PartNumber {
+			WriteError(w, ErrInvalidPartOrder)
+			return
+		}
+	}
+
+	// Convert to storage parts
+	parts := make([]storage.Part, len(req.Parts))
+	for i, p := range req.Parts {
+		parts[i] = storage.Part{
+			PartNumber: p.PartNumber,
+			ETag:       p.ETag,
+		}
+	}
+
+	// Sort parts by part number (should already be sorted, but just to be safe)
+	sort.Slice(parts, func(i, j int) bool {
+		return parts[i].PartNumber < parts[j].PartNumber
+	})
+
+	obj, err := h.storage.CompleteMultipartUpload(r.Context(), bucket, key, uploadID, parts)
+	if err != nil {
+		if errors.Is(err, storage.ErrUploadNotFound) {
+			WriteError(w, ErrNoSuchUpload)
+			return
+		}
+		if errors.Is(err, storage.ErrInvalidPart) {
+			WriteError(w, ErrInvalidPart)
+			return
+		}
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		log.Error().Err(err).Msg("Failed to complete multipart upload")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	result := CompleteMultipartUploadResult{
+		Xmlns:    "http://s3.amazonaws.com/doc/2006-03-01/",
+		Location: "/" + bucket + "/" + key,
+		Bucket:   bucket,
+		Key:      key,
+		ETag:     "\"" + obj.ETag + "\"",
+	}
+
+	var buf bytes.Buffer
+	if err := xml.NewEncoder(&buf).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode CompleteMultipartUpload response")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
+}
+
+// AbortMultipartUpload handles DELETE /{bucket}/{key}?uploadId={uploadId} - AbortMultipartUpload.
+func (h *Handler) AbortMultipartUpload(w http.ResponseWriter, r *http.Request) {
+	bucket := GetBucket(r)
+	key := GetKey(r)
+
+	query := r.URL.Query()
+	uploadID := query.Get("uploadId")
+
+	err := h.storage.AbortMultipartUpload(r.Context(), bucket, key, uploadID)
+	if err != nil {
+		if errors.Is(err, storage.ErrUploadNotFound) {
+			WriteError(w, ErrNoSuchUpload)
+			return
+		}
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		log.Error().Err(err).Msg("Failed to abort multipart upload")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ListParts handles GET /{bucket}/{key}?uploadId={uploadId} - ListParts.
+func (h *Handler) ListParts(w http.ResponseWriter, r *http.Request) {
+	bucket := GetBucket(r)
+	key := GetKey(r)
+
+	query := r.URL.Query()
+	uploadID := query.Get("uploadId")
+
+	maxPartsStr := query.Get("max-parts")
+	maxParts := int32(1000)
+	if maxPartsStr != "" {
+		if mp, err := strconv.ParseInt(maxPartsStr, 10, 32); err == nil && mp > 0 {
+			maxParts = int32(mp)
+		}
+	}
+
+	partNumberMarkerStr := query.Get("part-number-marker")
+	var partNumberMarker int32
+	if partNumberMarkerStr != "" {
+		if pnm, err := strconv.ParseInt(partNumberMarkerStr, 10, 32); err == nil {
+			partNumberMarker = int32(pnm)
+		}
+	}
+
+	input := &storage.ListPartsInput{
+		Bucket:           bucket,
+		Key:              key,
+		UploadID:         uploadID,
+		MaxParts:         maxParts,
+		PartNumberMarker: partNumberMarker,
+	}
+
+	output, err := h.storage.ListParts(r.Context(), input)
+	if err != nil {
+		if errors.Is(err, storage.ErrUploadNotFound) {
+			WriteError(w, ErrNoSuchUpload)
+			return
+		}
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		log.Error().Err(err).Msg("Failed to list parts")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	result := ListPartsResult{
+		Xmlns:            "http://s3.amazonaws.com/doc/2006-03-01/",
+		Bucket:           bucket,
+		Key:              key,
+		UploadId:         uploadID,
+		PartNumberMarker: partNumberMarker,
+		MaxParts:         maxParts,
+		IsTruncated:      output.IsTruncated,
+		Parts:            make([]PartInfo, len(output.Parts)),
+	}
+
+	if output.IsTruncated {
+		result.NextPartNumberMarker = output.NextPartNumberMarker
+	}
+
+	for i, part := range output.Parts {
+		result.Parts[i] = PartInfo{
+			PartNumber:   part.PartNumber,
+			LastModified: part.LastModified.Format(time.RFC3339),
+			ETag:         "\"" + part.ETag + "\"",
+			Size:         part.Size,
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := xml.NewEncoder(&buf).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode ListParts response")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
+}
