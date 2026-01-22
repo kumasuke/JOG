@@ -2,8 +2,12 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/xml"
 	"net/http"
+
+	"github.com/rs/zerolog/log"
 )
 
 // S3Error represents an S3 error response.
@@ -128,7 +132,9 @@ func WriteErrorWithResource(w http.ResponseWriter, err *S3Error, resource string
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(err.HTTPStatus)
 
-	xml.NewEncoder(w).Encode(response)
+	if err := xml.NewEncoder(w).Encode(response); err != nil {
+		log.Error().Err(err).Msg("Failed to encode error response")
+	}
 }
 
 func generateRequestID() string {
@@ -137,10 +143,11 @@ func generateRequestID() string {
 }
 
 func randomHex(n int) string {
-	const charset = "0123456789ABCDEF"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = charset[i%len(charset)]
+	b := make([]byte, (n+1)/2)
+	if _, err := rand.Read(b); err != nil {
+		log.Error().Err(err).Msg("Failed to generate random bytes")
+		// Fallback to a simple counter-based ID (not ideal but better than panic)
+		return "0000000000000000"[:n]
 	}
-	return string(b)
+	return hex.EncodeToString(b)[:n]
 }

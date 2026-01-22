@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -366,13 +365,14 @@ func hmacSHA256(key []byte, data string) []byte {
 }
 
 func uriEncode(s string) string {
-	// AWS URI encoding
+	// AWS URI encoding with proper UTF-8 support
 	var result strings.Builder
-	for _, c := range s {
-		if isUnreserved(byte(c)) {
-			result.WriteByte(byte(c))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if isUnreserved(c) {
+			result.WriteByte(c)
 		} else {
-			result.WriteString("%" + strings.ToUpper(hex.EncodeToString([]byte{byte(c)})))
+			result.WriteString("%" + strings.ToUpper(hex.EncodeToString([]byte{c})))
 		}
 	}
 	return result.String()
@@ -406,6 +406,3 @@ type Authenticator interface {
 // Ensure implementations satisfy interface
 var _ Authenticator = (*Middleware)(nil)
 var _ Authenticator = (*DisabledMiddleware)(nil)
-
-// requestIDRegex matches valid request IDs
-var requestIDRegex = regexp.MustCompile(`^[A-Z0-9]{16}$`)

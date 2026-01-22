@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kumasuke/jog/internal/storage"
+	"github.com/rs/zerolog/log"
 )
 
 // ListAllMyBucketsResult is the response for ListBuckets.
@@ -144,5 +145,7 @@ func (h *Handler) ListBuckets(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
-	xml.NewEncoder(w).Encode(result)
+	if err := xml.NewEncoder(w).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode ListBuckets response")
+	}
 }

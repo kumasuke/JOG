@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kumasuke/jog/internal/storage"
+	"github.com/rs/zerolog/log"
 )
 
 // ListBucketResult is the response for ListObjectsV2.
@@ -122,7 +123,9 @@ func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	io.Copy(w, obj.Body)
+	if _, err := io.Copy(w, obj.Body); err != nil {
+		log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("Failed to write object body")
+	}
 }
 
 // getObjectRange handles GET with Range header.
@@ -209,7 +212,9 @@ func (h *Handler) getObjectRange(w http.ResponseWriter, r *http.Request, bucket,
 	w.Header().Set("Last-Modified", obj.LastModified.Format(http.TimeFormat))
 
 	w.WriteHeader(http.StatusPartialContent)
-	io.Copy(w, obj.Body)
+	if _, err := io.Copy(w, obj.Body); err != nil {
+		log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("Failed to write object body range")
+	}
 }
 
 // HeadObject handles HEAD /{bucket}/{key} - HeadObject.
@@ -330,5 +335,7 @@ func (h *Handler) ListObjectsV2(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
-	xml.NewEncoder(w).Encode(result)
+	if err := xml.NewEncoder(w).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode ListObjectsV2 response")
+	}
 }
