@@ -149,6 +149,46 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create bucket_cors table: %w", err)
 	}
 
+	// Create bucket_versioning table
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bucket_versioning (
+			bucket TEXT PRIMARY KEY,
+			status TEXT NOT NULL,
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket_versioning table: %w", err)
+	}
+
+	// Create object_versions table
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS object_versions (
+			bucket TEXT NOT NULL,
+			key TEXT NOT NULL,
+			version_id TEXT NOT NULL,
+			size INTEGER NOT NULL,
+			last_modified DATETIME NOT NULL,
+			etag TEXT NOT NULL,
+			content_type TEXT NOT NULL,
+			metadata TEXT,
+			is_delete_marker INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (bucket, key, version_id),
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create object_versions table: %w", err)
+	}
+
+	// Create index for version listing
+	_, err = m.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_object_versions_bucket_key ON object_versions(bucket, key, last_modified DESC)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create version index: %w", err)
+	}
+
 	return nil
 }
 
@@ -620,6 +660,164 @@ func (m *Metadata) GetBucketCors(ctx context.Context, bucket string) (string, er
 func (m *Metadata) DeleteBucketCors(ctx context.Context, bucket string) error {
 	_, err := m.db.ExecContext(ctx, `DELETE FROM bucket_cors WHERE bucket = ?`, bucket)
 	return err
+}
+
+// PutBucketVersioning sets the versioning status for a bucket.
+func (m *Metadata) PutBucketVersioning(ctx context.Context, bucket, status string) error {
+	_, err := m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO bucket_versioning (bucket, status)
+		VALUES (?, ?)
+	`, bucket, status)
+	return err
+}
+
+// GetBucketVersioning returns the versioning status for a bucket.
+func (m *Metadata) GetBucketVersioning(ctx context.Context, bucket string) (string, error) {
+	var status string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT status FROM bucket_versioning WHERE bucket = ?
+	`, bucket).Scan(&status)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return status, nil
+}
+
+// PutObjectVersion stores a new version of an object.
+func (m *Metadata) PutObjectVersion(ctx context.Context, bucket string, version *ObjectVersion) error {
+	metadata, err := json.Marshal(version.Metadata)
+	if err != nil {
+		return err
+	}
+
+	_, err = m.db.ExecContext(ctx, `
+		INSERT INTO object_versions (bucket, key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, bucket, version.Key, version.VersionID, version.Size, version.LastModified, version.ETag, version.ContentType, string(metadata), version.IsDeleteMarker)
+	return err
+}
+
+
+// GetObjectVersion returns a specific version of an object.
+func (m *Metadata) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (*ObjectVersion, error) {
+	var version ObjectVersion
+	var metadataStr string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
+		FROM object_versions WHERE bucket = ? AND key = ? AND version_id = ?
+	`, bucket, key, versionID).Scan(&version.Key, &version.VersionID, &version.Size, &version.LastModified, &version.ETag, &version.ContentType, &metadataStr, &version.IsDeleteMarker)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if metadataStr != "" {
+		if err := json.Unmarshal([]byte(metadataStr), &version.Metadata); err != nil {
+			return nil, err
+		}
+	}
+
+	return &version, nil
+}
+
+// GetLatestObjectVersion returns the latest version of an object.
+func (m *Metadata) GetLatestObjectVersion(ctx context.Context, bucket, key string) (*ObjectVersion, error) {
+	var version ObjectVersion
+	var metadataStr string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
+		FROM object_versions WHERE bucket = ? AND key = ?
+		ORDER BY last_modified DESC LIMIT 1
+	`, bucket, key).Scan(&version.Key, &version.VersionID, &version.Size, &version.LastModified, &version.ETag, &version.ContentType, &metadataStr, &version.IsDeleteMarker)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if metadataStr != "" {
+		if err := json.Unmarshal([]byte(metadataStr), &version.Metadata); err != nil {
+			return nil, err
+		}
+	}
+
+	return &version, nil
+}
+
+// DeleteObjectVersion deletes a specific version of an object.
+func (m *Metadata) DeleteObjectVersion(ctx context.Context, bucket, key, versionID string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM object_versions WHERE bucket = ? AND key = ? AND version_id = ?`, bucket, key, versionID)
+	return err
+}
+
+// ListObjectVersions returns all versions of objects in a bucket.
+func (m *Metadata) ListObjectVersions(ctx context.Context, bucket, prefix string, maxKeys int32, keyMarker, versionIDMarker string) ([]ObjectVersion, bool, string, string, error) {
+	if maxKeys <= 0 {
+		maxKeys = 1000
+	}
+
+	var rows *sql.Rows
+	var err error
+
+	if keyMarker == "" {
+		rows, err = m.db.QueryContext(ctx, `
+			SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
+			FROM object_versions
+			WHERE bucket = ? AND key LIKE ?
+			ORDER BY key, last_modified DESC
+			LIMIT ?
+		`, bucket, prefix+"%", maxKeys+1)
+	} else {
+		rows, err = m.db.QueryContext(ctx, `
+			SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
+			FROM object_versions
+			WHERE bucket = ? AND key LIKE ?
+			  AND (key > ? OR (key = ? AND version_id > ?))
+			ORDER BY key, last_modified DESC
+			LIMIT ?
+		`, bucket, prefix+"%", keyMarker, keyMarker, versionIDMarker, maxKeys+1)
+	}
+
+	if err != nil {
+		return nil, false, "", "", err
+	}
+	defer rows.Close()
+
+	var versions []ObjectVersion
+	for rows.Next() {
+		var version ObjectVersion
+		var metadataStr string
+		if err := rows.Scan(&version.Key, &version.VersionID, &version.Size, &version.LastModified, &version.ETag, &version.ContentType, &metadataStr, &version.IsDeleteMarker); err != nil {
+			return nil, false, "", "", err
+		}
+		if metadataStr != "" {
+			if err := json.Unmarshal([]byte(metadataStr), &version.Metadata); err != nil {
+				return nil, false, "", "", err
+			}
+		}
+		versions = append(versions, version)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, false, "", "", err
+	}
+
+	isTruncated := len(versions) > int(maxKeys)
+	var nextKeyMarker, nextVersionIDMarker string
+	if isTruncated {
+		lastVersion := versions[maxKeys-1]
+		nextKeyMarker = lastVersion.Key
+		nextVersionIDMarker = lastVersion.VersionID
+		versions = versions[:maxKeys]
+	}
+
+	return versions, isTruncated, nextKeyMarker, nextVersionIDMarker, nil
 }
 
 // Close closes the database connection.

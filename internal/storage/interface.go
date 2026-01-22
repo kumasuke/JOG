@@ -131,6 +131,48 @@ type CORSConfiguration struct {
 	Rules []CORSRule
 }
 
+// VersioningStatus represents the versioning status of a bucket.
+type VersioningStatus string
+
+const (
+	VersioningStatusDisabled  VersioningStatus = ""
+	VersioningStatusEnabled   VersioningStatus = "Enabled"
+	VersioningStatusSuspended VersioningStatus = "Suspended"
+)
+
+// ObjectVersion represents a version of an object.
+type ObjectVersion struct {
+	Key            string
+	VersionID      string
+	IsLatest       bool
+	LastModified   time.Time
+	ETag           string
+	Size           int64
+	ContentType    string
+	Metadata       map[string]string
+	IsDeleteMarker bool
+}
+
+// ListObjectVersionsInput holds parameters for listing object versions.
+type ListObjectVersionsInput struct {
+	Bucket          string
+	Prefix          string
+	Delimiter       string
+	MaxKeys         int32
+	KeyMarker       string
+	VersionIdMarker string
+}
+
+// ListObjectVersionsOutput holds the result of listing object versions.
+type ListObjectVersionsOutput struct {
+	Versions            []ObjectVersion
+	DeleteMarkers       []ObjectVersion
+	CommonPrefixes      []string
+	IsTruncated         bool
+	NextKeyMarker       string
+	NextVersionIdMarker string
+}
+
 // Storage defines the interface for storage backends.
 type Storage interface {
 	// Bucket operations
@@ -170,6 +212,14 @@ type Storage interface {
 	PutBucketCors(ctx context.Context, bucket string, cors *CORSConfiguration) error
 	GetBucketCors(ctx context.Context, bucket string) (*CORSConfiguration, error)
 	DeleteBucketCors(ctx context.Context, bucket string) error
+
+	// Versioning operations
+	PutBucketVersioning(ctx context.Context, bucket string, status VersioningStatus) error
+	GetBucketVersioning(ctx context.Context, bucket string) (VersioningStatus, error)
+	PutObjectVersioned(ctx context.Context, bucket, key string, body io.Reader, size int64, contentType string, metadata map[string]string) (*Object, string, error)
+	GetObjectVersioned(ctx context.Context, bucket, key, versionID string) (*ObjectData, error)
+	DeleteObjectVersioned(ctx context.Context, bucket, key, versionID string) (string, bool, error)
+	ListObjectVersions(ctx context.Context, input *ListObjectVersionsInput) (*ListObjectVersionsOutput, error)
 
 	// Close releases storage resources.
 	Close() error
