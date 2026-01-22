@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -207,6 +208,13 @@ func (h *Handler) UploadPartCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// URL decode the copy source (may contain URL-encoded characters)
+	copySource, err = url.QueryUnescape(copySource)
+	if err != nil {
+		WriteError(w, ErrInvalidRequest)
+		return
+	}
+
 	// Remove leading slash if present
 	copySource = strings.TrimPrefix(copySource, "/")
 
@@ -256,11 +264,15 @@ func (h *Handler) UploadPartCopy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, storage.ErrBucketNotFound) {
-			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+srcBucket)
 			return
 		}
 		if errors.Is(err, storage.ErrObjectNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchKey, "/"+srcBucket+"/"+srcKey)
+			return
+		}
+		if errors.Is(err, storage.ErrInvalidRange) {
+			WriteError(w, ErrInvalidRange)
 			return
 		}
 		log.Error().Err(err).Msg("Failed to upload part copy")

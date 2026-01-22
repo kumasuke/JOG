@@ -342,7 +342,7 @@ func (fs *FileSystem) CopyObject(ctx context.Context, srcBucket, srcKey, dstBuck
 		return nil, err
 	}
 	if !exists {
-		return nil, ErrBucketNotFound
+		return nil, &BucketNotFoundError{Bucket: srcBucket}
 	}
 
 	// Check if destination bucket exists
@@ -351,7 +351,7 @@ func (fs *FileSystem) CopyObject(ctx context.Context, srcBucket, srcKey, dstBuck
 		return nil, err
 	}
 	if !exists {
-		return nil, ErrBucketNotFound
+		return nil, &BucketNotFoundError{Bucket: dstBucket}
 	}
 
 	// Get source object metadata
@@ -688,6 +688,10 @@ func (fs *FileSystem) UploadPartCopy(ctx context.Context, bucket, key, uploadID 
 	if startByte != nil && endByte != nil {
 		start = *startByte
 		end = *endByte
+		// Validate range
+		if start < 0 || end >= srcObj.Size || start > end {
+			return nil, ErrInvalidRange
+		}
 	} else {
 		start = 0
 		end = srcObj.Size - 1
@@ -950,8 +954,6 @@ func (fs *FileSystem) ListMultipartUploads(ctx context.Context, input *ListMulti
 	}, nil
 }
 
-// CopyObject copies an object from one location to another.
-// TODO: Implement CopyObject functionality
 // DeleteObjects deletes multiple objects.
 func (fs *FileSystem) DeleteObjects(ctx context.Context, bucket string, keys []string) ([]DeletedObject, []DeleteError, error) {
 	// Check if bucket exists
@@ -1024,4 +1026,19 @@ var (
 	ErrInvalidBucketName   = errors.New("invalid bucket name")
 	ErrUploadNotFound      = errors.New("upload not found")
 	ErrInvalidPart         = errors.New("invalid part")
+	ErrInvalidRange        = errors.New("invalid range")
 )
+
+// BucketNotFoundError is an error that includes the bucket name.
+type BucketNotFoundError struct {
+	Bucket string
+}
+
+func (e *BucketNotFoundError) Error() string {
+	return fmt.Sprintf("bucket not found: %s", e.Bucket)
+}
+
+// Is implements errors.Is for BucketNotFoundError.
+func (e *BucketNotFoundError) Is(target error) bool {
+	return target == ErrBucketNotFound
+}
