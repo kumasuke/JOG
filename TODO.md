@@ -17,79 +17,79 @@ Each feature follows TDD (Test-Driven Development):
 ### Infrastructure Setup
 - [x] Create CLAUDE.md
 - [x] Create go.mod
-- [ ] Create project directory structure
+- [x] Create project directory structure
 - [x] Create Makefile
 - [x] Create .gitignore
 - [x] Create GitHub Actions workflow
 
 ### Test Infrastructure
-- [ ] Write `test/testutil/server.go` - Test server helper
-- [ ] Write `test/testutil/client.go` - S3 client helper
+- [x] Write `test/testutil/server.go` - Test server helper
+- [x] Write `test/testutil/client.go` - S3 client helper
 
 ### CLI Framework
-- [ ] Implement `cmd/jog/main.go` - Entry point
-- [ ] Implement `internal/cli/root.go` - Root command
-- [ ] Implement `internal/cli/server.go` - Server command
-- [ ] Implement `internal/cli/version.go` - Version command
-- [ ] Implement `internal/config/config.go` - Configuration
+- [x] Implement `cmd/jog/main.go` - Entry point
+- [x] Implement `internal/cli/root.go` - Root command
+- [x] Implement `internal/cli/server.go` - Server command
+- [x] Implement `internal/cli/version.go` - Version command
+- [x] Implement `internal/config/config.go` - Configuration
 
 ### HTTP Server
-- [ ] Implement `internal/server/server.go` - HTTP server
-- [ ] Implement `internal/server/router.go` - S3 routing
-- [ ] Implement `internal/server/middleware.go` - Logging, recovery
+- [x] Implement `internal/server/server.go` - HTTP server
+- [x] Implement `internal/server/router.go` - S3 routing
+- [x] Implement `internal/server/middleware.go` - Logging, recovery
 
 ### Bucket Operations (TDD)
-- [ ] **TEST**: Write `test/s3compat/bucket_test.go`
-  - [ ] TestCreateBucket
-  - [ ] TestCreateBucketAlreadyExists
-  - [ ] TestCreateBucketInvalidName
-  - [ ] TestListBuckets
-  - [ ] TestHeadBucket
-  - [ ] TestHeadBucketNotFound
-  - [ ] TestDeleteBucket
-  - [ ] TestDeleteBucketNotEmpty
-- [ ] **IMPL**: Implement `internal/api/bucket.go`
-  - [ ] CreateBucket handler
-  - [ ] ListBuckets handler
-  - [ ] HeadBucket handler
-  - [ ] DeleteBucket handler
+- [x] **TEST**: Write `test/s3compat/bucket_test.go`
+  - [x] TestCreateBucket
+  - [x] TestCreateBucketAlreadyExists
+  - [x] TestCreateBucketInvalidName
+  - [x] TestListBuckets
+  - [x] TestHeadBucket
+  - [x] TestHeadBucketNotFound
+  - [x] TestDeleteBucket
+  - [x] TestDeleteBucketNotEmpty
+- [x] **IMPL**: Implement `internal/api/bucket.go`
+  - [x] CreateBucket handler
+  - [x] ListBuckets handler
+  - [x] HeadBucket handler
+  - [x] DeleteBucket handler
 
 ### Object Operations (TDD)
-- [ ] **TEST**: Write `test/s3compat/object_test.go`
-  - [ ] TestPutObject
-  - [ ] TestPutObjectWithMetadata
-  - [ ] TestGetObject
-  - [ ] TestGetObjectNotFound
-  - [ ] TestGetObjectRange
-  - [ ] TestHeadObject
-  - [ ] TestDeleteObject
-  - [ ] TestListObjectsV2
-  - [ ] TestListObjectsV2Prefix
-  - [ ] TestListObjectsV2Pagination
-- [ ] **IMPL**: Implement `internal/api/object.go`
-  - [ ] PutObject handler
-  - [ ] GetObject handler
-  - [ ] HeadObject handler
-  - [ ] DeleteObject handler
-  - [ ] ListObjectsV2 handler
+- [x] **TEST**: Write `test/s3compat/object_test.go`
+  - [x] TestPutObject
+  - [x] TestPutObjectWithMetadata
+  - [x] TestGetObject
+  - [x] TestGetObjectNotFound
+  - [x] TestGetObjectRange
+  - [x] TestHeadObject
+  - [x] TestDeleteObject
+  - [x] TestListObjectsV2
+  - [x] TestListObjectsV2Prefix
+  - [x] TestListObjectsV2Pagination
+- [x] **IMPL**: Implement `internal/api/object.go`
+  - [x] PutObject handler
+  - [x] GetObject handler
+  - [x] HeadObject handler
+  - [x] DeleteObject handler
+  - [x] ListObjectsV2 handler
 
 ### Storage Backend
-- [ ] Implement `internal/storage/interface.go` - Storage interface
-- [ ] Implement `internal/storage/filesystem.go` - File system backend
-- [ ] Implement `internal/storage/metadata.go` - SQLite metadata
+- [x] Implement `internal/storage/interface.go` - Storage interface
+- [x] Implement `internal/storage/filesystem.go` - File system backend
+- [x] Implement `internal/storage/metadata.go` - SQLite metadata
 
 ### Authentication (TDD)
-- [ ] **TEST**: Write `test/s3compat/auth_test.go`
-  - [ ] TestValidSignatureV4
-  - [ ] TestInvalidSignatureV4
-  - [ ] TestExpiredSignature
-- [ ] **IMPL**: Implement `internal/auth/signature_v4.go`
+- [x] **TEST**: Write `test/s3compat/auth_test.go`
+  - [x] TestValidSignatureV4
+  - [x] TestInvalidSignatureV4
+  - [x] TestInvalidAccessKey
+- [x] **IMPL**: Implement `internal/auth/signature_v4.go`
 
 ### Error Handling (TDD)
-- [ ] **TEST**: Write `test/s3compat/error_test.go`
-  - [ ] TestErrorResponseFormat
-  - [ ] TestErrorCodes
-- [ ] **IMPL**: Implement `internal/api/errors.go` - S3 error responses
+- [x] **TEST**: Write `test/s3compat/error_test.go`
+  - [x] TestErrorResponseFormat
+  - [x] TestErrorCodes
+- [x] **IMPL**: Implement `internal/api/errors.go` - S3 error responses
 
 ---
 
