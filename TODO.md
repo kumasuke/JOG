@@ -76,20 +76,29 @@ Each feature follows TDD (Test-Driven Development):
 
 ---
 
-## Phase 5: Future Enhancements
+### Phase 5: Encryption & Lifecycle ✅
+
+**Encryption**
+- GetBucketEncryption, PutBucketEncryption, DeleteBucketEncryption
+- Support for AES256 and KMS encryption algorithms
+- BucketKeyEnabled option
+
+**Lifecycle Management**
+- GetBucketLifecycleConfiguration, PutBucketLifecycleConfiguration, DeleteBucketLifecycle
+- Support for expiration rules with Days/Date
+- Storage class transitions
+- Noncurrent version expiration
+- Abort incomplete multipart upload
+- Filter by prefix, tag, or object size
+
+---
+
+## Phase 6: Future Enhancements
 
 ### Object Lock & Retention
 - [ ] GetObjectLockConfiguration / PutObjectLockConfiguration
 - [ ] GetObjectRetention / PutObjectRetention
 - [ ] GetObjectLegalHold / PutObjectLegalHold
-
-### Lifecycle Management
-- [ ] GetBucketLifecycleConfiguration / PutBucketLifecycleConfiguration
-- [ ] DeleteBucketLifecycle
-
-### Encryption
-- [ ] GetBucketEncryption / PutBucketEncryption
-- [ ] DeleteBucketEncryption
 
 ---
 
