@@ -170,6 +170,12 @@ var (
 		Message:    "Invalid Argument",
 		HTTPStatus: http.StatusBadRequest,
 	}
+
+	ErrServerSideEncryptionConfigurationNotFoundError = &S3Error{
+		Code:       "ServerSideEncryptionConfigurationNotFoundError",
+		Message:    "The server side encryption configuration was not found.",
+		HTTPStatus: http.StatusNotFound,
+	}
 )
 
 // WriteError writes an S3 error response.
