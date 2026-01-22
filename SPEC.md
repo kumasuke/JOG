@@ -41,6 +41,11 @@ JOG (Just Object Gateway) は、Go言語で実装されたS3互換のオブジ�
 #### 1.4 認証
 - [ ] Access Key / Secret Key認証 (AWS Signature V4)
 
+#### 1.5 S3互換性テスト
+- [ ] AWS SDK for Go v2 を使った統合テスト
+- [ ] 全APIエンドポイントの互換性テスト
+- [ ] エラーレスポンス形式の互換性テスト
+
 ### Phase 2: 機能拡充
 
 #### 2.1 マルチパートアップロード
@@ -143,7 +148,14 @@ jog/
 │   └── config/               # 設定管理
 │       └── config.go
 ├── pkg/                      # 公開パッケージ (将来用)
-├── test/                     # E2Eテスト
+├── test/
+│   ├── s3compat/             # S3互換性テスト (AWS SDK使用)
+│   │   ├── suite_test.go
+│   │   ├── bucket_test.go
+│   │   ├── object_test.go
+│   │   └── error_test.go
+│   └── testutil/             # テストユーティリティ
+│       └── server.go
 ├── go.mod
 ├── go.sum
 ├── Makefile
@@ -161,6 +173,9 @@ jog/
 | `github.com/mattn/go-sqlite3` | メタデータDB |
 | `github.com/google/uuid` | UUID生成 |
 | `github.com/rs/zerolog` | ロギング |
+| `github.com/aws/aws-sdk-go-v2` | S3互換性テスト |
+| `github.com/aws/aws-sdk-go-v2/service/s3` | S3 API テスト |
+| `github.com/stretchr/testify` | テストアサーション |
 
 ## 設定
 
@@ -261,6 +276,156 @@ Apache License 2.0
 
 ---
 
+## S3互換性テスト戦略
+
+### テストの目的
+
+AWS SDK for Go v2 を使用してJOGサーバーに対してテストを実行することで、S3互換性を担保する。
+実際のAWS SDKがクライアントとして動作することで、APIの互換性を保証する。
+
+### テスト構成
+
+```
+test/
+├── s3compat/                    # S3互換性テスト
+│   ├── suite_test.go           # テストスイート共通設定
+│   ├── bucket_test.go          # バケット操作テスト
+│   ├── object_test.go          # オブジェクト操作テスト
+│   ├── multipart_test.go       # マルチパートアップロードテスト
+│   └── error_test.go           # エラーレスポンステスト
+└── testutil/
+    └── server.go               # テスト用サーバー起動ヘルパー
+```
+
+### テストケース一覧
+
+#### Phase 1 (MVP) テスト
+
+**バケット操作**
+| テストケース | 検証内容 |
+|-------------|---------|
+| `TestCreateBucket` | バケット作成が成功すること |
+| `TestCreateBucketAlreadyExists` | 既存バケット作成時に適切なエラーが返ること |
+| `TestCreateBucketInvalidName` | 無効なバケット名でエラーが返ること |
+| `TestListBuckets` | バケット一覧が正しく返ること |
+| `TestHeadBucket` | バケットの存在確認ができること |
+| `TestHeadBucketNotFound` | 存在しないバケットで404が返ること |
+| `TestDeleteBucket` | 空のバケットが削除できること |
+| `TestDeleteBucketNotEmpty` | 空でないバケットの削除でエラーが返ること |
+
+**オブジェクト操作**
+| テストケース | 検証内容 |
+|-------------|---------|
+| `TestPutObject` | オブジェクトのアップロードが成功すること |
+| `TestPutObjectWithMetadata` | カスタムメタデータ付きでアップロードできること |
+| `TestGetObject` | オブジェクトのダウンロードが成功すること |
+| `TestGetObjectNotFound` | 存在しないオブジェクトで404が返ること |
+| `TestGetObjectRange` | Range指定で部分取得できること |
+| `TestHeadObject` | オブジェクトのメタデータが取得できること |
+| `TestDeleteObject` | オブジェクトの削除が成功すること |
+| `TestListObjectsV2` | オブジェクト一覧が正しく返ること |
+| `TestListObjectsV2Prefix` | Prefix指定でフィルタできること |
+| `TestListObjectsV2Pagination` | ページネーションが正しく動作すること |
+
+**認証**
+| テストケース | 検証内容 |
+|-------------|---------|
+| `TestValidSignatureV4` | 正しい署名でアクセスできること |
+| `TestInvalidSignatureV4` | 不正な署名で403が返ること |
+| `TestExpiredSignature` | 期限切れ署名で403が返ること |
+
+**エラーレスポンス**
+| テストケース | 検証内容 |
+|-------------|---------|
+| `TestErrorResponseFormat` | エラーがS3形式のXMLで返ること |
+| `TestErrorCodes` | エラーコードがS3と一致すること |
+
+#### Phase 2 テスト
+
+**マルチパートアップロード**
+| テストケース | 検証内容 |
+|-------------|---------|
+| `TestCreateMultipartUpload` | マルチパートアップロード開始 |
+| `TestUploadPart` | パートアップロード |
+| `TestCompleteMultipartUpload` | マルチパートアップロード完了 |
+| `TestAbortMultipartUpload` | マルチパートアップロード中止 |
+| `TestListParts` | パート一覧取得 |
+
+### テスト実行方法
+
+```bash
+# S3互換性テストの実行
+make test-s3compat
+
+# 特定のテストのみ実行
+go test -v ./test/s3compat/... -run TestCreateBucket
+
+# カバレッジ付きで実行
+make test-s3compat-coverage
+```
+
+### テストヘルパー
+
+```go
+// test/testutil/server.go
+package testutil
+
+import (
+    "context"
+    "testing"
+
+    "github.com/aws/aws-sdk-go-v2/config"
+    "github.com/aws/aws-sdk-go-v2/credentials"
+    "github.com/aws/aws-sdk-go-v2/service/s3"
+)
+
+// TestServer はテスト用のJOGサーバーを起動・管理する
+type TestServer struct {
+    Endpoint  string
+    AccessKey string
+    SecretKey string
+}
+
+// NewTestServer は一時ポートでサーバーを起動する
+func NewTestServer(t *testing.T) *TestServer
+
+// S3Client はテスト用のS3クライアントを返す
+func (ts *TestServer) S3Client(t *testing.T) *s3.Client
+
+// Cleanup はサーバーを停止しデータを削除する
+func (ts *TestServer) Cleanup()
+```
+
+### CI統合
+
+```yaml
+# .github/workflows/test.yml
+name: Test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Run unit tests
+        run: make test
+      - name: Run S3 compatibility tests
+        run: make test-s3compat
+```
+
+### 依存ライブラリ (テスト用追加)
+
+| ライブラリ | 用途 |
+|-----------|------|
+| `github.com/aws/aws-sdk-go-v2` | S3互換性テスト用クライアント |
+| `github.com/aws/aws-sdk-go-v2/service/s3` | S3 API操作 |
+| `github.com/stretchr/testify` | テストアサーション |
+
+---
+
 ## 実装優先順位
 
 ### MVP (最小実行可能製品) のスコープ
@@ -272,5 +437,7 @@ Apache License 2.0
 5. **ListObjectsV2** - オブジェクト一覧
 6. **DeleteBucket / DeleteObject** - 削除操作
 7. **AWS Signature V4認証** - 認証基盤
+8. **S3互換性テスト** - AWS SDK for Go v2によるテストスイート
 
 MVPでAWS CLIから基本操作が可能な状態を目指す。
+各機能実装時には対応するS3互換性テストを同時に作成し、互換性を担保する。
