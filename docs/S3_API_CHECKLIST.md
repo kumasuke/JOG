@@ -16,10 +16,10 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 |----------|-------------|-------|----------|
 | Bucket - Basic | 4 | 4 | 100% |
 | Bucket - Configuration | 0 | 50+ | 0% |
-| Object - Basic | 7 | 9 | 78% |
+| Object - Basic | 8 | 9 | 89% |
 | Object - Advanced | 0 | 15+ | 0% |
 | Multipart Upload | 7 | 7 | 100% |
-| **Total (Core APIs)** | **18** | **~20** | **90%** |
+| **Total (Core APIs)** | **19** | **~20** | **95%** |
 
 ---
 
@@ -190,7 +190,7 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 
 | Operation | Status | Description |
 |-----------|--------|-------------|
-| GetObjectAttributes | [ ] | Get object attributes |
+| GetObjectAttributes | [x] | Get object attributes |
 | GetObjectAcl | [ ] | Get object ACL |
 | PutObjectAcl | [ ] | Set object ACL |
 | GetObjectTagging | [ ] | Get object tags |
