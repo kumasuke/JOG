@@ -17,10 +17,10 @@ Each feature follows TDD (Test-Driven Development):
 ### Infrastructure Setup
 - [x] Create CLAUDE.md
 - [x] Create go.mod
-- [x] Create project directory structure
+- [ ] Create project directory structure
 - [x] Create Makefile
 - [x] Create .gitignore
-- [x] Create GitHub Actions workflow
+- [ ] Create GitHub Actions workflow
 
 ### Test Infrastructure
 - [ ] Write `test/testutil/server.go` - Test server helper
