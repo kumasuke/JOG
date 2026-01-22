@@ -10,14 +10,24 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Maximum bucket policy size (20KB, same as AWS S3)
+const maxPolicySize = 20 * 1024
+
 // PutBucketPolicy handles PUT /{bucket}?policy - PutBucketPolicy.
 func (h *Handler) PutBucketPolicy(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 
-	// Read policy from request body
-	body, err := io.ReadAll(r.Body)
+	// Read policy from request body with size limit
+	limitedReader := io.LimitReader(r.Body, maxPolicySize+1)
+	body, err := io.ReadAll(limitedReader)
 	if err != nil {
 		WriteError(w, ErrInternalError)
+		return
+	}
+
+	// Check if policy exceeds size limit
+	if len(body) > maxPolicySize {
+		WriteError(w, ErrMalformedPolicy)
 		return
 	}
 
@@ -25,6 +35,19 @@ func (h *Handler) PutBucketPolicy(w http.ResponseWriter, r *http.Request) {
 
 	// Validate JSON format
 	if !json.Valid(body) {
+		WriteError(w, ErrMalformedPolicy)
+		return
+	}
+
+	// Validate policy structure (must have at least Version and Statement)
+	var policyDoc map[string]interface{}
+	if err := json.Unmarshal(body, &policyDoc); err != nil {
+		WriteError(w, ErrMalformedPolicy)
+		return
+	}
+
+	// Check for required fields
+	if _, hasStatement := policyDoc["Statement"]; !hasStatement {
 		WriteError(w, ErrMalformedPolicy)
 		return
 	}

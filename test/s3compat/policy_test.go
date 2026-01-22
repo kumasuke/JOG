@@ -214,3 +214,53 @@ func TestDeleteBucketPolicyNonExistent(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+func TestPutBucketPolicyMalformedJSON(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	// Test with invalid JSON
+	invalidPolicy := `{invalid json`
+	_, err := client.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
+		Bucket: aws.String(bucketName),
+		Policy: aws.String(invalidPolicy),
+	})
+	require.Error(t, err)
+
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "MalformedPolicy", apiErr.ErrorCode())
+	}
+}
+
+func TestPutBucketPolicyEmptyObject(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	// Test with empty JSON object (missing required Statement field)
+	emptyPolicy := `{}`
+	_, err := client.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
+		Bucket: aws.String(bucketName),
+		Policy: aws.String(emptyPolicy),
+	})
+	require.Error(t, err)
+
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "MalformedPolicy", apiErr.ErrorCode())
+	}
+}
