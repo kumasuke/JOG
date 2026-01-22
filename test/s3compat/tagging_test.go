@@ -114,8 +114,11 @@ func TestGetObjectTaggingNotFound(t *testing.T) {
 	})
 	require.Error(t, err)
 
-	var noSuchKey *types.NoSuchKey
-	assert.ErrorAs(t, err, &noSuchKey)
+	// Check for NoSuchKey error
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "NoSuchKey", apiErr.ErrorCode())
+	}
 }
 
 func TestDeleteObjectTagging(t *testing.T) {

@@ -111,6 +111,12 @@ type DeleteError struct {
 	Message string
 }
 
+// Tag represents a key-value tag.
+type Tag struct {
+	Key   string
+	Value string
+}
+
 // Storage defines the interface for storage backends.
 type Storage interface {
 	// Bucket operations
@@ -137,6 +143,14 @@ type Storage interface {
 	AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error
 	ListParts(ctx context.Context, input *ListPartsInput) (*ListPartsOutput, error)
 	ListMultipartUploads(ctx context.Context, input *ListMultipartUploadsInput) (*ListMultipartUploadsOutput, error)
+
+	// Tagging operations
+	PutObjectTagging(ctx context.Context, bucket, key string, tags []Tag) error
+	GetObjectTagging(ctx context.Context, bucket, key string) ([]Tag, error)
+	DeleteObjectTagging(ctx context.Context, bucket, key string) error
+	PutBucketTagging(ctx context.Context, bucket string, tags []Tag) error
+	GetBucketTagging(ctx context.Context, bucket string) ([]Tag, error)
+	DeleteBucketTagging(ctx context.Context, bucket string) error
 
 	// Close releases storage resources.
 	Close() error

@@ -108,6 +108,35 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create parts table: %w", err)
 	}
 
+	// Create object_tags table
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS object_tags (
+			bucket TEXT NOT NULL,
+			key TEXT NOT NULL,
+			tag_key TEXT NOT NULL,
+			tag_value TEXT NOT NULL,
+			PRIMARY KEY (bucket, key, tag_key),
+			FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create object_tags table: %w", err)
+	}
+
+	// Create bucket_tags table
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bucket_tags (
+			bucket TEXT NOT NULL,
+			tag_key TEXT NOT NULL,
+			tag_value TEXT NOT NULL,
+			PRIMARY KEY (bucket, tag_key),
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket_tags table: %w", err)
+	}
+
 	return nil
 }
 
@@ -435,6 +464,120 @@ func (m *Metadata) ListMultipartUploadsByBucket(ctx context.Context, bucket, pre
 	}
 
 	return uploads, isTruncated, nextKeyMarker, nextUploadIDMarker, nil
+}
+
+// PutObjectTags stores tags for an object.
+func (m *Metadata) PutObjectTags(ctx context.Context, bucket, key string, tags []Tag) error {
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Delete existing tags
+	_, err = tx.ExecContext(ctx, `DELETE FROM object_tags WHERE bucket = ? AND key = ?`, bucket, key)
+	if err != nil {
+		return err
+	}
+
+	// Insert new tags
+	for _, tag := range tags {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO object_tags (bucket, key, tag_key, tag_value)
+			VALUES (?, ?, ?, ?)
+		`, bucket, key, tag.Key, tag.Value)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetObjectTags returns tags for an object.
+func (m *Metadata) GetObjectTags(ctx context.Context, bucket, key string) ([]Tag, error) {
+	rows, err := m.db.QueryContext(ctx, `
+		SELECT tag_key, tag_value FROM object_tags
+		WHERE bucket = ? AND key = ?
+		ORDER BY tag_key
+	`, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tags []Tag
+	for rows.Next() {
+		var tag Tag
+		if err := rows.Scan(&tag.Key, &tag.Value); err != nil {
+			return nil, err
+		}
+		tags = append(tags, tag)
+	}
+	return tags, rows.Err()
+}
+
+// DeleteObjectTags deletes all tags for an object.
+func (m *Metadata) DeleteObjectTags(ctx context.Context, bucket, key string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM object_tags WHERE bucket = ? AND key = ?`, bucket, key)
+	return err
+}
+
+// PutBucketTags stores tags for a bucket.
+func (m *Metadata) PutBucketTags(ctx context.Context, bucket string, tags []Tag) error {
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Delete existing tags
+	_, err = tx.ExecContext(ctx, `DELETE FROM bucket_tags WHERE bucket = ?`, bucket)
+	if err != nil {
+		return err
+	}
+
+	// Insert new tags
+	for _, tag := range tags {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO bucket_tags (bucket, tag_key, tag_value)
+			VALUES (?, ?, ?)
+		`, bucket, tag.Key, tag.Value)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetBucketTags returns tags for a bucket.
+func (m *Metadata) GetBucketTags(ctx context.Context, bucket string) ([]Tag, error) {
+	rows, err := m.db.QueryContext(ctx, `
+		SELECT tag_key, tag_value FROM bucket_tags
+		WHERE bucket = ?
+		ORDER BY tag_key
+	`, bucket)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tags []Tag
+	for rows.Next() {
+		var tag Tag
+		if err := rows.Scan(&tag.Key, &tag.Value); err != nil {
+			return nil, err
+		}
+		tags = append(tags, tag)
+	}
+	return tags, rows.Err()
+}
+
+// DeleteBucketTags deletes all tags for a bucket.
+func (m *Metadata) DeleteBucketTags(ctx context.Context, bucket string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM bucket_tags WHERE bucket = ?`, bucket)
+	return err
 }
 
 // Close closes the database connection.

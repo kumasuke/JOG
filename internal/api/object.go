@@ -120,6 +120,14 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Parse x-amz-tagging header
+	taggingHeader := r.Header.Get("x-amz-tagging")
+	tags, err := ParseTaggingHeader(taggingHeader)
+	if err != nil {
+		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket+"/"+key)
+		return
+	}
+
 	obj, err := h.storage.PutObject(r.Context(), bucket, key, r.Body, contentLength, contentType, metadata)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
@@ -128,6 +136,14 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		}
 		WriteError(w, ErrInternalError)
 		return
+	}
+
+	// Store tags if provided
+	if len(tags) > 0 {
+		if err := h.storage.PutObjectTagging(r.Context(), bucket, key, tags); err != nil {
+			// Log error but don't fail the request as the object was already created
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("Failed to set object tags")
+		}
 	}
 
 	w.Header().Set("ETag", "\""+obj.ETag+"\"")
