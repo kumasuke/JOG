@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -11,6 +12,28 @@ import (
 	"github.com/kumasuke/jog/internal/storage"
 	"github.com/rs/zerolog/log"
 )
+
+const (
+	maxTagsPerResource = 10
+	maxTagKeyLength    = 128
+	maxTagValueLength  = 256
+)
+
+// validateTags validates that tags meet S3 requirements.
+func validateTags(tags []storage.Tag) error {
+	if len(tags) > maxTagsPerResource {
+		return fmt.Errorf("number of tags exceeds the limit of %d", maxTagsPerResource)
+	}
+	for _, tag := range tags {
+		if len(tag.Key) > maxTagKeyLength {
+			return fmt.Errorf("tag key exceeds the limit of %d characters", maxTagKeyLength)
+		}
+		if len(tag.Value) > maxTagValueLength {
+			return fmt.Errorf("tag value exceeds the limit of %d characters", maxTagValueLength)
+		}
+	}
+	return nil
+}
 
 // Tagging represents the XML structure for tag operations.
 type Tagging struct {
@@ -52,6 +75,12 @@ func (h *Handler) PutObjectTagging(w http.ResponseWriter, r *http.Request) {
 	tags := make([]storage.Tag, len(tagging.TagSet.Tags))
 	for i, t := range tagging.TagSet.Tags {
 		tags[i] = storage.Tag{Key: t.Key, Value: t.Value}
+	}
+
+	// Validate tags
+	if err := validateTags(tags); err != nil {
+		WriteErrorWithResource(w, ErrInvalidTag, "/"+bucket+"/"+key)
+		return
 	}
 
 	// Store tags
@@ -154,6 +183,12 @@ func (h *Handler) PutBucketTagging(w http.ResponseWriter, r *http.Request) {
 		tags[i] = storage.Tag{Key: t.Key, Value: t.Value}
 	}
 
+	// Validate tags
+	if err := validateTags(tags); err != nil {
+		WriteErrorWithResource(w, ErrInvalidTag, "/"+bucket)
+		return
+	}
+
 	// Store tags
 	err = h.storage.PutBucketTagging(r.Context(), bucket, tags)
 	if err != nil {
@@ -244,5 +279,11 @@ func ParseTaggingHeader(header string) ([]storage.Tag, error) {
 		}
 		tags = append(tags, storage.Tag{Key: key, Value: value})
 	}
+
+	// Validate tags
+	if err := validateTags(tags); err != nil {
+		return nil, err
+	}
+
 	return tags, nil
 }

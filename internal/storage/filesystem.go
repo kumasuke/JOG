@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // FileSystem implements Storage using local file system.
@@ -1500,7 +1502,7 @@ func (fs *FileSystem) ListObjectVersions(ctx context.Context, input *ListObjectV
 
 // generateVersionID generates a unique version ID.
 func generateVersionID() string {
-	return fmt.Sprintf("%d-%s", time.Now().UnixNano(), randomHex(16))
+	return uuid.New().String()
 }
 
 // copyFile copies a file from src to dst.
@@ -1517,8 +1519,10 @@ func copyFile(src, dst string) error {
 	}
 	defer dstFile.Close()
 
-	_, err = io.Copy(dstFile, srcFile)
-	return err
+	if _, err = io.Copy(dstFile, srcFile); err != nil {
+		return err
+	}
+	return dstFile.Sync()
 }
 
 // DefaultOwnerID is the default owner ID for ACLs.

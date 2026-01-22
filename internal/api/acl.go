@@ -38,6 +38,21 @@ type Grantee struct {
 	URI         string   `xml:"URI,omitempty"`
 }
 
+// validCannedACLs contains all valid canned ACL values.
+var validCannedACLs = map[string]bool{
+	"private":                   true,
+	"public-read":               true,
+	"public-read-write":         true,
+	"authenticated-read":        true,
+	"bucket-owner-read":         true,
+	"bucket-owner-full-control": true,
+}
+
+// isValidCannedACL checks if the given ACL string is a valid canned ACL.
+func isValidCannedACL(acl string) bool {
+	return validCannedACLs[acl]
+}
+
 // GetBucketAcl handles GET /{bucket}?acl - GetBucketAcl.
 func (h *Handler) GetBucketAcl(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
@@ -68,6 +83,10 @@ func (h *Handler) PutBucketAcl(w http.ResponseWriter, r *http.Request) {
 	// Check for canned ACL header
 	cannedACL := r.Header.Get("x-amz-acl")
 	if cannedACL != "" {
+		if !isValidCannedACL(cannedACL) {
+			WriteErrorWithResource(w, ErrInvalidArgument, "/"+bucket)
+			return
+		}
 		acl := storage.CannedACLToACL(storage.CannedACL(cannedACL), storage.DefaultOwnerID, storage.DefaultOwnerDisplay)
 		if err := h.storage.PutBucketACL(r.Context(), bucket, acl); err != nil {
 			if errors.Is(err, storage.ErrBucketNotFound) {
@@ -145,6 +164,10 @@ func (h *Handler) PutObjectAcl(w http.ResponseWriter, r *http.Request) {
 	// Check for canned ACL header
 	cannedACL := r.Header.Get("x-amz-acl")
 	if cannedACL != "" {
+		if !isValidCannedACL(cannedACL) {
+			WriteErrorWithResource(w, ErrInvalidArgument, "/"+bucket+"/"+key)
+			return
+		}
 		acl := storage.CannedACLToACL(storage.CannedACL(cannedACL), storage.DefaultOwnerID, storage.DefaultOwnerDisplay)
 		if err := h.storage.PutObjectACL(r.Context(), bucket, key, acl); err != nil {
 			if errors.Is(err, storage.ErrBucketNotFound) {
