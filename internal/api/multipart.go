@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -65,6 +66,35 @@ type PartInfo struct {
 	LastModified string `xml:"LastModified"`
 	ETag         string `xml:"ETag"`
 	Size         int64  `xml:"Size"`
+}
+
+// CopyPartResult is the response for UploadPartCopy.
+type CopyPartResult struct {
+	XMLName      xml.Name `xml:"CopyPartResult"`
+	Xmlns        string   `xml:"xmlns,attr"`
+	LastModified string   `xml:"LastModified"`
+	ETag         string   `xml:"ETag"`
+}
+
+// ListMultipartUploadsResult is the response for ListMultipartUploads.
+type ListMultipartUploadsResult struct {
+	XMLName            xml.Name     `xml:"ListMultipartUploadsResult"`
+	Xmlns              string       `xml:"xmlns,attr"`
+	Bucket             string       `xml:"Bucket"`
+	KeyMarker          string       `xml:"KeyMarker"`
+	UploadIdMarker     string       `xml:"UploadIdMarker"`
+	NextKeyMarker      string       `xml:"NextKeyMarker,omitempty"`
+	NextUploadIdMarker string       `xml:"NextUploadIdMarker,omitempty"`
+	MaxUploads         int32        `xml:"MaxUploads"`
+	IsTruncated        bool         `xml:"IsTruncated"`
+	Uploads            []UploadInfo `xml:"Upload"`
+}
+
+// UploadInfo represents an upload in ListMultipartUploads response.
+type UploadInfo struct {
+	Key       string `xml:"Key"`
+	UploadId  string `xml:"UploadId"`
+	Initiated string `xml:"Initiated"`
 }
 
 // CreateMultipartUpload handles POST /{bucket}/{key}?uploads - CreateMultipartUpload.
@@ -154,6 +184,118 @@ func (h *Handler) UploadPart(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("ETag", "\""+part.ETag+"\"")
 	w.WriteHeader(http.StatusOK)
+}
+
+// UploadPartCopy handles PUT /{bucket}/{key}?partNumber={partNumber}&uploadId={uploadId} with x-amz-copy-source header - UploadPartCopy.
+func (h *Handler) UploadPartCopy(w http.ResponseWriter, r *http.Request) {
+	bucket := GetBucket(r)
+	key := GetKey(r)
+
+	query := r.URL.Query()
+	uploadID := query.Get("uploadId")
+	partNumberStr := query.Get("partNumber")
+
+	partNumber, err := strconv.ParseInt(partNumberStr, 10, 32)
+	if err != nil || partNumber < 1 || partNumber > 10000 {
+		WriteError(w, ErrInvalidPart)
+		return
+	}
+
+	// Parse x-amz-copy-source header
+	copySource := r.Header.Get("x-amz-copy-source")
+	if copySource == "" {
+		WriteError(w, ErrInvalidRequest)
+		return
+	}
+
+	// URL decode the copy source (may contain URL-encoded characters)
+	copySource, err = url.QueryUnescape(copySource)
+	if err != nil {
+		WriteError(w, ErrInvalidRequest)
+		return
+	}
+
+	// Remove leading slash if present
+	copySource = strings.TrimPrefix(copySource, "/")
+
+	// Parse source bucket and key
+	parts := strings.SplitN(copySource, "/", 2)
+	if len(parts) != 2 {
+		WriteError(w, ErrInvalidRequest)
+		return
+	}
+	srcBucket := parts[0]
+	srcKey := parts[1]
+
+	// Parse x-amz-copy-source-range header (optional)
+	var startByte, endByte *int64
+	copySourceRange := r.Header.Get("x-amz-copy-source-range")
+	if copySourceRange != "" {
+		// Format: bytes=start-end
+		if !strings.HasPrefix(copySourceRange, "bytes=") {
+			WriteError(w, ErrInvalidRequest)
+			return
+		}
+		rangeStr := strings.TrimPrefix(copySourceRange, "bytes=")
+		rangeParts := strings.Split(rangeStr, "-")
+		if len(rangeParts) != 2 {
+			WriteError(w, ErrInvalidRequest)
+			return
+		}
+
+		start, err := strconv.ParseInt(rangeParts[0], 10, 64)
+		if err != nil {
+			WriteError(w, ErrInvalidRequest)
+			return
+		}
+		end, err := strconv.ParseInt(rangeParts[1], 10, 64)
+		if err != nil {
+			WriteError(w, ErrInvalidRequest)
+			return
+		}
+		startByte = &start
+		endByte = &end
+	}
+
+	part, err := h.storage.UploadPartCopy(r.Context(), bucket, key, uploadID, int32(partNumber), srcBucket, srcKey, startByte, endByte)
+	if err != nil {
+		if errors.Is(err, storage.ErrUploadNotFound) {
+			WriteError(w, ErrNoSuchUpload)
+			return
+		}
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+srcBucket)
+			return
+		}
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchKey, "/"+srcBucket+"/"+srcKey)
+			return
+		}
+		if errors.Is(err, storage.ErrInvalidRange) {
+			WriteError(w, ErrInvalidRange)
+			return
+		}
+		log.Error().Err(err).Msg("Failed to upload part copy")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	result := CopyPartResult{
+		Xmlns:        "http://s3.amazonaws.com/doc/2006-03-01/",
+		LastModified: part.LastModified.Format(time.RFC3339),
+		ETag:         "\"" + part.ETag + "\"",
+	}
+
+	var buf bytes.Buffer
+	if err := xml.NewEncoder(&buf).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode UploadPartCopy response")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
 }
 
 // CompleteMultipartUpload handles POST /{bucket}/{key}?uploadId={uploadId} - CompleteMultipartUpload.
@@ -338,6 +480,79 @@ func (h *Handler) ListParts(w http.ResponseWriter, r *http.Request) {
 	var buf bytes.Buffer
 	if err := xml.NewEncoder(&buf).Encode(result); err != nil {
 		log.Error().Err(err).Msg("Failed to encode ListParts response")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
+}
+
+// ListMultipartUploads handles GET /{bucket}?uploads - ListMultipartUploads.
+func (h *Handler) ListMultipartUploads(w http.ResponseWriter, r *http.Request) {
+	bucket := GetBucket(r)
+
+	query := r.URL.Query()
+
+	prefix := query.Get("prefix")
+
+	maxUploadsStr := query.Get("max-uploads")
+	maxUploads := int32(1000)
+	if maxUploadsStr != "" {
+		if mu, err := strconv.ParseInt(maxUploadsStr, 10, 32); err == nil && mu > 0 {
+			maxUploads = int32(mu)
+		}
+	}
+
+	keyMarker := query.Get("key-marker")
+	uploadIdMarker := query.Get("upload-id-marker")
+
+	input := &storage.ListMultipartUploadsInput{
+		Bucket:         bucket,
+		Prefix:         prefix,
+		MaxUploads:     maxUploads,
+		KeyMarker:      keyMarker,
+		UploadIdMarker: uploadIdMarker,
+	}
+
+	output, err := h.storage.ListMultipartUploads(r.Context(), input)
+	if err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		log.Error().Err(err).Msg("Failed to list multipart uploads")
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	result := ListMultipartUploadsResult{
+		Xmlns:          "http://s3.amazonaws.com/doc/2006-03-01/",
+		Bucket:         bucket,
+		KeyMarker:      keyMarker,
+		UploadIdMarker: uploadIdMarker,
+		MaxUploads:     maxUploads,
+		IsTruncated:    output.IsTruncated,
+		Uploads:        make([]UploadInfo, len(output.Uploads)),
+	}
+
+	if output.IsTruncated {
+		result.NextKeyMarker = output.NextKeyMarker
+		result.NextUploadIdMarker = output.NextUploadIdMarker
+	}
+
+	for i, upload := range output.Uploads {
+		result.Uploads[i] = UploadInfo{
+			Key:       upload.Key,
+			UploadId:  upload.UploadID,
+			Initiated: upload.Initiated.Format(time.RFC3339),
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := xml.NewEncoder(&buf).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode ListMultipartUploads response")
 		WriteError(w, ErrInternalError)
 		return
 	}

@@ -334,6 +334,113 @@ func (fs *FileSystem) DeleteObject(ctx context.Context, bucket, key string) erro
 	return fs.metadata.DeleteObject(ctx, bucket, key)
 }
 
+// CopyObject copies an object from source to destination.
+func (fs *FileSystem) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string, metadata map[string]string) (*Object, error) {
+	// Check if source bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, srcBucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, &BucketNotFoundError{Bucket: srcBucket}
+	}
+
+	// Check if destination bucket exists
+	exists, err = fs.metadata.BucketExists(ctx, dstBucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, &BucketNotFoundError{Bucket: dstBucket}
+	}
+
+	// Get source object metadata
+	srcObj, err := fs.metadata.GetObject(ctx, srcBucket, srcKey)
+	if err != nil {
+		return nil, err
+	}
+	if srcObj == nil {
+		return nil, ErrObjectNotFound
+	}
+
+	// Open source file
+	srcPath := filepath.Join(fs.dataDir, srcBucket, srcKey)
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrObjectNotFound
+		}
+		return nil, fmt.Errorf("failed to open source object: %w", err)
+	}
+	defer srcFile.Close()
+
+	// Create destination path
+	dstPath := filepath.Join(fs.dataDir, dstBucket, dstKey)
+	dstDir := filepath.Dir(dstPath)
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create destination directory: %w", err)
+	}
+
+	// Create temporary file
+	tmpFile, err := os.CreateTemp(dstDir, ".tmp-*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		tmpFile.Close()
+		os.Remove(tmpPath) // Clean up temp file if we don't rename it
+	}()
+
+	// Copy file and calculate MD5
+	hash := md5.New()
+	writer := io.MultiWriter(tmpFile, hash)
+
+	written, err := io.Copy(writer, srcFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to copy object: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// Calculate ETag
+	etag := hex.EncodeToString(hash.Sum(nil))
+
+	// Rename temp file to final path
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		return nil, fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	// Determine metadata to use
+	var finalMetadata map[string]string
+	if metadata != nil {
+		// REPLACE directive - use new metadata
+		finalMetadata = metadata
+	} else {
+		// COPY directive - preserve original metadata
+		finalMetadata = srcObj.Metadata
+	}
+
+	// Create new object metadata
+	obj := &Object{
+		Key:          dstKey,
+		Size:         written,
+		LastModified: time.Now(),
+		ETag:         etag,
+		ContentType:  srcObj.ContentType,
+		Metadata:     finalMetadata,
+	}
+
+	// Save object metadata
+	if err := fs.metadata.PutObject(ctx, dstBucket, obj); err != nil {
+		return nil, err
+	}
+
+	return obj, nil
+}
+
 // ListObjectsV2 lists objects in a bucket.
 func (fs *FileSystem) ListObjectsV2(ctx context.Context, input *ListObjectsInput) (*ListObjectsOutput, error) {
 	// Check if bucket exists
@@ -531,6 +638,127 @@ func (fs *FileSystem) UploadPart(ctx context.Context, bucket, key, uploadID stri
 	return part, nil
 }
 
+// UploadPartCopy copies data from an existing object to a part for a multipart upload.
+func (fs *FileSystem) UploadPartCopy(ctx context.Context, bucket, key, uploadID string, partNumber int32, srcBucket, srcKey string, startByte, endByte *int64) (*Part, error) {
+	// Check if upload exists
+	upload, err := fs.metadata.GetMultipartUpload(ctx, uploadID)
+	if err != nil {
+		return nil, err
+	}
+	if upload == nil {
+		return nil, ErrUploadNotFound
+	}
+
+	// Verify bucket and key match
+	if upload.Bucket != bucket || upload.Key != key {
+		return nil, ErrUploadNotFound
+	}
+
+	// Check if source bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, srcBucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	// Get source object metadata
+	srcObj, err := fs.metadata.GetObject(ctx, srcBucket, srcKey)
+	if err != nil {
+		return nil, err
+	}
+	if srcObj == nil {
+		return nil, ErrObjectNotFound
+	}
+
+	// Open source object file
+	srcPath := filepath.Join(fs.dataDir, srcBucket, srcKey)
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrObjectNotFound
+		}
+		return nil, fmt.Errorf("failed to open source object: %w", err)
+	}
+	defer srcFile.Close()
+
+	// Determine start and end positions
+	var start, end int64
+	if startByte != nil && endByte != nil {
+		start = *startByte
+		end = *endByte
+		// Validate range
+		if start < 0 || end >= srcObj.Size || start > end {
+			return nil, ErrInvalidRange
+		}
+	} else {
+		start = 0
+		end = srcObj.Size - 1
+	}
+
+	// Seek to start position
+	if _, err := srcFile.Seek(start, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("failed to seek: %w", err)
+	}
+
+	// Calculate copy size
+	copySize := end - start + 1
+
+	// Create part file
+	partsDir := filepath.Join(fs.dataDir, ".uploads", uploadID)
+	partPath := filepath.Join(partsDir, fmt.Sprintf("%d", partNumber))
+
+	// Write to temp file first
+	tmpFile, err := os.CreateTemp(partsDir, ".tmp-*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+	}()
+
+	// Copy data and calculate MD5
+	hash := md5.New()
+	writer := io.MultiWriter(tmpFile, hash)
+
+	// Use LimitReader to copy only the specified range
+	limitedReader := io.LimitReader(srcFile, copySize)
+	written, err := io.Copy(writer, limitedReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to copy data: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// Calculate ETag
+	etag := hex.EncodeToString(hash.Sum(nil))
+
+	// Rename temp file to part file
+	if err := os.Rename(tmpPath, partPath); err != nil {
+		return nil, fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	part := &Part{
+		PartNumber:   partNumber,
+		Size:         written,
+		ETag:         etag,
+		LastModified: time.Now(),
+	}
+
+	// Save part metadata
+	if err := fs.metadata.PutPart(ctx, uploadID, part); err != nil {
+		os.Remove(partPath)
+		return nil, err
+	}
+
+	return part, nil
+}
+
 // CompleteMultipartUpload completes a multipart upload.
 func (fs *FileSystem) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error) {
 	// Check if upload exists
@@ -695,6 +923,80 @@ func (fs *FileSystem) ListParts(ctx context.Context, input *ListPartsInput) (*Li
 	}, nil
 }
 
+// ListMultipartUploads lists in-progress multipart uploads in a bucket.
+func (fs *FileSystem) ListMultipartUploads(ctx context.Context, input *ListMultipartUploadsInput) (*ListMultipartUploadsOutput, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, input.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	uploads, isTruncated, nextKeyMarker, nextUploadIDMarker, err := fs.metadata.ListMultipartUploadsByBucket(
+		ctx,
+		input.Bucket,
+		input.Prefix,
+		input.MaxUploads,
+		input.KeyMarker,
+		input.UploadIdMarker,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ListMultipartUploadsOutput{
+		Uploads:            uploads,
+		IsTruncated:        isTruncated,
+		NextKeyMarker:      nextKeyMarker,
+		NextUploadIdMarker: nextUploadIDMarker,
+	}, nil
+}
+
+// DeleteObjects deletes multiple objects.
+func (fs *FileSystem) DeleteObjects(ctx context.Context, bucket string, keys []string) ([]DeletedObject, []DeleteError, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !exists {
+		return nil, nil, ErrBucketNotFound
+	}
+
+	deleted := make([]DeletedObject, 0, len(keys))
+	errs := make([]DeleteError, 0)
+
+	// Delete each object
+	for _, key := range keys {
+		// Delete object file
+		objectPath := filepath.Join(fs.dataDir, bucket, key)
+		if err := os.Remove(objectPath); err != nil && !os.IsNotExist(err) {
+			// If there's an error other than "not exists", add to error list
+			errs = append(errs, DeleteError{
+				Key:     key,
+				Code:    "InternalError",
+				Message: fmt.Sprintf("Failed to delete object: %v", err),
+			})
+			continue
+		}
+
+		// Delete object metadata
+		if err := fs.metadata.DeleteObject(ctx, bucket, key); err != nil {
+			// Even if metadata deletion fails, we still report success
+			// This matches S3 behavior for DeleteObjects
+		}
+
+		// Report as deleted (even if it didn't exist, matching S3 behavior)
+		deleted = append(deleted, DeletedObject{
+			Key: key,
+		})
+	}
+
+	return deleted, errs, nil
+}
+
 // generateUploadID generates a unique upload ID.
 func generateUploadID() string {
 	return fmt.Sprintf("%d-%s", time.Now().UnixNano(), randomHex(16))
@@ -724,4 +1026,19 @@ var (
 	ErrInvalidBucketName   = errors.New("invalid bucket name")
 	ErrUploadNotFound      = errors.New("upload not found")
 	ErrInvalidPart         = errors.New("invalid part")
+	ErrInvalidRange        = errors.New("invalid range")
 )
+
+// BucketNotFoundError is an error that includes the bucket name.
+type BucketNotFoundError struct {
+	Bucket string
+}
+
+func (e *BucketNotFoundError) Error() string {
+	return fmt.Sprintf("bucket not found: %s", e.Bucket)
+}
+
+// Is implements errors.Is for BucketNotFoundError.
+func (e *BucketNotFoundError) Is(target error) bool {
+	return target == ErrBucketNotFound
+}

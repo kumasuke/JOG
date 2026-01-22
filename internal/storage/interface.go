@@ -82,6 +82,35 @@ type ListPartsOutput struct {
 	NextPartNumberMarker int32
 }
 
+// ListMultipartUploadsInput holds parameters for listing multipart uploads.
+type ListMultipartUploadsInput struct {
+	Bucket         string
+	Prefix         string
+	MaxUploads     int32
+	KeyMarker      string
+	UploadIdMarker string
+}
+
+// ListMultipartUploadsOutput holds the result of listing multipart uploads.
+type ListMultipartUploadsOutput struct {
+	Uploads            []MultipartUpload
+	IsTruncated        bool
+	NextKeyMarker      string
+	NextUploadIdMarker string
+}
+
+// DeletedObject represents a successfully deleted object.
+type DeletedObject struct {
+	Key string
+}
+
+// DeleteError represents an error deleting an object.
+type DeleteError struct {
+	Key     string
+	Code    string
+	Message string
+}
+
 // Storage defines the interface for storage backends.
 type Storage interface {
 	// Bucket operations
@@ -96,14 +125,18 @@ type Storage interface {
 	GetObjectRange(ctx context.Context, bucket, key string, start, end int64) (*ObjectData, error)
 	HeadObject(ctx context.Context, bucket, key string) (*Object, error)
 	DeleteObject(ctx context.Context, bucket, key string) error
+	DeleteObjects(ctx context.Context, bucket string, keys []string) ([]DeletedObject, []DeleteError, error)
+	CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string, metadata map[string]string) (*Object, error)
 	ListObjectsV2(ctx context.Context, input *ListObjectsInput) (*ListObjectsOutput, error)
 
 	// Multipart upload operations
 	CreateMultipartUpload(ctx context.Context, bucket, key, contentType string, metadata map[string]string) (*MultipartUpload, error)
 	UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int32, body io.Reader, size int64) (*Part, error)
+	UploadPartCopy(ctx context.Context, bucket, key, uploadID string, partNumber int32, srcBucket, srcKey string, startByte, endByte *int64) (*Part, error)
 	CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error)
 	AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error
 	ListParts(ctx context.Context, input *ListPartsInput) (*ListPartsOutput, error)
+	ListMultipartUploads(ctx context.Context, input *ListMultipartUploadsInput) (*ListMultipartUploadsOutput, error)
 
 	// Close releases storage resources.
 	Close() error

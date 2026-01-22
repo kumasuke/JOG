@@ -369,6 +369,74 @@ func (m *Metadata) DeleteParts(ctx context.Context, uploadID string) error {
 	return err
 }
 
+// ListMultipartUploadsByBucket lists multipart uploads in a bucket with pagination.
+func (m *Metadata) ListMultipartUploadsByBucket(ctx context.Context, bucket, prefix string, maxUploads int32, keyMarker, uploadIDMarker string) ([]MultipartUpload, bool, string, string, error) {
+	if maxUploads <= 0 {
+		maxUploads = 1000
+	}
+
+	// Build query with pagination support
+	// For pagination: we need uploads > (keyMarker, uploadIDMarker)
+	var rows *sql.Rows
+	var err error
+
+	if keyMarker == "" {
+		// No pagination marker, just prefix filter
+		rows, err = m.db.QueryContext(ctx, `
+			SELECT upload_id, bucket, key, content_type, metadata, initiated
+			FROM multipart_uploads
+			WHERE bucket = ? AND key LIKE ?
+			ORDER BY key, upload_id
+			LIMIT ?
+		`, bucket, prefix+"%", maxUploads+1)
+	} else {
+		// With pagination marker
+		rows, err = m.db.QueryContext(ctx, `
+			SELECT upload_id, bucket, key, content_type, metadata, initiated
+			FROM multipart_uploads
+			WHERE bucket = ? AND key LIKE ?
+			  AND (key > ? OR (key = ? AND upload_id > ?))
+			ORDER BY key, upload_id
+			LIMIT ?
+		`, bucket, prefix+"%", keyMarker, keyMarker, uploadIDMarker, maxUploads+1)
+	}
+
+	if err != nil {
+		return nil, false, "", "", err
+	}
+	defer rows.Close()
+
+	var uploads []MultipartUpload
+	for rows.Next() {
+		var upload MultipartUpload
+		var metadataStr string
+		if err := rows.Scan(&upload.UploadID, &upload.Bucket, &upload.Key, &upload.ContentType, &metadataStr, &upload.Initiated); err != nil {
+			return nil, false, "", "", err
+		}
+		if metadataStr != "" {
+			if err := json.Unmarshal([]byte(metadataStr), &upload.Metadata); err != nil {
+				return nil, false, "", "", err
+			}
+		}
+		uploads = append(uploads, upload)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, false, "", "", err
+	}
+
+	isTruncated := len(uploads) > int(maxUploads)
+	var nextKeyMarker, nextUploadIDMarker string
+	if isTruncated {
+		lastUpload := uploads[maxUploads-1]
+		nextKeyMarker = lastUpload.Key
+		nextUploadIDMarker = lastUpload.UploadID
+		uploads = uploads[:maxUploads]
+	}
+
+	return uploads, isTruncated, nextKeyMarker, nextUploadIDMarker, nil
+}
+
 // Close closes the database connection.
 func (m *Metadata) Close() error {
 	return m.db.Close()
