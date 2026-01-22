@@ -17,9 +17,9 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 | Bucket - Basic | 5 | 6 | 83% |
 | Bucket - Configuration | 17 | 50+ | ~34% |
 | Object - Basic | 8 | 9 | 89% |
-| Object - Advanced | 7 | 15+ | ~47% |
+| Object - Advanced | 13 | 15+ | ~87% |
 | Multipart Upload | 7 | 7 | 100% |
-| **Total (Core APIs)** | **44** | **~87** | **~51%** |
+| **Total (Core APIs)** | **50** | **~87** | **~57%** |
 
 ---
 
@@ -201,12 +201,12 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 
 | Operation | Status | Description |
 |-----------|--------|-------------|
-| GetObjectLockConfiguration | [ ] | Get Object Lock configuration |
-| PutObjectLockConfiguration | [ ] | Set Object Lock configuration |
-| GetObjectRetention | [ ] | Get object retention |
-| PutObjectRetention | [ ] | Set object retention |
-| GetObjectLegalHold | [ ] | Get legal hold status |
-| PutObjectLegalHold | [ ] | Set legal hold |
+| GetObjectLockConfiguration | [x] | Get Object Lock configuration |
+| PutObjectLockConfiguration | [x] | Set Object Lock configuration |
+| GetObjectRetention | [x] | Get object retention |
+| PutObjectRetention | [x] | Set object retention |
+| GetObjectLegalHold | [x] | Get legal hold status |
+| PutObjectLegalHold | [x] | Set legal hold |
 
 ### Advanced Object Operations
 
@@ -271,7 +271,7 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 ### Low Priority (Advanced Features)
 - [x] Lifecycle management (GetBucketLifecycleConfiguration, PutBucketLifecycleConfiguration, DeleteBucketLifecycle)
 - [x] Encryption configuration (GetBucketEncryption, PutBucketEncryption, DeleteBucketEncryption)
-- Object Lock / Retention
+- [x] Object Lock / Retention (GetObjectLockConfiguration, PutObjectLockConfiguration, GetObjectRetention, PutObjectRetention, GetObjectLegalHold, PutObjectLegalHold)
 - Replication
 - Analytics / Metrics
 - Intelligent-Tiering
