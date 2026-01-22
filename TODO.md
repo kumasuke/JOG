@@ -64,7 +64,19 @@ Each feature follows TDD (Test-Driven Development):
 
 ---
 
-## Phase 4: Future Enhancements
+### Phase 4: ACL (Access Control Lists) ✅
+
+**Bucket ACL**
+- GetBucketAcl, PutBucketAcl
+- Support for canned ACLs (private, public-read, etc.)
+
+**Object ACL**
+- GetObjectAcl, PutObjectAcl
+- Support for x-amz-acl header in PutObject
+
+---
+
+## Phase 5: Future Enhancements
 
 ### Object Lock & Retention
 - [ ] GetObjectLockConfiguration / PutObjectLockConfiguration
@@ -78,10 +90,6 @@ Each feature follows TDD (Test-Driven Development):
 ### Encryption
 - [ ] GetBucketEncryption / PutBucketEncryption
 - [ ] DeleteBucketEncryption
-
-### ACL (Access Control Lists)
-- [ ] GetBucketAcl / PutBucketAcl
-- [ ] GetObjectAcl / PutObjectAcl
 
 ---
 

@@ -15,11 +15,11 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 | Category | Implemented | Total | Progress |
 |----------|-------------|-------|----------|
 | Bucket - Basic | 5 | 6 | 83% |
-| Bucket - Configuration | 9 | 50+ | ~18% |
+| Bucket - Configuration | 11 | 50+ | ~22% |
 | Object - Basic | 8 | 9 | 89% |
-| Object - Advanced | 3 | 15+ | ~20% |
+| Object - Advanced | 7 | 15+ | ~47% |
 | Multipart Upload | 7 | 7 | 100% |
-| **Total (Core APIs)** | **32** | **~87** | **~37%** |
+| **Total (Core APIs)** | **38** | **~87** | **~44%** |
 
 ---
 
@@ -40,8 +40,8 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 
 | Operation | Status | Description |
 |-----------|--------|-------------|
-| GetBucketAcl | [ ] | Get bucket ACL |
-| PutBucketAcl | [ ] | Set bucket ACL |
+| GetBucketAcl | [x] | Get bucket ACL |
+| PutBucketAcl | [x] | Set bucket ACL |
 | GetBucketPolicy | [ ] | Get bucket policy |
 | PutBucketPolicy | [ ] | Set bucket policy |
 | DeleteBucketPolicy | [ ] | Delete bucket policy |
@@ -191,8 +191,8 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 | Operation | Status | Description |
 |-----------|--------|-------------|
 | GetObjectAttributes | [x] | Get object attributes |
-| GetObjectAcl | [ ] | Get object ACL |
-| PutObjectAcl | [ ] | Set object ACL |
+| GetObjectAcl | [x] | Get object ACL |
+| PutObjectAcl | [x] | Set object ACL |
 | GetObjectTagging | [x] | Get object tags |
 | PutObjectTagging | [x] | Set object tags |
 | DeleteObjectTagging | [x] | Delete object tags |
