@@ -354,6 +354,51 @@ type ObjectLegalHold struct {
 	Status ObjectLegalHoldStatus
 }
 
+// WebsiteConfiguration represents a bucket website configuration.
+type WebsiteConfiguration struct {
+	IndexDocument         *IndexDocument
+	ErrorDocument         *ErrorDocument
+	RedirectAllRequestsTo *RedirectAllRequestsTo
+	RoutingRules          []RoutingRule
+}
+
+// IndexDocument represents the index document configuration.
+type IndexDocument struct {
+	Suffix string
+}
+
+// ErrorDocument represents the error document configuration.
+type ErrorDocument struct {
+	Key string
+}
+
+// RedirectAllRequestsTo represents redirect all requests configuration.
+type RedirectAllRequestsTo struct {
+	HostName string
+	Protocol string
+}
+
+// RoutingRule represents a routing rule for website hosting.
+type RoutingRule struct {
+	Condition *Condition
+	Redirect  *Redirect
+}
+
+// Condition represents a routing rule condition.
+type Condition struct {
+	KeyPrefixEquals             string
+	HttpErrorCodeReturnedEquals string
+}
+
+// Redirect represents redirect configuration.
+type Redirect struct {
+	HostName             string
+	HttpRedirectCode     string
+	Protocol             string
+	ReplaceKeyPrefixWith string
+	ReplaceKeyWith       string
+}
+
 // Storage defines the interface for storage backends.
 type Storage interface {
 	// Bucket operations
@@ -427,6 +472,16 @@ type Storage interface {
 	GetObjectRetention(ctx context.Context, bucket, key string) (*ObjectRetention, error)
 	PutObjectLegalHold(ctx context.Context, bucket, key string, legalHold *ObjectLegalHold) error
 	GetObjectLegalHold(ctx context.Context, bucket, key string) (*ObjectLegalHold, error)
+
+	// Bucket Policy operations
+	PutBucketPolicy(ctx context.Context, bucket string, policy string) error
+	GetBucketPolicy(ctx context.Context, bucket string) (string, error)
+	DeleteBucketPolicy(ctx context.Context, bucket string) error
+
+	// Website Hosting operations
+	PutBucketWebsite(ctx context.Context, bucket string, config *WebsiteConfiguration) error
+	GetBucketWebsite(ctx context.Context, bucket string) (*WebsiteConfiguration, error)
+	DeleteBucketWebsite(ctx context.Context, bucket string) error
 
 	// Close releases storage resources.
 	Close() error

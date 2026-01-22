@@ -194,6 +194,24 @@ var (
 		Message:    "The specified object does not have an ObjectLock configuration.",
 		HTTPStatus: http.StatusNotFound,
 	}
+
+	ErrNoSuchBucketPolicy = &S3Error{
+		Code:       "NoSuchBucketPolicy",
+		Message:    "The bucket policy does not exist.",
+		HTTPStatus: http.StatusNotFound,
+	}
+
+	ErrNoSuchWebsiteConfiguration = &S3Error{
+		Code:       "NoSuchWebsiteConfiguration",
+		Message:    "The specified bucket does not have a website configuration.",
+		HTTPStatus: http.StatusNotFound,
+	}
+
+	ErrMalformedPolicy = &S3Error{
+		Code:       "MalformedPolicy",
+		Message:    "This policy contains invalid Json.",
+		HTTPStatus: http.StatusBadRequest,
+	}
 )
 
 // WriteError writes an S3 error response.

@@ -609,7 +609,96 @@ func (h *Handler) GetObjectAttributes(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ListObjectsV2 handles GET /{bucket} - ListObjectsV2.
+// ListBucketResultV1 is the response for ListObjects (v1).
+type ListBucketResultV1 struct {
+	XMLName        xml.Name       `xml:"ListBucketResult"`
+	Xmlns          string         `xml:"xmlns,attr"`
+	Name           string         `xml:"Name"`
+	Prefix         string         `xml:"Prefix"`
+	Delimiter      string         `xml:"Delimiter,omitempty"`
+	Marker         string         `xml:"Marker,omitempty"`
+	MaxKeys        int32          `xml:"MaxKeys"`
+	IsTruncated    bool           `xml:"IsTruncated"`
+	NextMarker     string         `xml:"NextMarker,omitempty"`
+	Contents       []ObjectInfo   `xml:"Contents"`
+	CommonPrefixes []CommonPrefix `xml:"CommonPrefixes,omitempty"`
+}
+
+// ListObjects handles GET /{bucket} without list-type=2 - ListObjects (v1).
+func (h *Handler) ListObjects(w http.ResponseWriter, r *http.Request) {
+	bucket := GetBucket(r)
+
+	// Parse query parameters
+	query := r.URL.Query()
+	prefix := query.Get("prefix")
+	delimiter := query.Get("delimiter")
+	maxKeysStr := query.Get("max-keys")
+	marker := query.Get("marker")
+
+	maxKeys := int32(1000)
+	if maxKeysStr != "" {
+		if mk, err := strconv.ParseInt(maxKeysStr, 10, 32); err == nil {
+			maxKeys = int32(mk)
+		}
+	}
+
+	// Use marker as start-after for the storage layer
+	input := &storage.ListObjectsInput{
+		Bucket:     bucket,
+		Prefix:     prefix,
+		Delimiter:  delimiter,
+		MaxKeys:    maxKeys,
+		StartAfter: marker,
+	}
+
+	output, err := h.storage.ListObjectsV2(r.Context(), input)
+	if err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		WriteError(w, ErrInternalError)
+		return
+	}
+
+	result := ListBucketResultV1{
+		Xmlns:       "http://s3.amazonaws.com/doc/2006-03-01/",
+		Name:        bucket,
+		Prefix:      prefix,
+		Delimiter:   delimiter,
+		Marker:      marker,
+		MaxKeys:     maxKeys,
+		IsTruncated: output.IsTruncated,
+		Contents:    make([]ObjectInfo, len(output.Objects)),
+	}
+
+	for i, obj := range output.Objects {
+		result.Contents[i] = ObjectInfo{
+			Key:          obj.Key,
+			LastModified: obj.LastModified.Format(time.RFC3339),
+			ETag:         "\"" + obj.ETag + "\"",
+			Size:         obj.Size,
+			StorageClass: "STANDARD",
+		}
+	}
+
+	// Set NextMarker if truncated (use the last key in the result)
+	if output.IsTruncated && len(output.Objects) > 0 {
+		result.NextMarker = output.Objects[len(output.Objects)-1].Key
+	}
+
+	for _, prefix := range output.CommonPrefixes {
+		result.CommonPrefixes = append(result.CommonPrefixes, CommonPrefix{Prefix: prefix})
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	if err := xml.NewEncoder(w).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode ListObjects response")
+	}
+}
+
+// ListObjectsV2 handles GET /{bucket}?list-type=2 - ListObjectsV2.
 func (h *Handler) ListObjectsV2(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 
