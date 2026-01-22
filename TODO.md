@@ -93,17 +93,17 @@ Each feature follows TDD (Test-Driven Development):
 
 ---
 
-## Phase 2: Feature Expansion (Future)
+## Phase 2: Feature Expansion
 
 ### Multipart Upload
-- [ ] TEST: Write multipart tests
-- [ ] IMPL: CreateMultipartUpload
-- [ ] IMPL: UploadPart
-- [ ] IMPL: CompleteMultipartUpload
-- [ ] IMPL: AbortMultipartUpload
-- [ ] IMPL: ListParts
+- [x] TEST: Write multipart tests
+- [x] IMPL: CreateMultipartUpload
+- [x] IMPL: UploadPart
+- [x] IMPL: CompleteMultipartUpload
+- [x] IMPL: AbortMultipartUpload
+- [x] IMPL: ListParts
 
-### Additional Operations
+### Additional Operations (Future)
 - [ ] CopyObject
 - [ ] DeleteObjects (batch)
 - [ ] GetObjectAttributes
