@@ -15,11 +15,11 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 | Category | Implemented | Total | Progress |
 |----------|-------------|-------|----------|
 | Bucket - Basic | 5 | 6 | 83% |
-| Bucket - Configuration | 11 | 50+ | ~22% |
+| Bucket - Configuration | 17 | 50+ | ~34% |
 | Object - Basic | 8 | 9 | 89% |
 | Object - Advanced | 7 | 15+ | ~47% |
 | Multipart Upload | 7 | 7 | 100% |
-| **Total (Core APIs)** | **38** | **~87** | **~44%** |
+| **Total (Core APIs)** | **44** | **~87** | **~51%** |
 
 ---
 
@@ -63,17 +63,17 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 | Operation | Status | Description |
 |-----------|--------|-------------|
 | GetBucketLifecycle | [ ] | Get lifecycle rules (deprecated) |
-| GetBucketLifecycleConfiguration | [ ] | Get lifecycle configuration |
-| PutBucketLifecycleConfiguration | [ ] | Set lifecycle configuration |
-| DeleteBucketLifecycle | [ ] | Delete lifecycle configuration |
+| GetBucketLifecycleConfiguration | [x] | Get lifecycle configuration |
+| PutBucketLifecycleConfiguration | [x] | Set lifecycle configuration |
+| DeleteBucketLifecycle | [x] | Delete lifecycle configuration |
 
 ### Encryption
 
 | Operation | Status | Description |
 |-----------|--------|-------------|
-| GetBucketEncryption | [ ] | Get default encryption |
-| PutBucketEncryption | [ ] | Set default encryption |
-| DeleteBucketEncryption | [ ] | Delete default encryption |
+| GetBucketEncryption | [x] | Get default encryption |
+| PutBucketEncryption | [x] | Set default encryption |
+| DeleteBucketEncryption | [x] | Delete default encryption |
 
 ### CORS
 
