@@ -111,10 +111,28 @@ Each feature follows TDD (Test-Driven Development):
 
 ---
 
-## Phase 7: Future Enhancements
+## Phase 7: Additional Compatibility
 
-### Additional Features (Planned)
-- [ ] Bucket Policy (GetBucketPolicy / PutBucketPolicy / DeleteBucketPolicy)
+### High Priority - Legacy Compatibility
+- [ ] ListObjects (v1) - Legacy list objects API for older tools/SDKs
+
+### Medium Priority - Access Control
+- [ ] Bucket Policy
+  - GetBucketPolicy
+  - PutBucketPolicy
+  - DeleteBucketPolicy
+
+### Low Priority - Static Hosting
+- [ ] Website Hosting
+  - GetBucketWebsite
+  - PutBucketWebsite
+  - DeleteBucketWebsite
+
+---
+
+## Phase 8: Future Enhancements (Optional)
+
+### Not Prioritized
 - [ ] Bucket Notification (GetBucketNotification / PutBucketNotification)
 - [ ] Object Select (SelectObjectContent)
 
