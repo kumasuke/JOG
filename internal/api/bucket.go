@@ -22,7 +22,7 @@ type ListAllMyBucketsResult struct {
 // Owner represents bucket owner information.
 type Owner struct {
 	ID          string `xml:"ID"`
-	DisplayName string `xml:"DisplayName"`
+	DisplayName string `xml:"DisplayName,omitempty"`
 }
 
 // Buckets is a container for bucket list.
@@ -147,5 +147,42 @@ func (h *Handler) ListBuckets(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if err := xml.NewEncoder(w).Encode(result); err != nil {
 		log.Error().Err(err).Msg("Failed to encode ListBuckets response")
+	}
+}
+
+// LocationConstraint is the response for GetBucketLocation.
+type LocationConstraint struct {
+	XMLName  xml.Name `xml:"LocationConstraint"`
+	Xmlns    string   `xml:"xmlns,attr"`
+	Location string   `xml:",chardata"`
+}
+
+// GetBucketLocation handles GET /{bucket}?location - GetBucketLocation.
+func (h *Handler) GetBucketLocation(w http.ResponseWriter, r *http.Request) {
+	bucket := GetBucket(r)
+
+	// Check if bucket exists
+	_, err := h.storage.HeadBucket(r.Context(), bucket)
+	if err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		WriteErrorWithResource(w, ErrInternalError, "/"+bucket)
+		return
+	}
+
+	// S3 returns empty LocationConstraint for us-east-1
+	// For other regions, it returns the region name
+	// JOG always uses us-east-1 as default
+	result := LocationConstraint{
+		Xmlns:    "http://s3.amazonaws.com/doc/2006-03-01/",
+		Location: "", // Empty for us-east-1
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	if err := xml.NewEncoder(w).Encode(result); err != nil {
+		log.Error().Err(err).Msg("Failed to encode GetBucketLocation response")
 	}
 }

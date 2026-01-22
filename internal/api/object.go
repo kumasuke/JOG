@@ -120,7 +120,28 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	obj, err := h.storage.PutObject(r.Context(), bucket, key, r.Body, contentLength, contentType, metadata)
+	// Parse x-amz-tagging header
+	taggingHeader := r.Header.Get("x-amz-tagging")
+	tags, err := ParseTaggingHeader(taggingHeader)
+	if err != nil {
+		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket+"/"+key)
+		return
+	}
+
+	// Check if versioning is enabled
+	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
+
+	var obj *storage.Object
+	var versionID string
+
+	if versioningStatus == storage.VersioningStatusEnabled {
+		// Use versioned put
+		obj, versionID, err = h.storage.PutObjectVersioned(r.Context(), bucket, key, r.Body, contentLength, contentType, metadata)
+	} else {
+		// Use regular put
+		obj, err = h.storage.PutObject(r.Context(), bucket, key, r.Body, contentLength, contentType, metadata)
+	}
+
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
@@ -130,7 +151,39 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Store tags if provided
+	// Note: Tag setting failure is logged but does not fail the request.
+	// This matches S3's behavior where the object creation is prioritized,
+	// and tag failures are treated as non-critical. The object is still
+	// usable without tags, and tags can be set separately via PutObjectTagging.
+	if len(tags) > 0 {
+		if err := h.storage.PutObjectTagging(r.Context(), bucket, key, tags); err != nil {
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("Failed to set object tags")
+		}
+	}
+
+	// Handle canned ACL header
+	// Note: ACL setting failure is logged but does not fail the request.
+	// Similar to tags, the object creation takes priority. The default ACL
+	// (private) is applied when ACL setting fails, and ACL can be set
+	// separately via PutObjectAcl.
+	cannedACL := r.Header.Get("x-amz-acl")
+	if cannedACL != "" {
+		if !isValidCannedACL(cannedACL) {
+			// Log warning but don't fail - use default private ACL
+			log.Warn().Str("bucket", bucket).Str("key", key).Str("acl", cannedACL).Msg("Invalid canned ACL specified, ignoring")
+		} else {
+			acl := storage.CannedACLToACL(storage.CannedACL(cannedACL), storage.DefaultOwnerID, storage.DefaultOwnerDisplay)
+			if err := h.storage.PutObjectACL(r.Context(), bucket, key, acl); err != nil {
+				log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("Failed to set object ACL")
+			}
+		}
+	}
+
 	w.Header().Set("ETag", "\""+obj.ETag+"\"")
+	if versionID != "" {
+		w.Header().Set("x-amz-version-id", versionID)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -139,14 +192,26 @@ func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
 
+	// Check for versionId query parameter
+	versionID := r.URL.Query().Get("versionId")
+
 	// Check for Range header
 	rangeHeader := r.Header.Get("Range")
-	if rangeHeader != "" {
+	if rangeHeader != "" && versionID == "" {
 		h.getObjectRange(w, r, bucket, key, rangeHeader)
 		return
 	}
 
-	obj, err := h.storage.GetObject(r.Context(), bucket, key)
+	var obj *storage.ObjectData
+	var err error
+
+	if versionID != "" {
+		// Get specific version
+		obj, err = h.storage.GetObjectVersioned(r.Context(), bucket, key, versionID)
+	} else {
+		obj, err = h.storage.GetObject(r.Context(), bucket, key)
+	}
+
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
@@ -166,6 +231,11 @@ func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(obj.Size, 10))
 	w.Header().Set("ETag", "\""+obj.ETag+"\"")
 	w.Header().Set("Last-Modified", obj.LastModified.Format(http.TimeFormat))
+
+	// Set version ID header if versioning was used
+	if versionID != "" {
+		w.Header().Set("x-amz-version-id", versionID)
+	}
 
 	// Set custom metadata headers
 	for k, v := range obj.Metadata {
@@ -305,6 +375,40 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
 
+	// Check for versionId query parameter
+	versionID := r.URL.Query().Get("versionId")
+
+	// Check if versioning is enabled
+	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
+
+	if versioningStatus == storage.VersioningStatusEnabled || versionID != "" {
+		// Use versioned delete
+		returnedVersionID, isDeleteMarker, err := h.storage.DeleteObjectVersioned(r.Context(), bucket, key, versionID)
+		if err != nil {
+			if errors.Is(err, storage.ErrBucketNotFound) {
+				WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+				return
+			}
+			if errors.Is(err, storage.ErrObjectNotFound) {
+				// S3 returns 204 even if version doesn't exist
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			WriteError(w, ErrInternalError)
+			return
+		}
+
+		if returnedVersionID != "" {
+			w.Header().Set("x-amz-version-id", returnedVersionID)
+		}
+		if isDeleteMarker {
+			w.Header().Set("x-amz-delete-marker", "true")
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Regular delete (no versioning)
 	err := h.storage.DeleteObject(r.Context(), bucket, key)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {

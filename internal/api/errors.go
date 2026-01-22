@@ -146,6 +146,30 @@ var (
 		Message:    "The XML you provided was not well-formed or did not validate against our published schema.",
 		HTTPStatus: http.StatusBadRequest,
 	}
+
+	ErrNoSuchTagSet = &S3Error{
+		Code:       "NoSuchTagSet",
+		Message:    "The TagSet does not exist.",
+		HTTPStatus: http.StatusNotFound,
+	}
+
+	ErrNoSuchCORSConfiguration = &S3Error{
+		Code:       "NoSuchCORSConfiguration",
+		Message:    "The CORS configuration does not exist.",
+		HTTPStatus: http.StatusNotFound,
+	}
+
+	ErrInvalidTag = &S3Error{
+		Code:       "InvalidTag",
+		Message:    "The tag does not comply with tag restrictions.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+
+	ErrInvalidArgument = &S3Error{
+		Code:       "InvalidArgument",
+		Message:    "Invalid Argument",
+		HTTPStatus: http.StatusBadRequest,
+	}
 )
 
 // WriteError writes an S3 error response.

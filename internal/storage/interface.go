@@ -111,6 +111,121 @@ type DeleteError struct {
 	Message string
 }
 
+// Tag represents a key-value tag.
+type Tag struct {
+	Key   string
+	Value string
+}
+
+// CORSRule represents a CORS rule.
+type CORSRule struct {
+	AllowedOrigins []string
+	AllowedMethods []string
+	AllowedHeaders []string
+	ExposeHeaders  []string
+	MaxAgeSeconds  int32
+}
+
+// CORSConfiguration holds CORS rules for a bucket.
+type CORSConfiguration struct {
+	Rules []CORSRule
+}
+
+// VersioningStatus represents the versioning status of a bucket.
+type VersioningStatus string
+
+const (
+	VersioningStatusDisabled  VersioningStatus = ""
+	VersioningStatusEnabled   VersioningStatus = "Enabled"
+	VersioningStatusSuspended VersioningStatus = "Suspended"
+)
+
+// ObjectVersion represents a version of an object.
+type ObjectVersion struct {
+	Key            string
+	VersionID      string
+	IsLatest       bool
+	LastModified   time.Time
+	ETag           string
+	Size           int64
+	ContentType    string
+	Metadata       map[string]string
+	IsDeleteMarker bool
+}
+
+// ListObjectVersionsInput holds parameters for listing object versions.
+type ListObjectVersionsInput struct {
+	Bucket          string
+	Prefix          string
+	Delimiter       string
+	MaxKeys         int32
+	KeyMarker       string
+	VersionIdMarker string
+}
+
+// ListObjectVersionsOutput holds the result of listing object versions.
+type ListObjectVersionsOutput struct {
+	Versions            []ObjectVersion
+	DeleteMarkers       []ObjectVersion
+	CommonPrefixes      []string
+	IsTruncated         bool
+	NextKeyMarker       string
+	NextVersionIdMarker string
+}
+
+// ACLPermission represents an ACL permission.
+type ACLPermission string
+
+const (
+	ACLPermissionFullControl ACLPermission = "FULL_CONTROL"
+	ACLPermissionWrite       ACLPermission = "WRITE"
+	ACLPermissionWriteACP    ACLPermission = "WRITE_ACP"
+	ACLPermissionRead        ACLPermission = "READ"
+	ACLPermissionReadACP     ACLPermission = "READ_ACP"
+)
+
+// ACLGranteeType represents the type of grantee.
+type ACLGranteeType string
+
+const (
+	ACLGranteeTypeCanonicalUser   ACLGranteeType = "CanonicalUser"
+	ACLGranteeTypeAmazonCustomer  ACLGranteeType = "AmazonCustomerByEmail"
+	ACLGranteeTypeGroup           ACLGranteeType = "Group"
+)
+
+// ACLGrant represents a single grant in an ACL.
+type ACLGrant struct {
+	Permission  ACLPermission
+	GranteeType ACLGranteeType
+	GranteeID   string // Canonical user ID
+	GranteeURI  string // Group URI (e.g., http://acs.amazonaws.com/groups/global/AllUsers)
+}
+
+// ACL represents an access control list.
+type ACL struct {
+	OwnerID      string
+	OwnerDisplay string
+	Grants       []ACLGrant
+}
+
+// CannedACL represents a predefined ACL.
+type CannedACL string
+
+const (
+	CannedACLPrivate           CannedACL = "private"
+	CannedACLPublicRead        CannedACL = "public-read"
+	CannedACLPublicReadWrite   CannedACL = "public-read-write"
+	CannedACLAuthenticatedRead CannedACL = "authenticated-read"
+	CannedACLBucketOwnerRead   CannedACL = "bucket-owner-read"
+	CannedACLBucketOwnerFC     CannedACL = "bucket-owner-full-control"
+)
+
+// AllUsersGroupURI is the URI for the AllUsers group.
+const AllUsersGroupURI = "http://acs.amazonaws.com/groups/global/AllUsers"
+
+// AuthenticatedUsersGroupURI is the URI for the AuthenticatedUsers group.
+const AuthenticatedUsersGroupURI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers"
+
 // Storage defines the interface for storage backends.
 type Storage interface {
 	// Bucket operations
@@ -137,6 +252,33 @@ type Storage interface {
 	AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error
 	ListParts(ctx context.Context, input *ListPartsInput) (*ListPartsOutput, error)
 	ListMultipartUploads(ctx context.Context, input *ListMultipartUploadsInput) (*ListMultipartUploadsOutput, error)
+
+	// Tagging operations
+	PutObjectTagging(ctx context.Context, bucket, key string, tags []Tag) error
+	GetObjectTagging(ctx context.Context, bucket, key string) ([]Tag, error)
+	DeleteObjectTagging(ctx context.Context, bucket, key string) error
+	PutBucketTagging(ctx context.Context, bucket string, tags []Tag) error
+	GetBucketTagging(ctx context.Context, bucket string) ([]Tag, error)
+	DeleteBucketTagging(ctx context.Context, bucket string) error
+
+	// CORS operations
+	PutBucketCors(ctx context.Context, bucket string, cors *CORSConfiguration) error
+	GetBucketCors(ctx context.Context, bucket string) (*CORSConfiguration, error)
+	DeleteBucketCors(ctx context.Context, bucket string) error
+
+	// Versioning operations
+	PutBucketVersioning(ctx context.Context, bucket string, status VersioningStatus) error
+	GetBucketVersioning(ctx context.Context, bucket string) (VersioningStatus, error)
+	PutObjectVersioned(ctx context.Context, bucket, key string, body io.Reader, size int64, contentType string, metadata map[string]string) (*Object, string, error)
+	GetObjectVersioned(ctx context.Context, bucket, key, versionID string) (*ObjectData, error)
+	DeleteObjectVersioned(ctx context.Context, bucket, key, versionID string) (string, bool, error)
+	ListObjectVersions(ctx context.Context, input *ListObjectVersionsInput) (*ListObjectVersionsOutput, error)
+
+	// ACL operations
+	PutBucketACL(ctx context.Context, bucket string, acl *ACL) error
+	GetBucketACL(ctx context.Context, bucket string) (*ACL, error)
+	PutObjectACL(ctx context.Context, bucket, key string, acl *ACL) error
+	GetObjectACL(ctx context.Context, bucket, key string) (*ACL, error)
 
 	// Close releases storage resources.
 	Close() error
