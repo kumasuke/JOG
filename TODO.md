@@ -40,56 +40,48 @@ Each feature follows TDD (Test-Driven Development):
 
 ---
 
-## Phase 3: Extended Features
+### Phase 3: Extended Features ✅
 
-### GetBucketLocation
-- [ ] TEST: Write GetBucketLocation tests
-- [ ] IMPL: GetBucketLocation handler (return region)
+**GetBucketLocation**
+- GetBucketLocation handler (returns region)
 
-### Tagging - Object
-- [ ] TEST: Write object tagging tests
-  - [ ] TestPutObjectTagging
-  - [ ] TestGetObjectTagging
-  - [ ] TestDeleteObjectTagging
-  - [ ] TestPutObjectWithTagging (x-amz-tagging header)
-- [ ] IMPL: PutObjectTagging handler
-- [ ] IMPL: GetObjectTagging handler
-- [ ] IMPL: DeleteObjectTagging handler
-- [ ] IMPL: Support x-amz-tagging header in PutObject
+**Tagging - Object**
+- PutObjectTagging, GetObjectTagging, DeleteObjectTagging
+- Support x-amz-tagging header in PutObject
 
-### Tagging - Bucket
-- [ ] TEST: Write bucket tagging tests
-  - [ ] TestPutBucketTagging
-  - [ ] TestGetBucketTagging
-  - [ ] TestDeleteBucketTagging
-- [ ] IMPL: PutBucketTagging handler
-- [ ] IMPL: GetBucketTagging handler
-- [ ] IMPL: DeleteBucketTagging handler
+**Tagging - Bucket**
+- PutBucketTagging, GetBucketTagging, DeleteBucketTagging
 
-### CORS Configuration
-- [ ] TEST: Write CORS tests
-  - [ ] TestPutBucketCors
-  - [ ] TestGetBucketCors
-  - [ ] TestDeleteBucketCors
-  - [ ] TestCorsPreflightRequest (OPTIONS)
-- [ ] IMPL: PutBucketCors handler
-- [ ] IMPL: GetBucketCors handler
-- [ ] IMPL: DeleteBucketCors handler
-- [ ] IMPL: CORS preflight handling (OPTIONS request)
+**CORS Configuration**
+- PutBucketCors, GetBucketCors, DeleteBucketCors
+- CORS preflight handling (OPTIONS request)
 
-### Versioning
-- [ ] TEST: Write versioning tests
-  - [ ] TestPutBucketVersioning (enable/suspend)
-  - [ ] TestGetBucketVersioning
-  - [ ] TestPutObjectVersioned
-  - [ ] TestGetObjectVersioned
-  - [ ] TestDeleteObjectVersioned
-  - [ ] TestListObjectVersions
-- [ ] IMPL: PutBucketVersioning handler
-- [ ] IMPL: GetBucketVersioning handler
-- [ ] IMPL: Storage backend versioning support
-- [ ] IMPL: ListObjectVersions handler
-- [ ] IMPL: Version-aware Get/Put/Delete operations
+**Versioning**
+- PutBucketVersioning, GetBucketVersioning
+- ListObjectVersions
+- Version-aware Get/Put/Delete operations
+- Delete markers support
+
+---
+
+## Phase 4: Future Enhancements
+
+### Object Lock & Retention
+- [ ] GetObjectLockConfiguration / PutObjectLockConfiguration
+- [ ] GetObjectRetention / PutObjectRetention
+- [ ] GetObjectLegalHold / PutObjectLegalHold
+
+### Lifecycle Management
+- [ ] GetBucketLifecycleConfiguration / PutBucketLifecycleConfiguration
+- [ ] DeleteBucketLifecycle
+
+### Encryption
+- [ ] GetBucketEncryption / PutBucketEncryption
+- [ ] DeleteBucketEncryption
+
+### ACL (Access Control Lists)
+- [ ] GetBucketAcl / PutBucketAcl
+- [ ] GetObjectAcl / PutObjectAcl
 
 ---
 

@@ -14,12 +14,12 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 
 | Category | Implemented | Total | Progress |
 |----------|-------------|-------|----------|
-| Bucket - Basic | 4 | 4 | 100% |
-| Bucket - Configuration | 0 | 50+ | 0% |
+| Bucket - Basic | 5 | 6 | 83% |
+| Bucket - Configuration | 9 | 50+ | ~18% |
 | Object - Basic | 8 | 9 | 89% |
-| Object - Advanced | 0 | 15+ | 0% |
+| Object - Advanced | 3 | 15+ | ~20% |
 | Multipart Upload | 7 | 7 | 100% |
-| **Total (Core APIs)** | **19** | **~20** | **95%** |
+| **Total (Core APIs)** | **32** | **~87** | **~37%** |
 
 ---
 
@@ -34,7 +34,7 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 | HeadBucket | [x] | Check if bucket exists |
 | ListBuckets | [x] | List all buckets |
 | ListDirectoryBuckets | [ ] | List directory buckets (S3 Express One Zone) |
-| GetBucketLocation | [ ] | Get bucket region |
+| GetBucketLocation | [x] | Get bucket region |
 
 ### Access Control
 
@@ -54,9 +54,9 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 
 | Operation | Status | Description |
 |-----------|--------|-------------|
-| GetBucketVersioning | [ ] | Get versioning state |
-| PutBucketVersioning | [ ] | Enable/suspend versioning |
-| ListObjectVersions | [ ] | List object versions |
+| GetBucketVersioning | [x] | Get versioning state |
+| PutBucketVersioning | [x] | Enable/suspend versioning |
+| ListObjectVersions | [x] | List object versions |
 
 ### Lifecycle
 
@@ -79,17 +79,17 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 
 | Operation | Status | Description |
 |-----------|--------|-------------|
-| GetBucketCors | [ ] | Get CORS configuration |
-| PutBucketCors | [ ] | Set CORS configuration |
-| DeleteBucketCors | [ ] | Delete CORS configuration |
+| GetBucketCors | [x] | Get CORS configuration |
+| PutBucketCors | [x] | Set CORS configuration |
+| DeleteBucketCors | [x] | Delete CORS configuration |
 
 ### Tagging
 
 | Operation | Status | Description |
 |-----------|--------|-------------|
-| GetBucketTagging | [ ] | Get bucket tags |
-| PutBucketTagging | [ ] | Set bucket tags |
-| DeleteBucketTagging | [ ] | Delete bucket tags |
+| GetBucketTagging | [x] | Get bucket tags |
+| PutBucketTagging | [x] | Set bucket tags |
+| DeleteBucketTagging | [x] | Delete bucket tags |
 
 ### Logging
 
@@ -193,9 +193,9 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 | GetObjectAttributes | [x] | Get object attributes |
 | GetObjectAcl | [ ] | Get object ACL |
 | PutObjectAcl | [ ] | Set object ACL |
-| GetObjectTagging | [ ] | Get object tags |
-| PutObjectTagging | [ ] | Set object tags |
-| DeleteObjectTagging | [ ] | Delete object tags |
+| GetObjectTagging | [x] | Get object tags |
+| PutObjectTagging | [x] | Set object tags |
+| DeleteObjectTagging | [x] | Delete object tags |
 
 ### Object Lock & Retention
 
@@ -260,13 +260,13 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 3. [x] ListMultipartUploads - List in-progress uploads
 4. [x] UploadPartCopy - Copy part from existing object
 
-### Medium Priority (Extended Features)
-5. [ ] GetBucketLocation - Return bucket region
-6. [ ] GetObjectTagging / PutObjectTagging - Object tagging
-7. [ ] GetBucketTagging / PutBucketTagging - Bucket tagging
-8. [ ] GetBucketVersioning / PutBucketVersioning - Versioning support
-9. [ ] ListObjectVersions - List versioned objects
-10. [ ] GetBucketCors / PutBucketCors - CORS support
+### Medium Priority (Extended Features) ✅
+5. [x] GetBucketLocation - Return bucket region
+6. [x] GetObjectTagging / PutObjectTagging / DeleteObjectTagging - Object tagging
+7. [x] GetBucketTagging / PutBucketTagging / DeleteBucketTagging - Bucket tagging
+8. [x] GetBucketVersioning / PutBucketVersioning - Versioning support
+9. [x] ListObjectVersions - List versioned objects
+10. [x] GetBucketCors / PutBucketCors / DeleteBucketCors - CORS support
 
 ### Low Priority (Advanced Features)
 - Object Lock / Retention
