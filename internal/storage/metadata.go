@@ -351,6 +351,10 @@ func (m *Metadata) PutObject(ctx context.Context, bucket string, obj *Object) er
 		return err
 	}
 
+	// Clean up old retention/legal-hold settings when overwriting object
+	_, _ = m.db.ExecContext(ctx, `DELETE FROM object_retention WHERE bucket = ? AND key = ?`, bucket, obj.Key)
+	_, _ = m.db.ExecContext(ctx, `DELETE FROM object_legal_hold WHERE bucket = ? AND key = ?`, bucket, obj.Key)
+
 	_, err = m.db.ExecContext(ctx, `
 		INSERT OR REPLACE INTO objects (bucket, key, size, last_modified, etag, content_type, metadata)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1121,12 +1125,6 @@ func (m *Metadata) GetObjectRetention(ctx context.Context, bucket, key string) (
 	return mode, &retainUntilDate, nil
 }
 
-// DeleteObjectRetention deletes the retention configuration for an object.
-func (m *Metadata) DeleteObjectRetention(ctx context.Context, bucket, key string) error {
-	_, err := m.db.ExecContext(ctx, `DELETE FROM object_retention WHERE bucket = ? AND key = ?`, bucket, key)
-	return err
-}
-
 // PutObjectLegalHold stores the legal hold status for an object.
 func (m *Metadata) PutObjectLegalHold(ctx context.Context, bucket, key string, status string) error {
 	_, err := m.db.ExecContext(ctx, `
@@ -1149,12 +1147,6 @@ func (m *Metadata) GetObjectLegalHold(ctx context.Context, bucket, key string) (
 		return "", err
 	}
 	return status, nil
-}
-
-// DeleteObjectLegalHold deletes the legal hold for an object.
-func (m *Metadata) DeleteObjectLegalHold(ctx context.Context, bucket, key string) error {
-	_, err := m.db.ExecContext(ctx, `DELETE FROM object_legal_hold WHERE bucket = ? AND key = ?`, bucket, key)
-	return err
 }
 
 // Close closes the database connection.

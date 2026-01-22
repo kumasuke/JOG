@@ -1847,6 +1847,19 @@ func (fs *FileSystem) GetBucketObjectLockEnabled(ctx context.Context, bucket str
 
 // PutObjectLockConfiguration stores the object lock configuration for a bucket.
 func (fs *FileSystem) PutObjectLockConfiguration(ctx context.Context, bucket string, config *ObjectLockConfiguration) error {
+	// Validate input
+	if config == nil {
+		return ErrMalformedXML
+	}
+
+	// Validate default retention mode if rule exists
+	if config.Rule != nil && config.Rule.DefaultRetention != nil {
+		mode := string(config.Rule.DefaultRetention.Mode)
+		if mode != "GOVERNANCE" && mode != "COMPLIANCE" {
+			return ErrMalformedXML
+		}
+	}
+
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -1916,6 +1929,17 @@ func (fs *FileSystem) GetObjectLockConfiguration(ctx context.Context, bucket str
 
 // PutObjectRetention stores the retention settings for an object.
 func (fs *FileSystem) PutObjectRetention(ctx context.Context, bucket, key string, retention *ObjectRetention) error {
+	// Validate input
+	if retention == nil || retention.RetainUntilDate == nil {
+		return ErrMalformedXML
+	}
+
+	// Validate retention mode
+	mode := string(retention.Mode)
+	if mode != "GOVERNANCE" && mode != "COMPLIANCE" {
+		return ErrMalformedXML
+	}
+
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -1943,7 +1967,7 @@ func (fs *FileSystem) PutObjectRetention(ctx context.Context, bucket, key string
 		return ErrObjectNotFound
 	}
 
-	return fs.metadata.PutObjectRetention(ctx, bucket, key, string(retention.Mode), *retention.RetainUntilDate)
+	return fs.metadata.PutObjectRetention(ctx, bucket, key, mode, *retention.RetainUntilDate)
 }
 
 // GetObjectRetention returns the retention settings for an object.
@@ -1982,6 +2006,17 @@ func (fs *FileSystem) GetObjectRetention(ctx context.Context, bucket, key string
 
 // PutObjectLegalHold stores the legal hold status for an object.
 func (fs *FileSystem) PutObjectLegalHold(ctx context.Context, bucket, key string, legalHold *ObjectLegalHold) error {
+	// Validate input
+	if legalHold == nil {
+		return ErrMalformedXML
+	}
+
+	// Validate legal hold status
+	status := string(legalHold.Status)
+	if status != "ON" && status != "OFF" {
+		return ErrMalformedXML
+	}
+
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -2009,7 +2044,7 @@ func (fs *FileSystem) PutObjectLegalHold(ctx context.Context, bucket, key string
 		return ErrObjectNotFound
 	}
 
-	return fs.metadata.PutObjectLegalHold(ctx, bucket, key, string(legalHold.Status))
+	return fs.metadata.PutObjectLegalHold(ctx, bucket, key, status)
 }
 
 // GetObjectLegalHold returns the legal hold status for an object.
@@ -2062,6 +2097,7 @@ var (
 	ErrObjectLockConfigurationNotFound  = errors.New("object lock configuration not found")
 	ErrNoSuchObjectLockConfiguration    = errors.New("no such object lock configuration")
 	ErrInvalidRequestObjectLock         = errors.New("bucket is not object lock enabled")
+	ErrMalformedXML                     = errors.New("malformed XML")
 )
 
 // BucketNotFoundError is an error that includes the bucket name.
