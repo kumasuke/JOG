@@ -76,6 +76,38 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create index: %w", err)
 	}
 
+	// Create multipart_uploads table
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS multipart_uploads (
+			upload_id TEXT PRIMARY KEY,
+			bucket TEXT NOT NULL,
+			key TEXT NOT NULL,
+			content_type TEXT NOT NULL,
+			metadata TEXT,
+			initiated DATETIME NOT NULL,
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create multipart_uploads table: %w", err)
+	}
+
+	// Create parts table
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS parts (
+			upload_id TEXT NOT NULL,
+			part_number INTEGER NOT NULL,
+			size INTEGER NOT NULL,
+			etag TEXT NOT NULL,
+			last_modified DATETIME NOT NULL,
+			PRIMARY KEY (upload_id, part_number),
+			FOREIGN KEY (upload_id) REFERENCES multipart_uploads(upload_id) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create parts table: %w", err)
+	}
+
 	return nil
 }
 
@@ -218,6 +250,123 @@ func (m *Metadata) ListObjects(ctx context.Context, bucket, prefix string) ([]Ob
 		objects = append(objects, obj)
 	}
 	return objects, rows.Err()
+}
+
+// CreateMultipartUpload creates a new multipart upload record.
+func (m *Metadata) CreateMultipartUpload(ctx context.Context, upload *MultipartUpload) error {
+	metadata, err := json.Marshal(upload.Metadata)
+	if err != nil {
+		return err
+	}
+
+	_, err = m.db.ExecContext(ctx, `
+		INSERT INTO multipart_uploads (upload_id, bucket, key, content_type, metadata, initiated)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, upload.UploadID, upload.Bucket, upload.Key, upload.ContentType, string(metadata), upload.Initiated)
+	return err
+}
+
+// GetMultipartUpload returns a multipart upload by ID.
+func (m *Metadata) GetMultipartUpload(ctx context.Context, uploadID string) (*MultipartUpload, error) {
+	var upload MultipartUpload
+	var metadataStr string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT upload_id, bucket, key, content_type, metadata, initiated
+		FROM multipart_uploads WHERE upload_id = ?
+	`, uploadID).Scan(&upload.UploadID, &upload.Bucket, &upload.Key, &upload.ContentType, &metadataStr, &upload.Initiated)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if metadataStr != "" {
+		if err := json.Unmarshal([]byte(metadataStr), &upload.Metadata); err != nil {
+			return nil, err
+		}
+	}
+
+	return &upload, nil
+}
+
+// DeleteMultipartUpload deletes a multipart upload and its parts.
+func (m *Metadata) DeleteMultipartUpload(ctx context.Context, uploadID string) error {
+	// Parts will be deleted by cascade
+	_, err := m.db.ExecContext(ctx, `DELETE FROM multipart_uploads WHERE upload_id = ?`, uploadID)
+	return err
+}
+
+// PutPart stores or updates a part.
+func (m *Metadata) PutPart(ctx context.Context, uploadID string, part *Part) error {
+	_, err := m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO parts (upload_id, part_number, size, etag, last_modified)
+		VALUES (?, ?, ?, ?, ?)
+	`, uploadID, part.PartNumber, part.Size, part.ETag, part.LastModified)
+	return err
+}
+
+// GetPart returns a specific part.
+func (m *Metadata) GetPart(ctx context.Context, uploadID string, partNumber int32) (*Part, error) {
+	var part Part
+	err := m.db.QueryRowContext(ctx, `
+		SELECT part_number, size, etag, last_modified
+		FROM parts WHERE upload_id = ? AND part_number = ?
+	`, uploadID, partNumber).Scan(&part.PartNumber, &part.Size, &part.ETag, &part.LastModified)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &part, nil
+}
+
+// ListParts returns parts for a multipart upload.
+func (m *Metadata) ListParts(ctx context.Context, uploadID string, maxParts int32, partNumberMarker int32) ([]Part, bool, int32, error) {
+	if maxParts <= 0 {
+		maxParts = 1000
+	}
+
+	rows, err := m.db.QueryContext(ctx, `
+		SELECT part_number, size, etag, last_modified
+		FROM parts
+		WHERE upload_id = ? AND part_number > ?
+		ORDER BY part_number
+		LIMIT ?
+	`, uploadID, partNumberMarker, maxParts+1)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	defer rows.Close()
+
+	var parts []Part
+	for rows.Next() {
+		var part Part
+		if err := rows.Scan(&part.PartNumber, &part.Size, &part.ETag, &part.LastModified); err != nil {
+			return nil, false, 0, err
+		}
+		parts = append(parts, part)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, false, 0, err
+	}
+
+	isTruncated := len(parts) > int(maxParts)
+	var nextMarker int32
+	if isTruncated {
+		nextMarker = parts[maxParts-1].PartNumber
+		parts = parts[:maxParts]
+	}
+
+	return parts, isTruncated, nextMarker, nil
+}
+
+// DeleteParts deletes all parts for a multipart upload.
+func (m *Metadata) DeleteParts(ctx context.Context, uploadID string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM parts WHERE upload_id = ?`, uploadID)
+	return err
 }
 
 // Close closes the database connection.

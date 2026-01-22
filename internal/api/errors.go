@@ -116,6 +116,36 @@ var (
 		Message:    "You must provide the Content-Length HTTP header.",
 		HTTPStatus: http.StatusLengthRequired,
 	}
+
+	ErrNoSuchUpload = &S3Error{
+		Code:       "NoSuchUpload",
+		Message:    "The specified upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.",
+		HTTPStatus: http.StatusNotFound,
+	}
+
+	ErrInvalidPart = &S3Error{
+		Code:       "InvalidPart",
+		Message:    "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not match the part's entity tag.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+
+	ErrInvalidPartOrder = &S3Error{
+		Code:       "InvalidPartOrder",
+		Message:    "The list of parts was not in ascending order. Parts must be ordered by part number.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+
+	ErrEntityTooSmall = &S3Error{
+		Code:       "EntityTooSmall",
+		Message:    "Your proposed upload is smaller than the minimum allowed object size.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+
+	ErrMalformedXML = &S3Error{
+		Code:       "MalformedXML",
+		Message:    "The XML you provided was not well-formed or did not validate against our published schema.",
+		HTTPStatus: http.StatusBadRequest,
+	}
 )
 
 // WriteError writes an S3 error response.
