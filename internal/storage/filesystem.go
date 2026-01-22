@@ -1195,6 +1195,332 @@ func (fs *FileSystem) DeleteBucketCors(ctx context.Context, bucket string) error
 	return fs.metadata.DeleteBucketCors(ctx, bucket)
 }
 
+// PutBucketVersioning sets the versioning status for a bucket.
+func (fs *FileSystem) PutBucketVersioning(ctx context.Context, bucket string, status VersioningStatus) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.PutBucketVersioning(ctx, bucket, string(status))
+}
+
+// GetBucketVersioning returns the versioning status for a bucket.
+func (fs *FileSystem) GetBucketVersioning(ctx context.Context, bucket string) (VersioningStatus, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return "", ErrBucketNotFound
+	}
+
+	status, err := fs.metadata.GetBucketVersioning(ctx, bucket)
+	if err != nil {
+		return "", err
+	}
+
+	return VersioningStatus(status), nil
+}
+
+// PutObjectVersioned stores a versioned object.
+func (fs *FileSystem) PutObjectVersioned(ctx context.Context, bucket, key string, body io.Reader, size int64, contentType string, userMetadata map[string]string) (*Object, string, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, "", err
+	}
+	if !exists {
+		return nil, "", ErrBucketNotFound
+	}
+
+	// Generate version ID
+	versionID := generateVersionID()
+
+	// Create object path with version
+	objectPath := filepath.Join(fs.dataDir, bucket, ".versions", key, versionID)
+	objectDir := filepath.Dir(objectPath)
+	if err := os.MkdirAll(objectDir, 0755); err != nil {
+		return nil, "", fmt.Errorf("failed to create object directory: %w", err)
+	}
+
+	// Create temporary file
+	tmpFile, err := os.CreateTemp(objectDir, ".tmp-*")
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+	}()
+
+	// Write data and calculate MD5
+	hash := md5.New()
+	writer := io.MultiWriter(tmpFile, hash)
+
+	written, err := io.Copy(writer, body)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to write object: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return nil, "", fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// Calculate ETag
+	etag := hex.EncodeToString(hash.Sum(nil))
+
+	// Rename temp file to final path
+	if err := os.Rename(tmpPath, objectPath); err != nil {
+		return nil, "", fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	// Set default content type
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	now := time.Now()
+
+	// Save version metadata
+	version := &ObjectVersion{
+		Key:          key,
+		VersionID:    versionID,
+		Size:         written,
+		LastModified: now,
+		ETag:         etag,
+		ContentType:  contentType,
+		Metadata:     userMetadata,
+	}
+
+	if err := fs.metadata.PutObjectVersion(ctx, bucket, version); err != nil {
+		os.Remove(objectPath)
+		return nil, "", err
+	}
+
+	// Also update the regular objects table for compatibility
+	obj := &Object{
+		Key:          key,
+		Size:         written,
+		LastModified: now,
+		ETag:         etag,
+		ContentType:  contentType,
+		Metadata:     userMetadata,
+	}
+
+	if err := fs.metadata.PutObject(ctx, bucket, obj); err != nil {
+		return nil, "", err
+	}
+
+	// Copy to current object path
+	currentPath := filepath.Join(fs.dataDir, bucket, key)
+	currentDir := filepath.Dir(currentPath)
+	if err := os.MkdirAll(currentDir, 0755); err != nil {
+		return nil, "", fmt.Errorf("failed to create current object directory: %w", err)
+	}
+
+	// Copy version file to current
+	if err := copyFile(objectPath, currentPath); err != nil {
+		return nil, "", fmt.Errorf("failed to copy version to current: %w", err)
+	}
+
+	return obj, versionID, nil
+}
+
+// GetObjectVersioned retrieves a specific version of an object.
+func (fs *FileSystem) GetObjectVersioned(ctx context.Context, bucket, key, versionID string) (*ObjectData, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	// Get version metadata
+	version, err := fs.metadata.GetObjectVersion(ctx, bucket, key, versionID)
+	if err != nil {
+		return nil, err
+	}
+	if version == nil {
+		return nil, ErrObjectNotFound
+	}
+
+	if version.IsDeleteMarker {
+		return nil, ErrObjectNotFound
+	}
+
+	// Open version file
+	objectPath := filepath.Join(fs.dataDir, bucket, ".versions", key, versionID)
+	file, err := os.Open(objectPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrObjectNotFound
+		}
+		return nil, fmt.Errorf("failed to open version file: %w", err)
+	}
+
+	return &ObjectData{
+		Object: Object{
+			Key:          version.Key,
+			Size:         version.Size,
+			LastModified: version.LastModified,
+			ETag:         version.ETag,
+			ContentType:  version.ContentType,
+			Metadata:     version.Metadata,
+		},
+		Body: file,
+	}, nil
+}
+
+// DeleteObjectVersioned deletes an object, creating a delete marker if versioning is enabled.
+func (fs *FileSystem) DeleteObjectVersioned(ctx context.Context, bucket, key, versionID string) (string, bool, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return "", false, err
+	}
+	if !exists {
+		return "", false, ErrBucketNotFound
+	}
+
+	// If versionID is specified, delete that specific version
+	if versionID != "" {
+		// Get version to check if it's a delete marker
+		version, err := fs.metadata.GetObjectVersion(ctx, bucket, key, versionID)
+		if err != nil {
+			return "", false, err
+		}
+		if version == nil {
+			return "", false, ErrObjectNotFound
+		}
+
+		// Delete version file
+		objectPath := filepath.Join(fs.dataDir, bucket, ".versions", key, versionID)
+		if err := os.Remove(objectPath); err != nil && !os.IsNotExist(err) {
+			return "", false, fmt.Errorf("failed to delete version file: %w", err)
+		}
+
+		// Delete version metadata
+		if err := fs.metadata.DeleteObjectVersion(ctx, bucket, key, versionID); err != nil {
+			return "", false, err
+		}
+
+		return versionID, version.IsDeleteMarker, nil
+	}
+
+	// No versionID - create a delete marker
+	deleteMarkerID := generateVersionID()
+	now := time.Now()
+
+	deleteMarker := &ObjectVersion{
+		Key:            key,
+		VersionID:      deleteMarkerID,
+		Size:           0,
+		LastModified:   now,
+		ETag:           "",
+		ContentType:    "",
+		IsDeleteMarker: true,
+	}
+
+	if err := fs.metadata.PutObjectVersion(ctx, bucket, deleteMarker); err != nil {
+		return "", false, err
+	}
+
+	// Remove from regular objects table
+	if err := fs.metadata.DeleteObject(ctx, bucket, key); err != nil {
+		return "", false, err
+	}
+
+	// Remove current file
+	currentPath := filepath.Join(fs.dataDir, bucket, key)
+	os.Remove(currentPath)
+
+	return deleteMarkerID, true, nil
+}
+
+// ListObjectVersions lists all versions of objects in a bucket.
+func (fs *FileSystem) ListObjectVersions(ctx context.Context, input *ListObjectVersionsInput) (*ListObjectVersionsOutput, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, input.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	versions, isTruncated, nextKeyMarker, nextVersionIDMarker, err := fs.metadata.ListObjectVersions(
+		ctx, input.Bucket, input.Prefix, input.MaxKeys, input.KeyMarker, input.VersionIdMarker,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	output := &ListObjectVersionsOutput{
+		IsTruncated:         isTruncated,
+		NextKeyMarker:       nextKeyMarker,
+		NextVersionIdMarker: nextVersionIDMarker,
+	}
+
+	// Find latest version for each key
+	latestVersions := make(map[string]string)
+	for _, v := range versions {
+		if _, exists := latestVersions[v.Key]; !exists {
+			latestVersions[v.Key] = v.VersionID
+		}
+	}
+
+	for _, v := range versions {
+		ov := ObjectVersion{
+			Key:            v.Key,
+			VersionID:      v.VersionID,
+			IsLatest:       v.VersionID == latestVersions[v.Key],
+			LastModified:   v.LastModified,
+			ETag:           v.ETag,
+			Size:           v.Size,
+			IsDeleteMarker: v.IsDeleteMarker,
+		}
+		if v.IsDeleteMarker {
+			output.DeleteMarkers = append(output.DeleteMarkers, ov)
+		} else {
+			output.Versions = append(output.Versions, ov)
+		}
+	}
+
+	return output, nil
+}
+
+// generateVersionID generates a unique version ID.
+func generateVersionID() string {
+	return fmt.Sprintf("%d-%s", time.Now().UnixNano(), randomHex(16))
+}
+
+// copyFile copies a file from src to dst.
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, srcFile)
+	return err
+}
+
 // Close releases storage resources.
 func (fs *FileSystem) Close() error {
 	return fs.metadata.Close()

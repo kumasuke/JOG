@@ -74,6 +74,12 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("cors") {
 					// GET /{bucket}?cors - GetBucketCors
 					r.handler.GetBucketCors(w, req)
+				} else if query.Has("versioning") {
+					// GET /{bucket}?versioning - GetBucketVersioning
+					r.handler.GetBucketVersioning(w, req)
+				} else if query.Has("versions") {
+					// GET /{bucket}?versions - ListObjectVersions
+					r.handler.ListObjectVersions(w, req)
 				} else {
 					// GET /{bucket} - ListObjectsV2
 					r.handler.ListObjectsV2(w, req)
@@ -100,6 +106,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("cors") {
 					// PUT /{bucket}?cors - PutBucketCors
 					r.handler.PutBucketCors(w, req)
+				} else if query.Has("versioning") {
+					// PUT /{bucket}?versioning - PutBucketVersioning
+					r.handler.PutBucketVersioning(w, req)
 				} else {
 					// PUT /{bucket} - CreateBucket
 					r.handler.CreateBucket(w, req)

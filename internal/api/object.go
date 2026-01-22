@@ -128,7 +128,20 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	obj, err := h.storage.PutObject(r.Context(), bucket, key, r.Body, contentLength, contentType, metadata)
+	// Check if versioning is enabled
+	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
+
+	var obj *storage.Object
+	var versionID string
+
+	if versioningStatus == storage.VersioningStatusEnabled {
+		// Use versioned put
+		obj, versionID, err = h.storage.PutObjectVersioned(r.Context(), bucket, key, r.Body, contentLength, contentType, metadata)
+	} else {
+		// Use regular put
+		obj, err = h.storage.PutObject(r.Context(), bucket, key, r.Body, contentLength, contentType, metadata)
+	}
+
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
@@ -147,6 +160,9 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("ETag", "\""+obj.ETag+"\"")
+	if versionID != "" {
+		w.Header().Set("x-amz-version-id", versionID)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -155,14 +171,26 @@ func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
 
+	// Check for versionId query parameter
+	versionID := r.URL.Query().Get("versionId")
+
 	// Check for Range header
 	rangeHeader := r.Header.Get("Range")
-	if rangeHeader != "" {
+	if rangeHeader != "" && versionID == "" {
 		h.getObjectRange(w, r, bucket, key, rangeHeader)
 		return
 	}
 
-	obj, err := h.storage.GetObject(r.Context(), bucket, key)
+	var obj *storage.ObjectData
+	var err error
+
+	if versionID != "" {
+		// Get specific version
+		obj, err = h.storage.GetObjectVersioned(r.Context(), bucket, key, versionID)
+	} else {
+		obj, err = h.storage.GetObject(r.Context(), bucket, key)
+	}
+
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
@@ -182,6 +210,11 @@ func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(obj.Size, 10))
 	w.Header().Set("ETag", "\""+obj.ETag+"\"")
 	w.Header().Set("Last-Modified", obj.LastModified.Format(http.TimeFormat))
+
+	// Set version ID header if versioning was used
+	if versionID != "" {
+		w.Header().Set("x-amz-version-id", versionID)
+	}
 
 	// Set custom metadata headers
 	for k, v := range obj.Metadata {
@@ -321,6 +354,40 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
 
+	// Check for versionId query parameter
+	versionID := r.URL.Query().Get("versionId")
+
+	// Check if versioning is enabled
+	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
+
+	if versioningStatus == storage.VersioningStatusEnabled || versionID != "" {
+		// Use versioned delete
+		returnedVersionID, isDeleteMarker, err := h.storage.DeleteObjectVersioned(r.Context(), bucket, key, versionID)
+		if err != nil {
+			if errors.Is(err, storage.ErrBucketNotFound) {
+				WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+				return
+			}
+			if errors.Is(err, storage.ErrObjectNotFound) {
+				// S3 returns 204 even if version doesn't exist
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			WriteError(w, ErrInternalError)
+			return
+		}
+
+		if returnedVersionID != "" {
+			w.Header().Set("x-amz-version-id", returnedVersionID)
+		}
+		if isDeleteMarker {
+			w.Header().Set("x-amz-delete-marker", "true")
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Regular delete (no versioning)
 	err := h.storage.DeleteObject(r.Context(), bucket, key)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
