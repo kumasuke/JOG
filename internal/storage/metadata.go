@@ -239,6 +239,48 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create bucket_lifecycle table: %w", err)
 	}
 
+	// Create bucket_object_lock table (stores object lock configuration)
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bucket_object_lock (
+			bucket TEXT PRIMARY KEY,
+			object_lock_enabled INTEGER NOT NULL DEFAULT 0,
+			object_lock_config TEXT,
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket_object_lock table: %w", err)
+	}
+
+	// Create object_retention table
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS object_retention (
+			bucket TEXT NOT NULL,
+			key TEXT NOT NULL,
+			mode TEXT NOT NULL,
+			retain_until_date DATETIME NOT NULL,
+			PRIMARY KEY (bucket, key),
+			FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create object_retention table: %w", err)
+	}
+
+	// Create object_legal_hold table
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS object_legal_hold (
+			bucket TEXT NOT NULL,
+			key TEXT NOT NULL,
+			status TEXT NOT NULL,
+			PRIMARY KEY (bucket, key),
+			FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create object_legal_hold table: %w", err)
+	}
+
 	return nil
 }
 
@@ -995,6 +1037,123 @@ func (m *Metadata) GetBucketLifecycle(ctx context.Context, bucket string) (strin
 // DeleteBucketLifecycle deletes the lifecycle configuration for a bucket.
 func (m *Metadata) DeleteBucketLifecycle(ctx context.Context, bucket string) error {
 	_, err := m.db.ExecContext(ctx, `DELETE FROM bucket_lifecycle WHERE bucket = ?`, bucket)
+	return err
+}
+
+// SetBucketObjectLockEnabled sets the object lock enabled status for a bucket.
+func (m *Metadata) SetBucketObjectLockEnabled(ctx context.Context, bucket string, enabled bool) error {
+	enabledInt := 0
+	if enabled {
+		enabledInt = 1
+	}
+	_, err := m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO bucket_object_lock (bucket, object_lock_enabled, object_lock_config)
+		VALUES (?, ?, COALESCE((SELECT object_lock_config FROM bucket_object_lock WHERE bucket = ?), NULL))
+	`, bucket, enabledInt, bucket)
+	return err
+}
+
+// GetBucketObjectLockEnabled returns whether object lock is enabled for a bucket.
+func (m *Metadata) GetBucketObjectLockEnabled(ctx context.Context, bucket string) (bool, error) {
+	var enabled int
+	err := m.db.QueryRowContext(ctx, `
+		SELECT object_lock_enabled FROM bucket_object_lock WHERE bucket = ?
+	`, bucket).Scan(&enabled)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return enabled == 1, nil
+}
+
+// PutBucketObjectLockConfig stores the object lock configuration for a bucket.
+func (m *Metadata) PutBucketObjectLockConfig(ctx context.Context, bucket string, config string) error {
+	_, err := m.db.ExecContext(ctx, `
+		INSERT INTO bucket_object_lock (bucket, object_lock_enabled, object_lock_config)
+		VALUES (?, 1, ?)
+		ON CONFLICT(bucket) DO UPDATE SET object_lock_config = ?
+	`, bucket, config, config)
+	return err
+}
+
+// GetBucketObjectLockConfig returns the object lock configuration for a bucket.
+func (m *Metadata) GetBucketObjectLockConfig(ctx context.Context, bucket string) (string, error) {
+	var config sql.NullString
+	err := m.db.QueryRowContext(ctx, `
+		SELECT object_lock_config FROM bucket_object_lock WHERE bucket = ?
+	`, bucket).Scan(&config)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !config.Valid {
+		return "", nil
+	}
+	return config.String, nil
+}
+
+// PutObjectRetention stores the retention configuration for an object.
+func (m *Metadata) PutObjectRetention(ctx context.Context, bucket, key string, mode string, retainUntilDate time.Time) error {
+	_, err := m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO object_retention (bucket, key, mode, retain_until_date)
+		VALUES (?, ?, ?, ?)
+	`, bucket, key, mode, retainUntilDate)
+	return err
+}
+
+// GetObjectRetention returns the retention configuration for an object.
+func (m *Metadata) GetObjectRetention(ctx context.Context, bucket, key string) (string, *time.Time, error) {
+	var mode string
+	var retainUntilDate time.Time
+	err := m.db.QueryRowContext(ctx, `
+		SELECT mode, retain_until_date FROM object_retention WHERE bucket = ? AND key = ?
+	`, bucket, key).Scan(&mode, &retainUntilDate)
+	if err == sql.ErrNoRows {
+		return "", nil, nil
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	return mode, &retainUntilDate, nil
+}
+
+// DeleteObjectRetention deletes the retention configuration for an object.
+func (m *Metadata) DeleteObjectRetention(ctx context.Context, bucket, key string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM object_retention WHERE bucket = ? AND key = ?`, bucket, key)
+	return err
+}
+
+// PutObjectLegalHold stores the legal hold status for an object.
+func (m *Metadata) PutObjectLegalHold(ctx context.Context, bucket, key string, status string) error {
+	_, err := m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO object_legal_hold (bucket, key, status)
+		VALUES (?, ?, ?)
+	`, bucket, key, status)
+	return err
+}
+
+// GetObjectLegalHold returns the legal hold status for an object.
+func (m *Metadata) GetObjectLegalHold(ctx context.Context, bucket, key string) (string, error) {
+	var status string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT status FROM object_legal_hold WHERE bucket = ? AND key = ?
+	`, bucket, key).Scan(&status)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return status, nil
+}
+
+// DeleteObjectLegalHold deletes the legal hold for an object.
+func (m *Metadata) DeleteObjectLegalHold(ctx context.Context, bucket, key string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM object_legal_hold WHERE bucket = ? AND key = ?`, bucket, key)
 	return err
 }
 
