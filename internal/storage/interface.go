@@ -226,6 +226,32 @@ const AllUsersGroupURI = "http://acs.amazonaws.com/groups/global/AllUsers"
 // AuthenticatedUsersGroupURI is the URI for the AuthenticatedUsers group.
 const AuthenticatedUsersGroupURI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers"
 
+// SSEAlgorithm represents the server-side encryption algorithm.
+type SSEAlgorithm string
+
+const (
+	SSEAlgorithmAES256 SSEAlgorithm = "AES256"
+	SSEAlgorithmKMS    SSEAlgorithm = "aws:kms"
+	SSEAlgorithmKMSDSSE SSEAlgorithm = "aws:kms:dsse"
+)
+
+// ServerSideEncryptionByDefault represents the default server-side encryption configuration.
+type ServerSideEncryptionByDefault struct {
+	SSEAlgorithm   SSEAlgorithm
+	KMSMasterKeyID string
+}
+
+// ServerSideEncryptionRule represents a server-side encryption rule.
+type ServerSideEncryptionRule struct {
+	ApplyServerSideEncryptionByDefault *ServerSideEncryptionByDefault
+	BucketKeyEnabled                   bool
+}
+
+// ServerSideEncryptionConfiguration represents the server-side encryption configuration.
+type ServerSideEncryptionConfiguration struct {
+	Rules []ServerSideEncryptionRule
+}
+
 // Storage defines the interface for storage backends.
 type Storage interface {
 	// Bucket operations
@@ -279,6 +305,11 @@ type Storage interface {
 	GetBucketACL(ctx context.Context, bucket string) (*ACL, error)
 	PutObjectACL(ctx context.Context, bucket, key string, acl *ACL) error
 	GetObjectACL(ctx context.Context, bucket, key string) (*ACL, error)
+
+	// Encryption operations
+	PutBucketEncryption(ctx context.Context, bucket string, config *ServerSideEncryptionConfiguration) error
+	GetBucketEncryption(ctx context.Context, bucket string) (*ServerSideEncryptionConfiguration, error)
+	DeleteBucketEncryption(ctx context.Context, bucket string) error
 
 	// Close releases storage resources.
 	Close() error

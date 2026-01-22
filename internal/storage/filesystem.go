@@ -1690,6 +1690,67 @@ func CannedACLToACL(cannedACL CannedACL, ownerID, ownerDisplay string) *ACL {
 	return acl
 }
 
+// PutBucketEncryption stores the encryption configuration for a bucket.
+func (fs *FileSystem) PutBucketEncryption(ctx context.Context, bucket string, config *ServerSideEncryptionConfiguration) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	// Serialize encryption configuration to JSON
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+
+	return fs.metadata.PutBucketEncryption(ctx, bucket, string(configJSON))
+}
+
+// GetBucketEncryption returns the encryption configuration for a bucket.
+func (fs *FileSystem) GetBucketEncryption(ctx context.Context, bucket string) (*ServerSideEncryptionConfiguration, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	configJSON, err := fs.metadata.GetBucketEncryption(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if configJSON == "" {
+		return nil, ErrNoSuchEncryptionConfiguration
+	}
+
+	var config ServerSideEncryptionConfiguration
+	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+// DeleteBucketEncryption deletes the encryption configuration for a bucket.
+func (fs *FileSystem) DeleteBucketEncryption(ctx context.Context, bucket string) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.DeleteBucketEncryption(ctx, bucket)
+}
+
 // Close releases storage resources.
 func (fs *FileSystem) Close() error {
 	return fs.metadata.Close()
@@ -1697,16 +1758,17 @@ func (fs *FileSystem) Close() error {
 
 // Errors
 var (
-	ErrBucketNotFound           = errors.New("bucket not found")
-	ErrBucketAlreadyExists      = errors.New("bucket already exists")
-	ErrBucketNotEmpty           = errors.New("bucket not empty")
-	ErrObjectNotFound           = errors.New("object not found")
-	ErrInvalidBucketName        = errors.New("invalid bucket name")
-	ErrUploadNotFound           = errors.New("upload not found")
-	ErrInvalidPart              = errors.New("invalid part")
-	ErrInvalidRange             = errors.New("invalid range")
-	ErrNoSuchTagSet             = errors.New("no such tag set")
-	ErrNoSuchCORSConfiguration  = errors.New("no such CORS configuration")
+	ErrBucketNotFound                = errors.New("bucket not found")
+	ErrBucketAlreadyExists           = errors.New("bucket already exists")
+	ErrBucketNotEmpty                = errors.New("bucket not empty")
+	ErrObjectNotFound                = errors.New("object not found")
+	ErrInvalidBucketName             = errors.New("invalid bucket name")
+	ErrUploadNotFound                = errors.New("upload not found")
+	ErrInvalidPart                   = errors.New("invalid part")
+	ErrInvalidRange                  = errors.New("invalid range")
+	ErrNoSuchTagSet                  = errors.New("no such tag set")
+	ErrNoSuchCORSConfiguration       = errors.New("no such CORS configuration")
+	ErrNoSuchEncryptionConfiguration = errors.New("no such encryption configuration")
 )
 
 // BucketNotFoundError is an error that includes the bucket name.
