@@ -49,12 +49,12 @@ JOG (Just Object Gateway) は、Go言語で実装されたS3互換のオブジ�
 ### Phase 2: 機能拡充
 
 #### 2.1 マルチパートアップロード
-- [ ] CreateMultipartUpload
-- [ ] UploadPart
-- [ ] CompleteMultipartUpload
-- [ ] AbortMultipartUpload
-- [ ] ListParts
-- [ ] ListMultipartUploads
+- [x] CreateMultipartUpload
+- [x] UploadPart
+- [x] CompleteMultipartUpload
+- [x] AbortMultipartUpload
+- [x] ListParts
+- [ ] ListMultipartUploads (未実装)
 
 #### 2.2 追加オブジェクト操作
 - [ ] CopyObject

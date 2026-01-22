@@ -760,3 +760,232 @@ func TestOverwritePartNumber(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, part1ContentNew, body)
 }
+
+func TestCompleteMultipartUploadEmptyParts(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	key := testutil.RandomObjectKey()
+
+	// Create multipart upload
+	createResult, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+	})
+	require.NoError(t, err)
+
+	// Complete with empty parts list should fail
+	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(key),
+		UploadId: createResult.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: []types.CompletedPart{},
+		},
+	})
+	require.Error(t, err)
+
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		// S3 returns MalformedXML or InvalidPart for empty parts
+		assert.Contains(t, []string{"MalformedXML", "InvalidPart"}, apiErr.ErrorCode())
+	}
+
+	// Cleanup
+	_, _ = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(key),
+		UploadId: createResult.UploadId,
+	})
+}
+
+func TestCompleteMultipartUploadInvalidETag(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	key := testutil.RandomObjectKey()
+
+	// Create multipart upload
+	createResult, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+	})
+	require.NoError(t, err)
+
+	// Upload a part
+	partContent := []byte("test content")
+	_, err = client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(key),
+		UploadId:   createResult.UploadId,
+		PartNumber: aws.Int32(1),
+		Body:       bytes.NewReader(partContent),
+	})
+	require.NoError(t, err)
+
+	// Complete with invalid ETag
+	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(key),
+		UploadId: createResult.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: []types.CompletedPart{
+				{
+					PartNumber: aws.Int32(1),
+					ETag:       aws.String("\"invalid-etag-that-does-not-match\""),
+				},
+			},
+		},
+	})
+	require.Error(t, err)
+
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "InvalidPart", apiErr.ErrorCode())
+	}
+
+	// Cleanup
+	_, _ = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(key),
+		UploadId: createResult.UploadId,
+	})
+}
+
+func TestUploadPartBoundaryPartNumbers(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	key := testutil.RandomObjectKey()
+
+	// Create multipart upload
+	createResult, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+	})
+	require.NoError(t, err)
+
+	partContent := []byte("test content")
+
+	// Test part number 1 (minimum valid)
+	_, err = client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(key),
+		UploadId:   createResult.UploadId,
+		PartNumber: aws.Int32(1),
+		Body:       bytes.NewReader(partContent),
+	})
+	require.NoError(t, err, "Part number 1 should be valid")
+
+	// Test part number 10000 (maximum valid)
+	_, err = client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(key),
+		UploadId:   createResult.UploadId,
+		PartNumber: aws.Int32(10000),
+		Body:       bytes.NewReader(partContent),
+	})
+	require.NoError(t, err, "Part number 10000 should be valid")
+
+	// Cleanup
+	_, _ = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(key),
+		UploadId: createResult.UploadId,
+	})
+}
+
+func TestCompleteMultipartUploadPartOutOfOrder(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	key := testutil.RandomObjectKey()
+
+	// Create multipart upload
+	createResult, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+	})
+	require.NoError(t, err)
+
+	// Upload two parts
+	part1Content := []byte("part 1")
+	part1Result, err := client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(key),
+		UploadId:   createResult.UploadId,
+		PartNumber: aws.Int32(1),
+		Body:       bytes.NewReader(part1Content),
+	})
+	require.NoError(t, err)
+
+	part2Content := []byte("part 2")
+	part2Result, err := client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(key),
+		UploadId:   createResult.UploadId,
+		PartNumber: aws.Int32(2),
+		Body:       bytes.NewReader(part2Content),
+	})
+	require.NoError(t, err)
+
+	// Complete with parts in wrong order (2, 1 instead of 1, 2)
+	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(key),
+		UploadId: createResult.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: []types.CompletedPart{
+				{
+					PartNumber: aws.Int32(2),
+					ETag:       part2Result.ETag,
+				},
+				{
+					PartNumber: aws.Int32(1),
+					ETag:       part1Result.ETag,
+				},
+			},
+		},
+	})
+	require.Error(t, err)
+
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "InvalidPartOrder", apiErr.ErrorCode())
+	}
+
+	// Cleanup
+	_, _ = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(key),
+		UploadId: createResult.UploadId,
+	})
+}

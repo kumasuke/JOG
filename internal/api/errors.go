@@ -140,6 +140,12 @@ var (
 		Message:    "Your proposed upload is smaller than the minimum allowed object size.",
 		HTTPStatus: http.StatusBadRequest,
 	}
+
+	ErrMalformedXML = &S3Error{
+		Code:       "MalformedXML",
+		Message:    "The XML you provided was not well-formed or did not validate against our published schema.",
+		HTTPStatus: http.StatusBadRequest,
+	}
 )
 
 // WriteError writes an S3 error response.

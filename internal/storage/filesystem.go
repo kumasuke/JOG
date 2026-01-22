@@ -703,7 +703,10 @@ func generateUploadID() string {
 // randomHex generates a random hex string of given length.
 func randomHex(length int) string {
 	b := make([]byte, length/2)
-	io.ReadFull(rand.Reader, b)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		// Fallback to timestamp-based ID if random generation fails
+		return fmt.Sprintf("%016x", time.Now().UnixNano())[:length]
+	}
 	return hex.EncodeToString(b)
 }
 
