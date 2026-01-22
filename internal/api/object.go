@@ -657,6 +657,7 @@ func (h *Handler) ListObjects(w http.ResponseWriter, r *http.Request) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
 			return
 		}
+		log.Error().Err(err).Str("bucket", bucket).Msg("Failed to list objects")
 		WriteError(w, ErrInternalError)
 		return
 	}

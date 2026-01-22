@@ -71,6 +71,12 @@ func (h *Handler) PutBucketWebsite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate website configuration
+	if err := validateWebsiteConfig(&xmlConfig); err != nil {
+		WriteError(w, err)
+		return
+	}
+
 	// Convert XML to storage type
 	config := xmlToStorageWebsiteConfig(&xmlConfig)
 
@@ -189,29 +195,29 @@ func xmlToStorageWebsiteConfig(xml *WebsiteConfigurationXML) *storage.WebsiteCon
 
 // storageToXMLWebsiteConfig converts storage website config to XML type.
 func storageToXMLWebsiteConfig(config *storage.WebsiteConfiguration) *WebsiteConfigurationXML {
-	xml := &WebsiteConfigurationXML{}
+	result := &WebsiteConfigurationXML{}
 
 	if config.IndexDocument != nil {
-		xml.IndexDocument = &IndexDocumentXML{
+		result.IndexDocument = &IndexDocumentXML{
 			Suffix: config.IndexDocument.Suffix,
 		}
 	}
 
 	if config.ErrorDocument != nil {
-		xml.ErrorDocument = &ErrorDocumentXML{
+		result.ErrorDocument = &ErrorDocumentXML{
 			Key: config.ErrorDocument.Key,
 		}
 	}
 
 	if config.RedirectAllRequestsTo != nil {
-		xml.RedirectAllRequestsTo = &RedirectAllRequestsToXML{
+		result.RedirectAllRequestsTo = &RedirectAllRequestsToXML{
 			HostName: config.RedirectAllRequestsTo.HostName,
 			Protocol: config.RedirectAllRequestsTo.Protocol,
 		}
 	}
 
 	if len(config.RoutingRules) > 0 {
-		xml.RoutingRules = &RoutingRulesXML{}
+		result.RoutingRules = &RoutingRulesXML{}
 		for _, rule := range config.RoutingRules {
 			xmlRule := RoutingRuleXML{}
 
@@ -232,9 +238,49 @@ func storageToXMLWebsiteConfig(config *storage.WebsiteConfiguration) *WebsiteCon
 				}
 			}
 
-			xml.RoutingRules.RoutingRule = append(xml.RoutingRules.RoutingRule, xmlRule)
+			result.RoutingRules.RoutingRule = append(result.RoutingRules.RoutingRule, xmlRule)
 		}
 	}
 
-	return xml
+	return result
+}
+
+// validateWebsiteConfig validates the website configuration according to S3 rules.
+func validateWebsiteConfig(config *WebsiteConfigurationXML) *S3Error {
+	hasRedirectAll := config.RedirectAllRequestsTo != nil
+	hasIndexDoc := config.IndexDocument != nil
+	hasErrorDoc := config.ErrorDocument != nil
+	hasRoutingRules := config.RoutingRules != nil && len(config.RoutingRules.RoutingRule) > 0
+
+	// RedirectAllRequestsTo is mutually exclusive with other options
+	if hasRedirectAll && (hasIndexDoc || hasErrorDoc || hasRoutingRules) {
+		return ErrInvalidRequest
+	}
+
+	// If not using RedirectAllRequestsTo, IndexDocument is required
+	if !hasRedirectAll && !hasIndexDoc {
+		return ErrInvalidRequest
+	}
+
+	// IndexDocument must have a non-empty Suffix
+	if hasIndexDoc && config.IndexDocument.Suffix == "" {
+		return ErrInvalidRequest
+	}
+
+	// RedirectAllRequestsTo must have a non-empty HostName
+	if hasRedirectAll && config.RedirectAllRequestsTo.HostName == "" {
+		return ErrInvalidRequest
+	}
+
+	// Validate routing rules
+	if hasRoutingRules {
+		for _, rule := range config.RoutingRules.RoutingRule {
+			// Each routing rule must have a Redirect
+			if rule.Redirect == nil {
+				return ErrInvalidRequest
+			}
+		}
+	}
+
+	return nil
 }
