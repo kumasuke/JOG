@@ -1521,6 +1521,171 @@ func copyFile(src, dst string) error {
 	return err
 }
 
+// DefaultOwnerID is the default owner ID for ACLs.
+const DefaultOwnerID = "default-owner-id"
+
+// DefaultOwnerDisplay is the default owner display name for ACLs.
+const DefaultOwnerDisplay = "default-owner"
+
+// PutBucketACL stores the ACL for a bucket.
+func (fs *FileSystem) PutBucketACL(ctx context.Context, bucket string, acl *ACL) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	return fs.metadata.PutBucketACL(ctx, bucket, acl)
+}
+
+// GetBucketACL returns the ACL for a bucket.
+func (fs *FileSystem) GetBucketACL(ctx context.Context, bucket string) (*ACL, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	acl, err := fs.metadata.GetBucketACL(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return default ACL if none set
+	if acl == nil {
+		acl = &ACL{
+			OwnerID:      DefaultOwnerID,
+			OwnerDisplay: DefaultOwnerDisplay,
+			Grants: []ACLGrant{
+				{
+					Permission:  ACLPermissionFullControl,
+					GranteeType: ACLGranteeTypeCanonicalUser,
+					GranteeID:   DefaultOwnerID,
+				},
+			},
+		}
+	}
+
+	return acl, nil
+}
+
+// PutObjectACL stores the ACL for an object.
+func (fs *FileSystem) PutObjectACL(ctx context.Context, bucket, key string, acl *ACL) error {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	// Check if object exists
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return err
+	}
+	if obj == nil {
+		return ErrObjectNotFound
+	}
+
+	return fs.metadata.PutObjectACL(ctx, bucket, key, acl)
+}
+
+// GetObjectACL returns the ACL for an object.
+func (fs *FileSystem) GetObjectACL(ctx context.Context, bucket, key string) (*ACL, error) {
+	// Check if bucket exists
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	// Check if object exists
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	if obj == nil {
+		return nil, ErrObjectNotFound
+	}
+
+	acl, err := fs.metadata.GetObjectACL(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return default ACL if none set
+	if acl == nil {
+		acl = &ACL{
+			OwnerID:      DefaultOwnerID,
+			OwnerDisplay: DefaultOwnerDisplay,
+			Grants: []ACLGrant{
+				{
+					Permission:  ACLPermissionFullControl,
+					GranteeType: ACLGranteeTypeCanonicalUser,
+					GranteeID:   DefaultOwnerID,
+				},
+			},
+		}
+	}
+
+	return acl, nil
+}
+
+// CannedACLToACL converts a canned ACL to an ACL object.
+func CannedACLToACL(cannedACL CannedACL, ownerID, ownerDisplay string) *ACL {
+	acl := &ACL{
+		OwnerID:      ownerID,
+		OwnerDisplay: ownerDisplay,
+		Grants: []ACLGrant{
+			{
+				Permission:  ACLPermissionFullControl,
+				GranteeType: ACLGranteeTypeCanonicalUser,
+				GranteeID:   ownerID,
+			},
+		},
+	}
+
+	switch cannedACL {
+	case CannedACLPrivate:
+		// Default - owner has FULL_CONTROL
+	case CannedACLPublicRead:
+		acl.Grants = append(acl.Grants, ACLGrant{
+			Permission:  ACLPermissionRead,
+			GranteeType: ACLGranteeTypeGroup,
+			GranteeURI:  AllUsersGroupURI,
+		})
+	case CannedACLPublicReadWrite:
+		acl.Grants = append(acl.Grants, ACLGrant{
+			Permission:  ACLPermissionRead,
+			GranteeType: ACLGranteeTypeGroup,
+			GranteeURI:  AllUsersGroupURI,
+		})
+		acl.Grants = append(acl.Grants, ACLGrant{
+			Permission:  ACLPermissionWrite,
+			GranteeType: ACLGranteeTypeGroup,
+			GranteeURI:  AllUsersGroupURI,
+		})
+	case CannedACLAuthenticatedRead:
+		acl.Grants = append(acl.Grants, ACLGrant{
+			Permission:  ACLPermissionRead,
+			GranteeType: ACLGranteeTypeGroup,
+			GranteeURI:  AuthenticatedUsersGroupURI,
+		})
+	}
+
+	return acl
+}
+
 // Close releases storage resources.
 func (fs *FileSystem) Close() error {
 	return fs.metadata.Close()

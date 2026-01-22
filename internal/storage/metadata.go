@@ -189,6 +189,32 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create version index: %w", err)
 	}
 
+	// Create bucket_acls table (stores ACL as JSON)
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bucket_acls (
+			bucket TEXT PRIMARY KEY,
+			acl_config TEXT NOT NULL,
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket_acls table: %w", err)
+	}
+
+	// Create object_acls table (stores ACL as JSON)
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS object_acls (
+			bucket TEXT NOT NULL,
+			key TEXT NOT NULL,
+			acl_config TEXT NOT NULL,
+			PRIMARY KEY (bucket, key),
+			FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create object_acls table: %w", err)
+	}
+
 	return nil
 }
 
@@ -818,6 +844,74 @@ func (m *Metadata) ListObjectVersions(ctx context.Context, bucket, prefix string
 	}
 
 	return versions, isTruncated, nextKeyMarker, nextVersionIDMarker, nil
+}
+
+// PutBucketACL stores the ACL for a bucket.
+func (m *Metadata) PutBucketACL(ctx context.Context, bucket string, acl *ACL) error {
+	aclJSON, err := json.Marshal(acl)
+	if err != nil {
+		return err
+	}
+
+	_, err = m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO bucket_acls (bucket, acl_config) VALUES (?, ?)
+	`, bucket, string(aclJSON))
+	return err
+}
+
+// GetBucketACL returns the ACL for a bucket.
+func (m *Metadata) GetBucketACL(ctx context.Context, bucket string) (*ACL, error) {
+	var aclJSON string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT acl_config FROM bucket_acls WHERE bucket = ?
+	`, bucket).Scan(&aclJSON)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var acl ACL
+	if err := json.Unmarshal([]byte(aclJSON), &acl); err != nil {
+		return nil, err
+	}
+
+	return &acl, nil
+}
+
+// PutObjectACL stores the ACL for an object.
+func (m *Metadata) PutObjectACL(ctx context.Context, bucket, key string, acl *ACL) error {
+	aclJSON, err := json.Marshal(acl)
+	if err != nil {
+		return err
+	}
+
+	_, err = m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO object_acls (bucket, key, acl_config) VALUES (?, ?, ?)
+	`, bucket, key, string(aclJSON))
+	return err
+}
+
+// GetObjectACL returns the ACL for an object.
+func (m *Metadata) GetObjectACL(ctx context.Context, bucket, key string) (*ACL, error) {
+	var aclJSON string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT acl_config FROM object_acls WHERE bucket = ? AND key = ?
+	`, bucket, key).Scan(&aclJSON)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var acl ACL
+	if err := json.Unmarshal([]byte(aclJSON), &acl); err != nil {
+		return nil, err
+	}
+
+	return &acl, nil
 }
 
 // Close closes the database connection.
