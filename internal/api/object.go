@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -337,14 +338,17 @@ func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request) {
 
 	// Build response
 	result := DeleteResult{
-		Xmlns:   "http://s3.amazonaws.com/doc/2006-03-01/",
-		Deleted: make([]DeletedObjectInfo, len(deleted)),
-		Errors:  make([]DeleteObjectsError, len(errs)),
+		Xmlns:  "http://s3.amazonaws.com/doc/2006-03-01/",
+		Errors: make([]DeleteObjectsError, len(errs)),
 	}
 
-	for i, d := range deleted {
-		result.Deleted[i] = DeletedObjectInfo{
-			Key: d.Key,
+	// In Quiet mode, only return errors (not successfully deleted objects)
+	if !deleteReq.Quiet {
+		result.Deleted = make([]DeletedObjectInfo, len(deleted))
+		for i, d := range deleted {
+			result.Deleted[i] = DeletedObjectInfo{
+				Key: d.Key,
+			}
 		}
 	}
 
@@ -371,6 +375,13 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 	// Get copy source from header
 	copySource := r.Header.Get("x-amz-copy-source")
 	if copySource == "" {
+		WriteError(w, ErrInvalidRequest)
+		return
+	}
+
+	// URL decode the copy source (may contain URL-encoded characters)
+	copySource, err := url.QueryUnescape(copySource)
+	if err != nil {
 		WriteError(w, ErrInvalidRequest)
 		return
 	}
@@ -406,8 +417,9 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 
 	obj, err := h.storage.CopyObject(r.Context(), srcBucket, srcKey, dstBucket, dstKey, metadata)
 	if err != nil {
-		if errors.Is(err, storage.ErrBucketNotFound) {
-			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+srcBucket)
+		var bucketErr *storage.BucketNotFoundError
+		if errors.As(err, &bucketErr) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucketErr.Bucket)
 			return
 		}
 		if errors.Is(err, storage.ErrObjectNotFound) {
