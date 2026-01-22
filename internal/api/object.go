@@ -152,20 +152,31 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store tags if provided
+	// Note: Tag setting failure is logged but does not fail the request.
+	// This matches S3's behavior where the object creation is prioritized,
+	// and tag failures are treated as non-critical. The object is still
+	// usable without tags, and tags can be set separately via PutObjectTagging.
 	if len(tags) > 0 {
 		if err := h.storage.PutObjectTagging(r.Context(), bucket, key, tags); err != nil {
-			// Log error but don't fail the request as the object was already created
 			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("Failed to set object tags")
 		}
 	}
 
 	// Handle canned ACL header
+	// Note: ACL setting failure is logged but does not fail the request.
+	// Similar to tags, the object creation takes priority. The default ACL
+	// (private) is applied when ACL setting fails, and ACL can be set
+	// separately via PutObjectAcl.
 	cannedACL := r.Header.Get("x-amz-acl")
 	if cannedACL != "" {
-		acl := storage.CannedACLToACL(storage.CannedACL(cannedACL), storage.DefaultOwnerID, storage.DefaultOwnerDisplay)
-		if err := h.storage.PutObjectACL(r.Context(), bucket, key, acl); err != nil {
-			// Log error but don't fail the request as the object was already created
-			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("Failed to set object ACL")
+		if !isValidCannedACL(cannedACL) {
+			// Log warning but don't fail - use default private ACL
+			log.Warn().Str("bucket", bucket).Str("key", key).Str("acl", cannedACL).Msg("Invalid canned ACL specified, ignoring")
+		} else {
+			acl := storage.CannedACLToACL(storage.CannedACL(cannedACL), storage.DefaultOwnerID, storage.DefaultOwnerDisplay)
+			if err := h.storage.PutObjectACL(r.Context(), bucket, key, acl); err != nil {
+				log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("Failed to set object ACL")
+			}
 		}
 	}
 

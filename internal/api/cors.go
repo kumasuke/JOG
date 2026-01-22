@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -187,14 +188,25 @@ func (h *Handler) HandleCorsPreflightRequest(w http.ResponseWriter, r *http.Requ
 
 // matchOrigin checks if the origin matches any of the allowed origins.
 func matchOrigin(origin string, allowedOrigins []string) bool {
+	// Parse origin to extract host
+	parsedOrigin, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	originHost := parsedOrigin.Host
+
 	for _, allowed := range allowedOrigins {
 		if allowed == "*" || allowed == origin {
 			return true
 		}
-		// Simple wildcard matching for *.example.com patterns
+		// Wildcard matching for *.example.com patterns
+		// This should match "sub.example.com" but not "sub.example.com.evil.com"
 		if strings.HasPrefix(allowed, "*.") {
-			suffix := strings.TrimPrefix(allowed, "*")
-			if strings.HasSuffix(origin, suffix) {
+			// Extract the domain part (e.g., "example.com" from "*.example.com")
+			allowedDomain := strings.TrimPrefix(allowed, "*.")
+			// Check if the origin host ends with the allowed domain
+			// and has a dot before it (to ensure it's a subdomain, not a suffix attack)
+			if strings.HasSuffix(originHost, "."+allowedDomain) || originHost == allowedDomain {
 				return true
 			}
 		}

@@ -158,6 +158,18 @@ var (
 		Message:    "The CORS configuration does not exist.",
 		HTTPStatus: http.StatusNotFound,
 	}
+
+	ErrInvalidTag = &S3Error{
+		Code:       "InvalidTag",
+		Message:    "The tag does not comply with tag restrictions.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+
+	ErrInvalidArgument = &S3Error{
+		Code:       "InvalidArgument",
+		Message:    "Invalid Argument",
+		HTTPStatus: http.StatusBadRequest,
+	}
 )
 
 // WriteError writes an S3 error response.
