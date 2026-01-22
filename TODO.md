@@ -12,102 +12,84 @@ Each feature follows TDD (Test-Driven Development):
 
 ---
 
-## Phase 1: MVP
+## Completed Phases
 
-### Infrastructure Setup
-- [x] Create CLAUDE.md
-- [x] Create go.mod
-- [x] Create project directory structure
-- [x] Create Makefile
-- [x] Create .gitignore
-- [x] Create GitHub Actions workflow
+### Phase 1: MVP ✅
 
-### Test Infrastructure
-- [x] Write `test/testutil/server.go` - Test server helper
-- [x] Write `test/testutil/client.go` - S3 client helper
+**Infrastructure & CLI**
+- Project setup (go.mod, Makefile, .gitignore, GitHub Actions)
+- CLI framework (cobra): root, server, version commands
+- HTTP server with S3 routing and middleware
 
-### CLI Framework
-- [x] Implement `cmd/jog/main.go` - Entry point
-- [x] Implement `internal/cli/root.go` - Root command
-- [x] Implement `internal/cli/server.go` - Server command
-- [x] Implement `internal/cli/version.go` - Version command
-- [x] Implement `internal/config/config.go` - Configuration
+**Core S3 Operations**
+- Bucket: CreateBucket, ListBuckets, HeadBucket, DeleteBucket
+- Object: PutObject, GetObject, HeadObject, DeleteObject, ListObjectsV2
+- Storage: Filesystem backend with SQLite metadata
+- Auth: AWS Signature V4
+- Error handling: S3-compatible XML error responses
 
-### HTTP Server
-- [x] Implement `internal/server/server.go` - HTTP server
-- [x] Implement `internal/server/router.go` - S3 routing
-- [x] Implement `internal/server/middleware.go` - Logging, recovery
+### Phase 2: Feature Expansion ✅
 
-### Bucket Operations (TDD)
-- [x] **TEST**: Write `test/s3compat/bucket_test.go`
-  - [x] TestCreateBucket
-  - [x] TestCreateBucketAlreadyExists
-  - [x] TestCreateBucketInvalidName
-  - [x] TestListBuckets
-  - [x] TestHeadBucket
-  - [x] TestHeadBucketNotFound
-  - [x] TestDeleteBucket
-  - [x] TestDeleteBucketNotEmpty
-- [x] **IMPL**: Implement `internal/api/bucket.go`
-  - [x] CreateBucket handler
-  - [x] ListBuckets handler
-  - [x] HeadBucket handler
-  - [x] DeleteBucket handler
+**Multipart Upload**
+- CreateMultipartUpload, UploadPart, UploadPartCopy
+- CompleteMultipartUpload, AbortMultipartUpload
+- ListParts, ListMultipartUploads
 
-### Object Operations (TDD)
-- [x] **TEST**: Write `test/s3compat/object_test.go`
-  - [x] TestPutObject
-  - [x] TestPutObjectWithMetadata
-  - [x] TestGetObject
-  - [x] TestGetObjectNotFound
-  - [x] TestGetObjectRange
-  - [x] TestHeadObject
-  - [x] TestDeleteObject
-  - [x] TestListObjectsV2
-  - [x] TestListObjectsV2Prefix
-  - [x] TestListObjectsV2Pagination
-- [x] **IMPL**: Implement `internal/api/object.go`
-  - [x] PutObject handler
-  - [x] GetObject handler
-  - [x] HeadObject handler
-  - [x] DeleteObject handler
-  - [x] ListObjectsV2 handler
-
-### Storage Backend
-- [x] Implement `internal/storage/interface.go` - Storage interface
-- [x] Implement `internal/storage/filesystem.go` - File system backend
-- [x] Implement `internal/storage/metadata.go` - SQLite metadata
-
-### Authentication (TDD)
-- [x] **TEST**: Write `test/s3compat/auth_test.go`
-  - [x] TestValidSignatureV4
-  - [x] TestInvalidSignatureV4
-  - [x] TestInvalidAccessKey
-- [x] **IMPL**: Implement `internal/auth/signature_v4.go`
-
-### Error Handling (TDD)
-- [x] **TEST**: Write `test/s3compat/error_test.go`
-  - [x] TestErrorResponseFormat
-  - [x] TestErrorCodes
-- [x] **IMPL**: Implement `internal/api/errors.go` - S3 error responses
+**Additional Operations**
+- CopyObject, DeleteObjects (batch), GetObjectAttributes
 
 ---
 
-## Phase 2: Feature Expansion
+## Phase 3: Extended Features
 
-### Multipart Upload
-- [x] TEST: Write multipart tests
-- [x] IMPL: CreateMultipartUpload
-- [x] IMPL: UploadPart
-- [x] IMPL: CompleteMultipartUpload
-- [x] IMPL: AbortMultipartUpload
-- [x] IMPL: ListParts
-- [x] IMPL: ListMultipartUploads
+### GetBucketLocation
+- [ ] TEST: Write GetBucketLocation tests
+- [ ] IMPL: GetBucketLocation handler (return region)
 
-### Additional Operations
-- [x] CopyObject
-- [x] DeleteObjects (batch)
-- [x] GetObjectAttributes
+### Tagging - Object
+- [ ] TEST: Write object tagging tests
+  - [ ] TestPutObjectTagging
+  - [ ] TestGetObjectTagging
+  - [ ] TestDeleteObjectTagging
+  - [ ] TestPutObjectWithTagging (x-amz-tagging header)
+- [ ] IMPL: PutObjectTagging handler
+- [ ] IMPL: GetObjectTagging handler
+- [ ] IMPL: DeleteObjectTagging handler
+- [ ] IMPL: Support x-amz-tagging header in PutObject
+
+### Tagging - Bucket
+- [ ] TEST: Write bucket tagging tests
+  - [ ] TestPutBucketTagging
+  - [ ] TestGetBucketTagging
+  - [ ] TestDeleteBucketTagging
+- [ ] IMPL: PutBucketTagging handler
+- [ ] IMPL: GetBucketTagging handler
+- [ ] IMPL: DeleteBucketTagging handler
+
+### CORS Configuration
+- [ ] TEST: Write CORS tests
+  - [ ] TestPutBucketCors
+  - [ ] TestGetBucketCors
+  - [ ] TestDeleteBucketCors
+  - [ ] TestCorsPreflightRequest (OPTIONS)
+- [ ] IMPL: PutBucketCors handler
+- [ ] IMPL: GetBucketCors handler
+- [ ] IMPL: DeleteBucketCors handler
+- [ ] IMPL: CORS preflight handling (OPTIONS request)
+
+### Versioning
+- [ ] TEST: Write versioning tests
+  - [ ] TestPutBucketVersioning (enable/suspend)
+  - [ ] TestGetBucketVersioning
+  - [ ] TestPutObjectVersioned
+  - [ ] TestGetObjectVersioned
+  - [ ] TestDeleteObjectVersioned
+  - [ ] TestListObjectVersions
+- [ ] IMPL: PutBucketVersioning handler
+- [ ] IMPL: GetBucketVersioning handler
+- [ ] IMPL: Storage backend versioning support
+- [ ] IMPL: ListObjectVersions handler
+- [ ] IMPL: Version-aware Get/Put/Delete operations
 
 ---
 
