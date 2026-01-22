@@ -138,6 +138,12 @@ Environment variables:
 - Bug fixes: `fix: <description>`
 - Refactoring: `refactor: <description>`
 
+## Documentation Updates
+
+After implementing a new feature, update the following documentation:
+- `TODO.md` - Mark the implemented feature as completed
+- `docs/S3_API_CHECKLIST.md` - Update the implementation status and summary statistics
+
 ## Implementation Order (TDD)
 
 1. Write `test/testutil/server.go` - Test infrastructure

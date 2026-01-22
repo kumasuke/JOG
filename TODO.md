@@ -102,12 +102,12 @@ Each feature follows TDD (Test-Driven Development):
 - [x] IMPL: CompleteMultipartUpload
 - [x] IMPL: AbortMultipartUpload
 - [x] IMPL: ListParts
-- [ ] IMPL: ListMultipartUploads (未実装 - バケット内の進行中アップロード一覧取得)
+- [x] IMPL: ListMultipartUploads
 
-### Additional Operations (Future)
-- [ ] CopyObject
-- [ ] DeleteObjects (batch)
-- [ ] GetObjectAttributes
+### Additional Operations
+- [x] CopyObject
+- [x] DeleteObjects (batch)
+- [x] GetObjectAttributes
 
 ---
 
