@@ -65,9 +65,16 @@ func (m *Middleware) verifySignatureV4(r *http.Request, auth string) *api.S3Erro
 	}
 
 	// Parse components
-	parts := strings.Split(strings.TrimPrefix(auth, "AWS4-HMAC-SHA256 "), ", ")
+	// Authorization header format varies by client:
+	// - AWS SDK: "Credential=..., SignedHeaders=..., Signature=..." (comma + space)
+	// - minio-go: "Credential=...,SignedHeaders=...,Signature=..." (comma only)
+	authContent := strings.TrimPrefix(auth, "AWS4-HMAC-SHA256 ")
 	authParams := make(map[string]string)
+
+	// Split by comma, then trim spaces from each part
+	parts := strings.Split(authContent, ",")
 	for _, part := range parts {
+		part = strings.TrimSpace(part)
 		kv := strings.SplitN(part, "=", 2)
 		if len(kv) == 2 {
 			authParams[kv[0]] = kv[1]
