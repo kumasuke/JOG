@@ -15,7 +15,7 @@ function initDatabase(): BetterSQLite3Database<typeof schema> {
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("busy_timeout = 5000");
   sqlite.pragma("synchronous = NORMAL");
-  sqlite.pragma("cache_size = 1000000000");
+  sqlite.pragma("cache_size = -2000"); // 2MB cache (negative value = KB)
   sqlite.pragma("foreign_keys = true");
   sqlite.pragma("temp_store = memory");
 
