@@ -111,6 +111,24 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for aws-chunked encoding (streaming payload signature)
+	contentEncoding := r.Header.Get("Content-Encoding")
+	contentSHA256 := r.Header.Get("X-Amz-Content-Sha256")
+	var body io.Reader = r.Body
+
+	if IsAWSChunked(contentEncoding, contentSHA256) {
+		// Use decoded content length for aws-chunked
+		decodedLengthStr := r.Header.Get("X-Amz-Decoded-Content-Length")
+		if decodedLengthStr != "" {
+			decodedLength, err := strconv.ParseInt(decodedLengthStr, 10, 64)
+			if err == nil {
+				contentLength = decodedLength
+			}
+		}
+		// Wrap body with chunked reader to decode aws-chunked format
+		body = NewChunkedReader(r.Body)
+	}
+
 	// Parse custom metadata
 	metadata := make(map[string]string)
 	for key, values := range r.Header {
@@ -136,10 +154,10 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 
 	if versioningStatus == storage.VersioningStatusEnabled {
 		// Use versioned put
-		obj, versionID, err = h.storage.PutObjectVersioned(r.Context(), bucket, key, r.Body, contentLength, contentType, metadata)
+		obj, versionID, err = h.storage.PutObjectVersioned(r.Context(), bucket, key, body, contentLength, contentType, metadata)
 	} else {
 		// Use regular put
-		obj, err = h.storage.PutObject(r.Context(), bucket, key, r.Body, contentLength, contentType, metadata)
+		obj, err = h.storage.PutObject(r.Context(), bucket, key, body, contentLength, contentType, metadata)
 	}
 
 	if err != nil {
