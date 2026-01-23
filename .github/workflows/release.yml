@@ -1,0 +1,40 @@
+# JOG Release Workflow
+# 目的: Gitタグのプッシュ時にGoReleaserでマルチプラットフォームビルドを実行し、GitHub Releasesに公開
+# トリガー: v* タグのプッシュ時（例: v0.1.0, v1.0.0）
+# 動作内容:
+#   - コードをチェックアウト（フルヒストリー）
+#   - Go 1.25をセットアップ
+#   - GoReleaserでビルド・リリースを実行
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        with:
+          go-version: "1.25"
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

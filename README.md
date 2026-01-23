@@ -9,6 +9,35 @@ JOG (Just Object Gateway) is an S3-compatible object storage server written in G
 - High performance - Efficient I/O using Go's concurrency
 - TDD approach - Test-Driven Development with AWS SDK for Go v2
 
+## Installation
+
+### Download from GitHub Releases
+
+Download the latest binary for your platform from [GitHub Releases](https://github.com/kumasuke/jog/releases).
+
+```bash
+# Linux (amd64)
+curl -LO https://github.com/kumasuke/jog/releases/latest/download/jog_linux_amd64.tar.gz
+tar xzf jog_linux_amd64.tar.gz
+sudo mv jog /usr/local/bin/
+
+# macOS (Apple Silicon)
+curl -LO https://github.com/kumasuke/jog/releases/latest/download/jog_darwin_arm64.tar.gz
+tar xzf jog_darwin_arm64.tar.gz
+sudo mv jog /usr/local/bin/
+
+# macOS (Intel)
+curl -LO https://github.com/kumasuke/jog/releases/latest/download/jog_darwin_amd64.tar.gz
+tar xzf jog_darwin_amd64.tar.gz
+sudo mv jog /usr/local/bin/
+```
+
+### Install with Go
+
+```bash
+go install github.com/kumasuke/jog/cmd/jog@latest
+```
+
 ## Quick Start
 
 ### Build
@@ -97,6 +126,24 @@ go test -v ./test/s3compat/... -run TestCreateBucket
 make lint
 ```
 
+### Release
+
+To create a new release:
+
+```bash
+# 1. Update CHANGELOG.md with release notes
+
+# 2. Commit changes
+git add .
+git commit -m "chore: prepare release v0.x.0"
+
+# 3. Create and push tag
+git tag v0.x.0
+git push origin main --tags
+```
+
+GitHub Actions will automatically build binaries for all platforms and create a GitHub Release.
+
 ## Benchmark
 
 JOGとMinIOのパフォーマンス比較ができます。
@@ -119,4 +166,4 @@ cd benchmark
 
 ## License
 
-Apache License 2.0
+MIT License

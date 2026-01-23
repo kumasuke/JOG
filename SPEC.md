@@ -170,7 +170,7 @@ jog/
 |-----------|------|
 | `github.com/spf13/cobra` | CLIフレームワーク |
 | `github.com/spf13/viper` | 設定管理 |
-| `github.com/mattn/go-sqlite3` | メタデータDB |
+| `modernc.org/sqlite` | メタデータDB (Pure Go) |
 | `github.com/google/uuid` | UUID生成 |
 | `github.com/rs/zerolog` | ロギング |
 | `github.com/aws/aws-sdk-go-v2` | S3互換性テスト |
