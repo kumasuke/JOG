@@ -1,0 +1,58 @@
+services:
+  jog:
+    build:
+      context: ../..
+      dockerfile: samples/litestream-nextjs-todo/jog.Dockerfile
+    ports:
+      - "9000:9000"
+    volumes:
+      - jog-data:/data
+    environment:
+      JOG_PORT: 9000
+      JOG_DATA_DIR: /data
+      JOG_ACCESS_KEY: ${JOG_ACCESS_KEY:-minioadmin}
+      JOG_SECRET_KEY: ${JOG_SECRET_KEY:-minioadmin}
+      JOG_LOG_LEVEL: info
+    healthcheck:
+      test: ["CMD", "sh", "-c", "nc -z localhost 9000"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  init-bucket:
+    image: amazon/aws-cli:latest
+    environment:
+      AWS_ACCESS_KEY_ID: ${JOG_ACCESS_KEY:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${JOG_SECRET_KEY:-minioadmin}
+    entrypoint: >
+      /bin/sh -c "
+        echo 'Creating backups bucket...' &&
+        aws --endpoint-url http://jog:9000 s3 mb s3://backups 2>/dev/null || echo 'Bucket already exists' &&
+        echo 'Bucket initialization complete'
+      "
+    depends_on:
+      jog:
+        condition: service_healthy
+
+  app:
+    build:
+      context: ./app
+    ports:
+      - "3000:3000"
+    volumes:
+      - app-data:/data
+    environment:
+      DATABASE_PATH: /data/todos.db
+      LITESTREAM_S3_ENDPOINT: http://jog:9000
+      AWS_ACCESS_KEY_ID: ${JOG_ACCESS_KEY:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${JOG_SECRET_KEY:-minioadmin}
+    depends_on:
+      jog:
+        condition: service_healthy
+      init-bucket:
+        condition: service_completed_successfully
+
+volumes:
+  jog-data:
+  app-data:
