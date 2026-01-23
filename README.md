@@ -4,10 +4,10 @@ JOG (Just Object Gateway) is an S3-compatible object storage server written in G
 
 ## Features
 
-- S3 API compatibility - Compatible with AWS S3 major APIs
+- S3-compatible - Works with standard AWS S3 tools and SDKs
 - Simple - Single binary, minimal dependencies
 - High performance - Efficient I/O using Go's concurrency
-- TDD approach - Test-Driven Development with AWS SDK for Go v2
+- Thoroughly tested - Full test coverage using AWS SDK for Go v2
 
 ## Installation
 
@@ -52,7 +52,7 @@ make build
 ./bin/jog server
 ```
 
-The server will start on port 9000 by default.
+The server starts on port 9000 by default.
 
 ### Configuration
 
@@ -146,13 +146,7 @@ GitHub Actions will automatically build binaries for all platforms and create a 
 
 ## Benchmark
 
-JOGとMinIOのパフォーマンス比較ができます。
-
-```bash
-cd benchmark
-```
-
-`benchmark` ディレクトリに移動後、[benchmark/README.md](benchmark/README.md) および [benchmark/CLAUDE.md](benchmark/CLAUDE.md) を参照してください。
+Benchmark JOG against MinIO. See [benchmark/README.md](benchmark/README.md) for details.
 
 ## Documentation
 
