@@ -199,27 +199,53 @@ litestream restore -config /etc/litestream.yml /var/lib/jog/metadata.db
 # Dockerfile
 FROM golang:1.25-alpine AS builder
 
+# Install build dependencies for CGO (SQLite requires CGO)
+RUN apk add --no-cache gcc musl-dev sqlite-dev
+
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=1 go build -o /jog ./cmd/jog
+# Build with CGO enabled for SQLite support
+RUN CGO_ENABLED=1 go build -ldflags "-s -w" -o /jog ./cmd/jog
 
 # ---
 FROM alpine:3.21
 
 RUN apk add --no-cache sqlite-libs ca-certificates
 
-# Litestreamのインストール
-ADD https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64-static.tar.gz /tmp/litestream.tar.gz
-RUN tar -xzf /tmp/litestream.tar.gz -C /usr/local/bin && rm /tmp/litestream.tar.gz
+# Litestreamのインストール（チェックサム検証付き、マルチアーキテクチャ対応）
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) \
+            LITESTREAM_ARCH='amd64'; \
+            LITESTREAM_SHA256='eb75a3de5cab03875cdae9f5f539e6aedadd66607003d9b1e7a9077948818ba0' ;; \
+        arm64) \
+            LITESTREAM_ARCH='arm64'; \
+            LITESTREAM_SHA256='9585f5a508516bd66af2b2376bab4de256a5ef8e2b73ec760559e679628f2d59' ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac; \
+    wget -O /tmp/litestream.tar.gz \
+        "https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-${LITESTREAM_ARCH}.tar.gz"; \
+    echo "${LITESTREAM_SHA256}  /tmp/litestream.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/litestream.tar.gz -C /usr/local/bin; \
+    rm /tmp/litestream.tar.gz
 
 COPY --from=builder /jog /usr/local/bin/jog
 COPY docker/litestream.yml /etc/litestream.yml
 COPY docker/entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh
+
+# Create data directory
+RUN mkdir -p /data
+
+# Default environment variables
+ENV JOG_PORT=9000
+ENV JOG_DATA_DIR=/data
+ENV JOG_LOG_LEVEL=info
 
 VOLUME /data
 EXPOSE 9000
