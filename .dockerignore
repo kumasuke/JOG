@@ -1,0 +1,39 @@
+# Build artifacts
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test files
+*.test
+coverage.out
+coverage.html
+coverage-s3compat.out
+coverage-s3compat.html
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Documentation (not needed in image)
+docs/
+*.md
+!README.md
+
+# Test data
+test/
+data/
+
+# Temporary files
+tmp/
+*.tmp
+*.log
