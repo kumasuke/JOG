@@ -101,35 +101,6 @@ aws s3 ls s3://my-bucket/
 aws s3 cp s3://my-bucket/file.txt ./downloaded.txt
 ```
 
-## Development
-
-This project follows TDD (Test-Driven Development):
-
-1. Write tests first using AWS SDK for Go v2
-2. Run tests (should fail - Red)
-3. Implement features
-4. Run tests again (should pass - Green)
-5. Refactor
-
-### Test
-
-```bash
-# Run all tests
-make test
-
-# Run S3 compatibility tests only
-make test-s3compat
-
-# Run specific test
-go test -v ./test/s3compat/... -run TestCreateBucket
-```
-
-### Lint
-
-```bash
-make lint
-```
-
 ## Benchmark
 
 Benchmark JOG against MinIO. See [benchmark/README.md](benchmark/README.md) for details.
