@@ -171,3 +171,10 @@ Main:
 Test:
 - `github.com/aws/aws-sdk-go-v2` - S3 client for testing
 - `github.com/stretchr/testify` - Assertions
+
+## Related Documentation
+
+- `SPEC.md` - Detailed specification and architecture
+- `TODO.md` - Implementation task list
+- `docs/DEPLOYMENT.md` - Production deployment guide with Litestream
+- `docs/S3_API_CHECKLIST.md` - S3 API implementation status

@@ -1,13 +1,17 @@
 # JOG - Just Object Gateway
 
-JOG (Just Object Gateway) is an S3-compatible object storage server written in Go.
+A fast, lightweight S3-compatible object storage server written in Go.
+Fully developed with AI assistance using Claude Code.
 
 ## Features
 
-- S3-compatible - Works with standard AWS S3 tools and SDKs
-- Simple - Single binary, minimal dependencies
-- High performance - Efficient I/O using Go's concurrency
-- Thoroughly tested - Full test coverage using AWS SDK for Go v2
+- **High performance** - Built with Go for speed and efficient concurrency
+- **S3-compatible** - Works with AWS CLI, SDKs, and existing S3 tools
+- **Single binary** - No external dependencies, easy deployment
+- **AI-friendly** - Includes [CLAUDE.md](CLAUDE.md) for seamless AI-assisted development
+- **Well tested** - Comprehensive test coverage using AWS SDK for Go v2
+
+See [Supported S3 APIs](docs/S3_API_CHECKLIST.md) for the full list of implemented operations.
 
 ## Installation
 
@@ -148,15 +152,9 @@ GitHub Actions will automatically build binaries for all platforms and create a 
 
 Benchmark JOG against MinIO. See [benchmark/README.md](benchmark/README.md) for details.
 
-## Documentation
+## Contributing
 
-- [SPEC.md](SPEC.md) - Detailed specification and architecture
-- [CLAUDE.md](CLAUDE.md) - Development guidelines for Claude Code
-- [TODO.md](TODO.md) - Implementation task list (TDD)
-- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) - Deployment guide and Litestream integration
-- [docs/S3_API_CHECKLIST.md](docs/S3_API_CHECKLIST.md) - S3 API implementation status
-- [benchmark/README.md](benchmark/README.md) - Benchmark execution guide
-- [benchmark/CLAUDE.md](benchmark/CLAUDE.md) - Benchmark guidelines for Claude Code
+See [CLAUDE.md](CLAUDE.md) for development guidelines.
 
 ## License
 
