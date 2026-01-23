@@ -118,6 +118,10 @@ func (h *Handler) CreateMultipartUpload(w http.ResponseWriter, r *http.Request) 
 
 	upload, err := h.storage.CreateMultipartUpload(r.Context(), bucket, key, contentType, metadata)
 	if err != nil {
+		if errors.Is(err, storage.ErrInvalidKey) {
+			WriteErrorWithResource(w, ErrInvalidArgument, "/"+bucket+"/"+key)
+			return
+		}
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
 			return

@@ -112,6 +112,12 @@ func (fs *FileSystem) ListBuckets(ctx context.Context) ([]Bucket, error) {
 
 // PutObject stores an object.
 func (fs *FileSystem) PutObject(ctx context.Context, bucket, key string, body io.Reader, size int64, contentType string, metadata map[string]string) (*Object, error) {
+	// Validate object key to prevent path traversal
+	objectPath, err := fs.validateObjectKey(bucket, key)
+	if err != nil {
+		return nil, err
+	}
+
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -120,9 +126,6 @@ func (fs *FileSystem) PutObject(ctx context.Context, bucket, key string, body io
 	if !exists {
 		return nil, ErrBucketNotFound
 	}
-
-	// Create object path
-	objectPath := filepath.Join(fs.dataDir, bucket, key)
 	objectDir := filepath.Dir(objectPath)
 	if err := os.MkdirAll(objectDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create object directory: %w", err)
@@ -184,6 +187,12 @@ func (fs *FileSystem) PutObject(ctx context.Context, bucket, key string, body io
 
 // GetObject retrieves an object.
 func (fs *FileSystem) GetObject(ctx context.Context, bucket, key string) (*ObjectData, error) {
+	// Validate object key to prevent path traversal
+	objectPath, err := fs.validateObjectKey(bucket, key)
+	if err != nil {
+		return nil, err
+	}
+
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -203,7 +212,6 @@ func (fs *FileSystem) GetObject(ctx context.Context, bucket, key string) (*Objec
 	}
 
 	// Open object file
-	objectPath := filepath.Join(fs.dataDir, bucket, key)
 	file, err := os.Open(objectPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -220,6 +228,12 @@ func (fs *FileSystem) GetObject(ctx context.Context, bucket, key string) (*Objec
 
 // GetObjectRange retrieves a range of an object.
 func (fs *FileSystem) GetObjectRange(ctx context.Context, bucket, key string, start, end int64) (*ObjectData, error) {
+	// Validate object key to prevent path traversal
+	objectPath, err := fs.validateObjectKey(bucket, key)
+	if err != nil {
+		return nil, err
+	}
+
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -239,7 +253,6 @@ func (fs *FileSystem) GetObjectRange(ctx context.Context, bucket, key string, st
 	}
 
 	// Open object file
-	objectPath := filepath.Join(fs.dataDir, bucket, key)
 	file, err := os.Open(objectPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -294,6 +307,11 @@ func (lr *limitedReader) Close() error {
 
 // HeadObject returns object metadata.
 func (fs *FileSystem) HeadObject(ctx context.Context, bucket, key string) (*Object, error) {
+	// Validate object key to prevent path traversal
+	if _, err := fs.validateObjectKey(bucket, key); err != nil {
+		return nil, err
+	}
+
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -317,6 +335,12 @@ func (fs *FileSystem) HeadObject(ctx context.Context, bucket, key string) (*Obje
 
 // DeleteObject deletes an object.
 func (fs *FileSystem) DeleteObject(ctx context.Context, bucket, key string) error {
+	// Validate object key to prevent path traversal
+	objectPath, err := fs.validateObjectKey(bucket, key)
+	if err != nil {
+		return err
+	}
+
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -327,7 +351,6 @@ func (fs *FileSystem) DeleteObject(ctx context.Context, bucket, key string) erro
 	}
 
 	// Delete object file
-	objectPath := filepath.Join(fs.dataDir, bucket, key)
 	if err := os.Remove(objectPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to delete object file: %w", err)
 	}
@@ -338,6 +361,16 @@ func (fs *FileSystem) DeleteObject(ctx context.Context, bucket, key string) erro
 
 // CopyObject copies an object from source to destination.
 func (fs *FileSystem) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string, metadata map[string]string) (*Object, error) {
+	// Validate source and destination keys to prevent path traversal
+	srcPath, err := fs.validateObjectKey(srcBucket, srcKey)
+	if err != nil {
+		return nil, err
+	}
+	dstPath, err := fs.validateObjectKey(dstBucket, dstKey)
+	if err != nil {
+		return nil, err
+	}
+
 	// Check if source bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, srcBucket)
 	if err != nil {
@@ -366,7 +399,6 @@ func (fs *FileSystem) CopyObject(ctx context.Context, srcBucket, srcKey, dstBuck
 	}
 
 	// Open source file
-	srcPath := filepath.Join(fs.dataDir, srcBucket, srcKey)
 	srcFile, err := os.Open(srcPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -376,8 +408,7 @@ func (fs *FileSystem) CopyObject(ctx context.Context, srcBucket, srcKey, dstBuck
 	}
 	defer srcFile.Close()
 
-	// Create destination path
-	dstPath := filepath.Join(fs.dataDir, dstBucket, dstKey)
+	// Create destination directory
 	dstDir := filepath.Dir(dstPath)
 	if err := os.MkdirAll(dstDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create destination directory: %w", err)
@@ -527,6 +558,11 @@ func (fs *FileSystem) ListObjectsV2(ctx context.Context, input *ListObjectsInput
 
 // CreateMultipartUpload initiates a multipart upload.
 func (fs *FileSystem) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string, metadata map[string]string) (*MultipartUpload, error) {
+	// Validate object key to prevent path traversal
+	if _, err := fs.validateObjectKey(bucket, key); err != nil {
+		return nil, err
+	}
+
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -638,6 +674,12 @@ func (fs *FileSystem) UploadPart(ctx context.Context, bucket, key, uploadID stri
 
 // UploadPartCopy copies data from an existing object to a part for a multipart upload.
 func (fs *FileSystem) UploadPartCopy(ctx context.Context, bucket, key, uploadID string, partNumber int32, srcBucket, srcKey string, startByte, endByte *int64) (*Part, error) {
+	// Validate source key to prevent path traversal
+	srcPath, err := fs.validateObjectKey(srcBucket, srcKey)
+	if err != nil {
+		return nil, err
+	}
+
 	// Check if upload exists
 	upload, err := fs.metadata.GetMultipartUpload(ctx, uploadID)
 	if err != nil {
@@ -671,7 +713,6 @@ func (fs *FileSystem) UploadPartCopy(ctx context.Context, bucket, key, uploadID 
 	}
 
 	// Open source object file
-	srcPath := filepath.Join(fs.dataDir, srcBucket, srcKey)
 	srcFile, err := os.Open(srcPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -759,6 +800,12 @@ func (fs *FileSystem) UploadPartCopy(ctx context.Context, bucket, key, uploadID 
 
 // CompleteMultipartUpload completes a multipart upload.
 func (fs *FileSystem) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error) {
+	// Validate object key to prevent path traversal
+	objectPath, err := fs.validateObjectKey(bucket, key)
+	if err != nil {
+		return nil, err
+	}
+
 	// Check if upload exists
 	upload, err := fs.metadata.GetMultipartUpload(ctx, uploadID)
 	if err != nil {
@@ -798,8 +845,7 @@ func (fs *FileSystem) CompleteMultipartUpload(ctx context.Context, bucket, key, 
 		partETags = append(partETags, storedPart.ETag)
 	}
 
-	// Create final object path
-	objectPath := filepath.Join(fs.dataDir, bucket, key)
+	// Create final object directory
 	objectDir := filepath.Dir(objectPath)
 	if err := os.MkdirAll(objectDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create object directory: %w", err)
@@ -968,8 +1014,18 @@ func (fs *FileSystem) DeleteObjects(ctx context.Context, bucket string, keys []s
 
 	// Delete each object
 	for _, key := range keys {
+		// Validate object key to prevent path traversal
+		objectPath, err := fs.validateObjectKey(bucket, key)
+		if err != nil {
+			errs = append(errs, DeleteError{
+				Key:     key,
+				Code:    "InvalidArgument",
+				Message: "Invalid object key",
+			})
+			continue
+		}
+
 		// Delete object file
-		objectPath := filepath.Join(fs.dataDir, bucket, key)
 		if err := os.Remove(objectPath); err != nil && !os.IsNotExist(err) {
 			// If there's an error other than "not exists", add to error list
 			errs = append(errs, DeleteError{
@@ -1227,6 +1283,11 @@ func (fs *FileSystem) GetBucketVersioning(ctx context.Context, bucket string) (V
 
 // PutObjectVersioned stores a versioned object.
 func (fs *FileSystem) PutObjectVersioned(ctx context.Context, bucket, key string, body io.Reader, size int64, contentType string, userMetadata map[string]string) (*Object, string, error) {
+	// Validate object key to prevent path traversal
+	if _, err := fs.validateObjectKey(bucket, key); err != nil {
+		return nil, "", err
+	}
+
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -1332,6 +1393,11 @@ func (fs *FileSystem) PutObjectVersioned(ctx context.Context, bucket, key string
 
 // GetObjectVersioned retrieves a specific version of an object.
 func (fs *FileSystem) GetObjectVersioned(ctx context.Context, bucket, key, versionID string) (*ObjectData, error) {
+	// Validate object key to prevent path traversal
+	if _, err := fs.validateObjectKey(bucket, key); err != nil {
+		return nil, err
+	}
+
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -1379,6 +1445,11 @@ func (fs *FileSystem) GetObjectVersioned(ctx context.Context, bucket, key, versi
 
 // DeleteObjectVersioned deletes an object, creating a delete marker if versioning is enabled.
 func (fs *FileSystem) DeleteObjectVersioned(ctx context.Context, bucket, key, versionID string) (string, bool, error) {
+	// Validate object key to prevent path traversal
+	if _, err := fs.validateObjectKey(bucket, key); err != nil {
+		return "", false, err
+	}
+
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -2192,6 +2263,7 @@ var (
 	ErrBucketNotEmpty                   = errors.New("bucket not empty")
 	ErrObjectNotFound                   = errors.New("object not found")
 	ErrInvalidBucketName                = errors.New("invalid bucket name")
+	ErrInvalidKey                       = errors.New("invalid object key")
 	ErrUploadNotFound                   = errors.New("upload not found")
 	ErrInvalidPart                      = errors.New("invalid part")
 	ErrInvalidRange                     = errors.New("invalid range")
@@ -2206,6 +2278,37 @@ var (
 	ErrNoSuchBucketPolicy               = errors.New("no such bucket policy")
 	ErrNoSuchWebsiteConfiguration       = errors.New("no such website configuration")
 )
+
+// validateObjectKey validates the object key to prevent path traversal attacks.
+// It returns the validated and cleaned path, or an error if the key is invalid.
+func (fs *FileSystem) validateObjectKey(bucket, key string) (string, error) {
+	// Reject empty keys
+	if key == "" {
+		return "", ErrInvalidKey
+	}
+
+	// Reject keys containing path traversal sequences
+	// Check for ".." as a path component
+	if key == ".." || strings.HasPrefix(key, "../") || strings.HasSuffix(key, "/..") || strings.Contains(key, "/../") {
+		return "", ErrInvalidKey
+	}
+
+	// Build the full path
+	objectPath := filepath.Join(fs.dataDir, bucket, key)
+
+	// Clean the path to resolve any remaining traversal
+	cleanPath := filepath.Clean(objectPath)
+
+	// Verify the cleaned path is within the bucket directory
+	bucketPath := filepath.Clean(filepath.Join(fs.dataDir, bucket))
+
+	// The clean path must be inside the bucket directory (not equal to it)
+	if !strings.HasPrefix(cleanPath, bucketPath+string(filepath.Separator)) {
+		return "", ErrInvalidKey
+	}
+
+	return cleanPath, nil
+}
 
 // BucketNotFoundError is an error that includes the bucket name.
 type BucketNotFoundError struct {
