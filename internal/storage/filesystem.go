@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -455,16 +454,11 @@ func (fs *FileSystem) ListObjectsV2(ctx context.Context, input *ListObjectsInput
 		return nil, ErrBucketNotFound
 	}
 
-	// Get all objects with prefix
-	objects, err := fs.metadata.ListObjects(ctx, input.Bucket, input.Prefix)
-	if err != nil {
-		return nil, err
+	// Apply max keys
+	maxKeys := input.MaxKeys
+	if maxKeys <= 0 {
+		maxKeys = 1000
 	}
-
-	// Sort by key
-	sort.Slice(objects, func(i, j int) bool {
-		return objects[i].Key < objects[j].Key
-	})
 
 	// Determine starting point
 	startKey := input.StartAfter
@@ -472,15 +466,20 @@ func (fs *FileSystem) ListObjectsV2(ctx context.Context, input *ListObjectsInput
 		startKey = input.ContinuationToken
 	}
 
-	// Filter objects after start key
-	if startKey != "" {
-		filtered := make([]Object, 0, len(objects))
-		for _, obj := range objects {
-			if obj.Key > startKey {
-				filtered = append(filtered, obj)
-			}
+	// Get objects with prefix, pagination handled by SQL
+	// Request more objects when delimiter is used (we may need to skip common prefixes)
+	fetchLimit := maxKeys
+	if input.Delimiter != "" {
+		// Fetch more to account for common prefixes that will be collapsed
+		fetchLimit = maxKeys * 10
+		if fetchLimit > 10000 {
+			fetchLimit = 10000
 		}
-		objects = filtered
+	}
+
+	objects, err := fs.metadata.ListObjects(ctx, input.Bucket, input.Prefix, startKey, fetchLimit)
+	if err != nil {
+		return nil, err
 	}
 
 	// Handle delimiter for common prefixes
@@ -491,27 +490,23 @@ func (fs *FileSystem) ListObjectsV2(ctx context.Context, input *ListObjectsInput
 	if input.Delimiter != "" {
 		for _, obj := range objects {
 			// Find delimiter after prefix
-			suffix := strings.TrimPrefix(obj.Key, input.Prefix)
-			idx := strings.Index(suffix, input.Delimiter)
-			if idx >= 0 {
-				// This is a common prefix
-				prefix := input.Prefix + suffix[:idx+len(input.Delimiter)]
-				if !commonPrefixMap[prefix] {
-					commonPrefixMap[prefix] = true
-					commonPrefixes = append(commonPrefixes, prefix)
+			if len(obj.Key) > len(input.Prefix) {
+				suffix := obj.Key[len(input.Prefix):]
+				idx := strings.Index(suffix, input.Delimiter)
+				if idx >= 0 {
+					// This is a common prefix
+					prefixKey := obj.Key[:len(input.Prefix)+idx+len(input.Delimiter)]
+					if !commonPrefixMap[prefixKey] {
+						commonPrefixMap[prefixKey] = true
+						commonPrefixes = append(commonPrefixes, prefixKey)
+					}
+					continue
 				}
-			} else {
-				resultObjects = append(resultObjects, obj)
 			}
+			resultObjects = append(resultObjects, obj)
 		}
 	} else {
 		resultObjects = objects
-	}
-
-	// Apply max keys
-	maxKeys := input.MaxKeys
-	if maxKeys <= 0 {
-		maxKeys = 1000
 	}
 
 	output := &ListObjectsOutput{}
