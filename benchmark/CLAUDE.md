@@ -8,6 +8,25 @@
 cd benchmark
 ```
 
+## クイックスタート（一括実行）
+
+```bash
+# 全ベンチマークを一括実行（Docker起動→ベンチマーク→Docker停止）
+./scripts/run-all.sh
+
+# JOGのみ、スループットテスト
+./scripts/run-all.sh jog throughput
+
+# クリーンスタート（ボリューム削除してから実行）
+./scripts/run-all.sh both all --clean
+
+# コンテナを停止せずに終了
+./scripts/run-all.sh both all -k
+
+# Warpのみ実行（カスタムGoベンチマークをスキップ）
+./scripts/run-all.sh both all --skip-custom
+```
+
 ## Warp CLI
 
 ### インストール

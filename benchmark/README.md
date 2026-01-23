@@ -12,6 +12,20 @@ cd benchmark
 
 ## クイックスタート
 
+### 一括実行（推奨）
+
+```bash
+# 全ベンチマークを一括実行（Docker起動→ベンチマーク→Docker停止）
+./scripts/run-all.sh
+
+# オプション指定例
+./scripts/run-all.sh jog throughput      # JOGのみ、スループットテスト
+./scripts/run-all.sh both all --clean    # クリーンスタート（ボリューム削除）
+./scripts/run-all.sh jog all -k          # 終了後もコンテナを停止しない
+```
+
+### 個別実行
+
 ```bash
 # 1. Warpをインストール（bin/にダウンロード）
 ./scripts/install-warp.sh
@@ -25,6 +39,69 @@ docker compose -f docker-compose.benchmark.yml up -d
 # 4. カスタムGoベンチマークを実行
 go test -bench=. -benchmem -benchtime=10s ./custom/...
 ```
+
+## 一括実行スクリプト（run-all.sh）
+
+`run-all.sh` はDocker起動からベンチマーク実行、Docker停止までを1コマンドで行います。
+
+### 基本的な使い方
+
+```bash
+./scripts/run-all.sh [target] [scenario] [OPTIONS]
+```
+
+### 引数
+
+| 引数 | 説明 | デフォルト |
+|------|------|-----------|
+| `target` | jog / minio / both | both |
+| `scenario` | throughput / concurrency / mixed / all | all |
+
+### オプション
+
+| オプション | 説明 |
+|------------|------|
+| `--skip-warp` | Warpベンチマークをスキップ |
+| `--skip-custom` | カスタムGoベンチマークをスキップ |
+| `--skip-report` | レポート生成をスキップ |
+| `-k, --keep-running` | 終了後もコンテナを停止しない |
+| `-c, --clean` | 開始前にボリュームも削除（クリーンスタート） |
+| `--timeout SECS` | ヘルスチェックタイムアウト秒数（デフォルト: 120） |
+| `-h, --help` | ヘルプ表示 |
+
+### 実行例
+
+```bash
+# 全ベンチマーク実行
+./scripts/run-all.sh
+
+# JOGのみ、スループットテスト
+./scripts/run-all.sh jog throughput
+
+# クリーンスタートで全ベンチマーク
+./scripts/run-all.sh both all --clean
+
+# Warpのみ実行（カスタムGoベンチマークとレポートをスキップ）
+./scripts/run-all.sh both all --skip-custom --skip-report
+
+# コンテナを停止せずに終了
+./scripts/run-all.sh both all -k
+```
+
+### 処理フロー
+
+1. 前提条件チェック（Docker, Warp CLI, Go, ポート競合）
+2. 環境準備（`--clean`時はボリューム削除）
+3. Docker環境起動・ヘルスチェック待機
+4. Warpベンチマーク実行
+5. カスタムGoベンチマーク実行
+6. レポート生成
+7. Docker環境停止（`-k`オプションがない場合）
+
+### エラーハンドリング
+
+- Ctrl+C で中断した場合もDockerコンテナは自動的に停止されます
+- 一部のベンチマークが失敗しても、他のベンチマークは継続実行されます
 
 ## ベンチマークツール
 
