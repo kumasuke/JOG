@@ -161,6 +161,19 @@ GitHub Actions will automatically build binaries for all platforms and create a 
 After implementing a new feature, update the following documentation:
 - `TODO.md` - Mark the implemented feature as completed
 - `docs/S3_API_CHECKLIST.md` - Update the implementation status and summary statistics
+- `README.md` - Update the S3 API coverage badge percentage and color (see badge color guide below)
+
+### Badge Color Guide
+
+Update the badge color in README.md based on coverage percentage:
+
+| Coverage | Color |
+|----------|-------|
+| 0-30% | red |
+| 31-60% | orange |
+| 61-80% | yellow |
+| 81-99% | yellowgreen |
+| 100% | brightgreen |
 
 ## Benchmark
 
