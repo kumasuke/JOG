@@ -161,6 +161,10 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
+		if errors.Is(err, storage.ErrInvalidKey) {
+			WriteErrorWithResource(w, ErrInvalidArgument, "/"+bucket+"/"+key)
+			return
+		}
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
 			return
@@ -231,6 +235,10 @@ func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
+		if errors.Is(err, storage.ErrInvalidKey) {
+			WriteErrorWithResource(w, ErrInvalidArgument, "/"+bucket+"/"+key)
+			return
+		}
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
 			return
@@ -277,6 +285,10 @@ func (h *Handler) getObjectRange(w http.ResponseWriter, r *http.Request, bucket,
 	// Get object metadata first
 	objMeta, err := h.storage.HeadObject(r.Context(), bucket, key)
 	if err != nil {
+		if errors.Is(err, storage.ErrInvalidKey) {
+			WriteErrorWithResource(w, ErrInvalidArgument, "/"+bucket+"/"+key)
+			return
+		}
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
 			return
@@ -337,6 +349,10 @@ func (h *Handler) getObjectRange(w http.ResponseWriter, r *http.Request, bucket,
 
 	obj, err := h.storage.GetObjectRange(r.Context(), bucket, key, start, end)
 	if err != nil {
+		if errors.Is(err, storage.ErrInvalidKey) {
+			WriteErrorWithResource(w, ErrInvalidArgument, "/"+bucket+"/"+key)
+			return
+		}
 		WriteError(w, ErrInternalError)
 		return
 	}
@@ -362,6 +378,10 @@ func (h *Handler) HeadObject(w http.ResponseWriter, r *http.Request) {
 
 	obj, err := h.storage.HeadObject(r.Context(), bucket, key)
 	if err != nil {
+		if errors.Is(err, storage.ErrInvalidKey) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -403,6 +423,10 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 		// Use versioned delete
 		returnedVersionID, isDeleteMarker, err := h.storage.DeleteObjectVersioned(r.Context(), bucket, key, versionID)
 		if err != nil {
+			if errors.Is(err, storage.ErrInvalidKey) {
+				WriteErrorWithResource(w, ErrInvalidArgument, "/"+bucket+"/"+key)
+				return
+			}
 			if errors.Is(err, storage.ErrBucketNotFound) {
 				WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
 				return
@@ -429,6 +453,10 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 	// Regular delete (no versioning)
 	err := h.storage.DeleteObject(r.Context(), bucket, key)
 	if err != nil {
+		if errors.Is(err, storage.ErrInvalidKey) {
+			WriteErrorWithResource(w, ErrInvalidArgument, "/"+bucket+"/"+key)
+			return
+		}
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
 			return
@@ -548,6 +576,10 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 
 	obj, err := h.storage.CopyObject(r.Context(), srcBucket, srcKey, dstBucket, dstKey, metadata)
 	if err != nil {
+		if errors.Is(err, storage.ErrInvalidKey) {
+			WriteErrorWithResource(w, ErrInvalidArgument, "/"+dstBucket+"/"+dstKey)
+			return
+		}
 		var bucketErr *storage.BucketNotFoundError
 		if errors.As(err, &bucketErr) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucketErr.Bucket)
