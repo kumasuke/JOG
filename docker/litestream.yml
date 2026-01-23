@@ -1,0 +1,8 @@
+# Litestream configuration for JOG metadata replication
+# See https://litestream.io/reference/config/ for more options
+
+dbs:
+  - path: ${JOG_DATA_DIR}/metadata.db
+    replicas:
+      - url: ${LITESTREAM_REPLICA_URL}
+        sync-interval: 1s

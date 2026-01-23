@@ -1,4 +1,4 @@
-.PHONY: build test test-s3compat test-coverage lint clean run deps
+.PHONY: build test test-s3compat test-coverage lint clean run deps docker-build docker-up docker-down
 
 # Binary name
 BINARY_NAME=jog
@@ -79,6 +79,19 @@ clean:
 tools:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
+# Docker targets
+docker-build:
+	docker compose build
+
+docker-up:
+	docker compose up -d
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f
+
 # Help
 help:
 	@echo "Available targets:"
@@ -93,3 +106,7 @@ help:
 	@echo "  make clean           - Clean build artifacts"
 	@echo "  make deps            - Download dependencies"
 	@echo "  make tools           - Install development tools"
+	@echo "  make docker-build    - Build Docker image"
+	@echo "  make docker-up       - Start Docker containers"
+	@echo "  make docker-down     - Stop Docker containers"
+	@echo "  make docker-logs     - View Docker container logs"
