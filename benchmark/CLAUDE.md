@@ -11,12 +11,28 @@ cd benchmark
 ## クイックスタート（一括実行）
 
 ```bash
-# 全ベンチマークを一括実行（Docker起動→ベンチマーク→Docker停止）
-./scripts/run-all.sh
+# 最短の動作確認（約1〜2分）
+./scripts/run-all.sh jog mixed --skip-custom --skip-report
 
-# JOGのみ、スループットテスト
-./scripts/run-all.sh jog throughput
+# 通常の開発時（約5分）
+./scripts/run-all.sh jog mixed
 
+# フルベンチマーク（20分以上）
+./scripts/run-all.sh both all
+```
+
+### シナリオと所要時間
+
+| シナリオ | 所要時間（1ターゲット） | 用途 |
+|---------|------------------------|------|
+| `mixed` | **約1〜2分** | クイック動作確認、CI/CD |
+| `concurrency` | 約8分 | スケーラビリティ評価 |
+| `throughput` | 約10分以上 | 詳細な性能特性分析 |
+| `all` | **20分以上** | フルベンチマーク |
+
+### その他のオプション
+
+```bash
 # クリーンスタート（ボリューム削除してから実行）
 ./scripts/run-all.sh both all --clean
 
