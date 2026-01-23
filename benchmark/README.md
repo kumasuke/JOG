@@ -57,6 +57,31 @@ go test -bench=. -benchmem -benchtime=10s ./custom/...
 | `target` | jog / minio / both | both |
 | `scenario` | throughput / concurrency / mixed / all | all |
 
+### シナリオの選び方
+
+| シナリオ | 内容 | 所要時間（1ターゲット） | 用途 |
+|---------|------|------------------------|------|
+| `mixed` | 70%GET/30%PUTの混合ワークロード（1分間） | **約1〜2分** | クイック動作確認、CI/CD |
+| `concurrency` | 並行度を変えてテスト（1, 4, 16, 64） | 約8分 | スケーラビリティ評価 |
+| `throughput` | 5種類のオブジェクトサイズ（1KB〜64MB）でPUT+GET | 約10分以上 | 詳細な性能特性分析 |
+| `all` | 上記すべて | **20分以上** | フルベンチマーク |
+
+**推奨:**
+- **動作確認・CI**: `mixed` シナリオ（最短で完了）
+- **リリース前評価**: `throughput` または `all`
+- **ターゲットも絞る**: `both` より `jog` のみの方が半分の時間で済む
+
+```bash
+# 最短の動作確認（約1〜2分）
+./scripts/run-all.sh jog mixed --skip-custom --skip-report
+
+# 通常の開発時（約5分）
+./scripts/run-all.sh jog mixed
+
+# フルベンチマーク（20分以上）
+./scripts/run-all.sh both all
+```
+
 ### オプション
 
 | オプション | 説明 |
