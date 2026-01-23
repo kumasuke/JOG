@@ -18,7 +18,7 @@ services:
       # AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9000/"]
+      test: ["CMD", "sh", "-c", "wget -q --spider http://localhost:9000/ 2>&1 | grep -qE '(200 OK|403 Forbidden)' || wget -O- -q http://localhost:9000/ >/dev/null"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -35,6 +35,19 @@ Environment variables:
 - `JOG_SECRET_KEY` - Secret key (default: minioadmin)
 - `JOG_LOG_LEVEL` - Log level (default: info)
 
+### Docker Compose
+
+```bash
+# Start with Docker Compose
+docker compose up -d
+
+# Check logs
+docker compose logs -f
+
+# Stop
+docker compose down
+```
+
 ### Usage with AWS CLI
 
 ```bash

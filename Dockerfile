@@ -22,9 +22,19 @@ FROM alpine:3.21
 # Install runtime dependencies
 RUN apk add --no-cache sqlite-libs ca-certificates
 
-# Install Litestream for SQLite replication
-ADD https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64-static.tar.gz /tmp/litestream.tar.gz
-RUN tar -xzf /tmp/litestream.tar.gz -C /usr/local/bin && rm /tmp/litestream.tar.gz
+# Install Litestream for SQLite replication with checksum verification
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) LITESTREAM_ARCH='amd64' ;; \
+        arm64) LITESTREAM_ARCH='arm64' ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac; \
+    wget -O /tmp/litestream.tar.gz \
+        "https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-${LITESTREAM_ARCH}-static.tar.gz"; \
+    echo "0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5  /tmp/litestream.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/litestream.tar.gz -C /usr/local/bin; \
+    rm /tmp/litestream.tar.gz
 
 # Copy binary from builder
 COPY --from=builder /jog /usr/local/bin/jog
