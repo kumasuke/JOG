@@ -197,7 +197,7 @@ litestream restore -config /etc/litestream.yml /var/lib/jog/metadata.db
 
 ```dockerfile
 # Dockerfile
-FROM golang:1.23-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -207,7 +207,7 @@ COPY . .
 RUN CGO_ENABLED=1 go build -o /jog ./cmd/jog
 
 # ---
-FROM alpine:3.19
+FROM alpine:3.21
 
 RUN apk add --no-cache sqlite-libs ca-certificates
 
