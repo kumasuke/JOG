@@ -99,6 +99,42 @@ docker compose -f docker-compose.benchmark.yml down -v
 
 結果の読み方や分析方法については [docs/WARP_ANALYSIS.md](docs/WARP_ANALYSIS.md) を参照してください。
 
+### クイックテスト（動作確認用）
+
+短時間で動作確認をしたい場合は、以下のオプションを使用してテスト範囲を絞ることができます：
+
+| オプション | 説明 | デフォルト | 推奨値（クイックテスト） |
+|-----------|------|-----------|------------------------|
+| `--duration` | テスト時間 | 5m | 10s |
+| `--concurrent` | 並列数 | 20 | 1 |
+| `--obj.size` | オブジェクトサイズ | 10MiB | 1KB |
+| `--objects` | オブジェクト数（GETのみ） | 2500 | 100 |
+
+```bash
+# PUT クイックテスト（10秒、1並列、1KB）
+./bin/warp put \
+  --host=localhost:9200 \
+  --access-key=benchadmin \
+  --secret-key=benchadmin \
+  --tls=false \
+  --bucket=benchmark \
+  --obj.size=1KB \
+  --concurrent=1 \
+  --duration=10s
+
+# GET クイックテスト（上記PUTで作成したオブジェクトを使用）
+./bin/warp get \
+  --host=localhost:9200 \
+  --access-key=benchadmin \
+  --secret-key=benchadmin \
+  --tls=false \
+  --bucket=benchmark \
+  --obj.size=1KB \
+  --concurrent=1 \
+  --duration=10s \
+  --objects=100
+```
+
 ### 基本的な使い方
 
 ```bash
