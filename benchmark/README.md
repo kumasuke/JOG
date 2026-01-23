@@ -328,17 +328,31 @@ go test -bench=. ... > results/go-bench-$(date +%Y%m%d).txt
 - 今後の最適化ポイント: [具体的な改善案]
 ```
 
-## 既知の制限事項
+## ベンチマーク結果
 
-### WarpとJOGの互換性
+### 2026-01-23: JOG vs MinIO (PR #15修正後)
 
-現時点では、WarpベンチマークはJOGに対して正常に動作しません。これはWarpが使用する署名方式（UNSIGNED-PAYLOADやストリーミング署名）がJOGの認証実装と互換性がないためです。
+**環境:**
+- Docker on macOS (Apple Silicon)
+- JOG: commit 9f46345
+- MinIO: latest
 
-**推奨するベンチマーク方法:**
-- **JOG**: カスタムGoベンチマーク（AWS SDK使用）で測定
-- **MinIO**: Warpベンチマークで測定
+**テスト条件:**
+- Duration: 15秒
+- Concurrency: 8
+- Object Size: 1KiB
 
-両者の比較は、カスタムGoベンチマークを使用して行ってください。
+#### PUT Benchmark
+
+| Server | Throughput | obj/s | Avg Latency | p99 Latency | Errors |
+|--------|------------|-------|-------------|-------------|--------|
+| **JOG** | 2.94 MiB/s | 3,014 | 2.6ms | 18.0ms | 0 |
+| MinIO | 2.21 MiB/s | 2,259 | 3.6ms | 8.9ms | 0 |
+
+**結果:**
+- JOGはMinIOより約**33%高速**なスループットを達成
+- JOGの平均レイテンシはMinIOより低い
+- MinIOはp99レイテンシがより安定している
 
 ---
 
