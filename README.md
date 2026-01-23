@@ -97,6 +97,16 @@ go test -v ./test/s3compat/... -run TestCreateBucket
 make lint
 ```
 
+## Benchmark
+
+JOGとMinIOのパフォーマンス比較ができます。
+
+```bash
+cd benchmark
+```
+
+`benchmark` ディレクトリに移動後、[benchmark/README.md](benchmark/README.md) および [benchmark/CLAUDE.md](benchmark/CLAUDE.md) を参照してください。
+
 ## Documentation
 
 - [SPEC.md](SPEC.md) - Detailed specification and architecture
@@ -104,6 +114,8 @@ make lint
 - [TODO.md](TODO.md) - Implementation task list (TDD)
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) - Deployment guide and Litestream integration
 - [docs/S3_API_CHECKLIST.md](docs/S3_API_CHECKLIST.md) - S3 API implementation status
+- [benchmark/README.md](benchmark/README.md) - Benchmark execution guide
+- [benchmark/CLAUDE.md](benchmark/CLAUDE.md) - Benchmark guidelines for Claude Code
 
 ## License
 

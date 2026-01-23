@@ -4,6 +4,28 @@
 
 このディレクトリには、JOGのパフォーマンスを測定するためのベンチマーク環境が含まれています。Warp（MinIO公式のS3ベンチマークツール）とカスタムGoベンチマークを使用して、JOGとMinIOのパフォーマンスを比較できます。
 
+**注意**: ベンチマーク関連の操作は、すべて `benchmark` ディレクトリ内で実行してください。
+
+```bash
+cd benchmark
+```
+
+## クイックスタート
+
+```bash
+# 1. Warpをインストール（bin/にダウンロード）
+./scripts/install-warp.sh
+
+# 2. ベンチマーク環境を起動
+docker compose -f docker-compose.benchmark.yml up -d
+
+# 3. Warpベンチマークを実行
+./scripts/run-warp.sh both throughput
+
+# 4. カスタムGoベンチマークを実行
+go test -bench=. -benchmem -benchtime=10s ./custom/...
+```
+
 ## ベンチマークツール
 
 - **Warp**: MinIO公式のS3ベンチマークツール。実際のS3ワークロードをシミュレート
@@ -16,21 +38,27 @@
 - Docker（バージョン20.10以上）
 - Docker Compose（バージョン2.0以上）
 - Go（バージョン1.23以上）
-- Warp CLI（オプション、手動ベンチマーク実行時）
+- Warp CLI
 
 ### Warp CLIのインストール
 
 ```bash
-# macOS (Homebrew)
-brew install minio/stable/warp
+./scripts/install-warp.sh
 
-# Linux/macOS (バイナリ直接インストール)
-wget https://github.com/minio/warp/releases/latest/download/warp_linux_amd64 -O warp
-chmod +x warp
-sudo mv warp /usr/local/bin/
+# バージョン指定も可能
+./scripts/install-warp.sh v1.4.0
+```
 
-# Goからビルド
-go install github.com/minio/warp@latest
+スクリプトは以下を自動で行います:
+- OSとアーキテクチャを検出（macOS/Linux、amd64/arm64）
+- MinIO公式サイトからバイナリをダウンロード
+- `bin/warp` に配置
+- 実行権限を付与
+
+**インストール確認**
+
+```bash
+./bin/warp --version
 ```
 
 ## 環境セットアップ
@@ -69,11 +97,13 @@ docker compose -f docker-compose.benchmark.yml down -v
 
 ## Warpベンチマークの実行
 
+結果の読み方や分析方法については [docs/WARP_ANALYSIS.md](docs/WARP_ANALYSIS.md) を参照してください。
+
 ### 基本的な使い方
 
 ```bash
 # JOGに対するベンチマーク（PUTオペレーション）
-warp put \
+./bin/warp put \
   --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
@@ -85,7 +115,7 @@ warp put \
   --duration=60s
 
 # MinIOに対するベンチマーク（比較用）
-warp put \
+./bin/warp put \
   --host=localhost:9300 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
@@ -102,7 +132,7 @@ warp put \
 #### 1. PUTベンチマーク（アップロード性能）
 
 ```bash
-warp put \
+./bin/warp put \
   --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
@@ -117,7 +147,7 @@ warp put \
 
 ```bash
 # まずデータを準備
-warp put \
+./bin/warp put \
   --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
@@ -127,7 +157,7 @@ warp put \
   --obj.size=1MB
 
 # GETベンチマーク実行
-warp get \
+./bin/warp get \
   --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
@@ -140,7 +170,7 @@ warp get \
 #### 3. 混合ワークロード（GET 70% + PUT 30%）
 
 ```bash
-warp mixed \
+./bin/warp mixed \
   --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
@@ -157,35 +187,35 @@ warp mixed \
 
 ```bash
 # 1KB
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1KB --concurrent=16 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1KB --concurrent=16 --duration=60s
 
 # 64KB
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=64KB --concurrent=16 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=64KB --concurrent=16 --duration=60s
 
 # 1MB
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=16 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=16 --duration=60s
 
 # 16MB
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=16MB --concurrent=16 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=16MB --concurrent=16 --duration=60s
 
 # 64MB
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=64MB --concurrent=8 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=64MB --concurrent=8 --duration=60s
 ```
 
 #### 5. 並行度を変えたテスト
 
 ```bash
 # 並行度 1（シングルスレッド）
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=1 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=1 --duration=60s
 
 # 並行度 4
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=4 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=4 --duration=60s
 
 # 並行度 16
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=16 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=16 --duration=60s
 
 # 並行度 64
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=64 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=64 --duration=60s
 ```
 
 ### Warpの主要オプション
