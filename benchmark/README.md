@@ -97,11 +97,13 @@ docker compose -f docker-compose.benchmark.yml down -v
 
 ## Warpベンチマークの実行
 
+結果の読み方や分析方法については [docs/WARP_ANALYSIS.md](docs/WARP_ANALYSIS.md) を参照してください。
+
 ### 基本的な使い方
 
 ```bash
 # JOGに対するベンチマーク（PUTオペレーション）
-warp put \
+./bin/warp put \
   --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
@@ -113,7 +115,7 @@ warp put \
   --duration=60s
 
 # MinIOに対するベンチマーク（比較用）
-warp put \
+./bin/warp put \
   --host=localhost:9300 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
@@ -130,7 +132,7 @@ warp put \
 #### 1. PUTベンチマーク（アップロード性能）
 
 ```bash
-warp put \
+./bin/warp put \
   --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
@@ -145,7 +147,7 @@ warp put \
 
 ```bash
 # まずデータを準備
-warp put \
+./bin/warp put \
   --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
@@ -155,7 +157,7 @@ warp put \
   --obj.size=1MB
 
 # GETベンチマーク実行
-warp get \
+./bin/warp get \
   --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
@@ -168,7 +170,7 @@ warp get \
 #### 3. 混合ワークロード（GET 70% + PUT 30%）
 
 ```bash
-warp mixed \
+./bin/warp mixed \
   --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
@@ -185,35 +187,35 @@ warp mixed \
 
 ```bash
 # 1KB
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1KB --concurrent=16 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1KB --concurrent=16 --duration=60s
 
 # 64KB
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=64KB --concurrent=16 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=64KB --concurrent=16 --duration=60s
 
 # 1MB
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=16 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=16 --duration=60s
 
 # 16MB
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=16MB --concurrent=16 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=16MB --concurrent=16 --duration=60s
 
 # 64MB
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=64MB --concurrent=8 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=64MB --concurrent=8 --duration=60s
 ```
 
 #### 5. 並行度を変えたテスト
 
 ```bash
 # 並行度 1（シングルスレッド）
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=1 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=1 --duration=60s
 
 # 並行度 4
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=4 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=4 --duration=60s
 
 # 並行度 16
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=16 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=16 --duration=60s
 
 # 並行度 64
-warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=64 --duration=60s
+./bin/warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=64 --duration=60s
 ```
 
 ### Warpの主要オプション

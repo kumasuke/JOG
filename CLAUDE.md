@@ -144,6 +144,12 @@ After implementing a new feature, update the following documentation:
 - `TODO.md` - Mark the implemented feature as completed
 - `docs/S3_API_CHECKLIST.md` - Update the implementation status and summary statistics
 
+## Benchmark
+
+ベンチマーク関連の作業は `benchmark` ディレクトリ内で行う。詳細は以下を参照:
+- `benchmark/README.md` - ベンチマーク実行ガイド
+- `benchmark/CLAUDE.md` - ベンチマーク作業のガイドライン
+
 ## Implementation Order (TDD)
 
 1. Write `test/testutil/server.go` - Test infrastructure
