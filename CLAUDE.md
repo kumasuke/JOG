@@ -166,7 +166,7 @@ Main:
 - `github.com/spf13/viper` - Config
 - `github.com/rs/zerolog` - Logging
 - `github.com/google/uuid` - UUID
-- `github.com/mattn/go-sqlite3` - Metadata DB
+- `modernc.org/sqlite` - Metadata DB (Pure Go)
 
 Test:
 - `github.com/aws/aws-sdk-go-v2` - S3 client for testing
