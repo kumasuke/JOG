@@ -1,0 +1,13 @@
+dbs:
+  - path: /data/todos.db
+    replicas:
+      - type: s3
+        bucket: backups
+        path: todos
+        endpoint: ${LITESTREAM_S3_ENDPOINT}
+        region: us-east-1
+        access-key-id: ${AWS_ACCESS_KEY_ID}
+        secret-access-key: ${AWS_SECRET_ACCESS_KEY}
+        force-path-style: true
+        skip-verify: true
+        sync-interval: 1s
