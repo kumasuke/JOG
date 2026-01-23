@@ -1,4 +1,5 @@
 .PHONY: build test test-s3compat test-coverage lint clean run deps docker-build docker-up docker-down
+.PHONY: benchmark benchmark-env benchmark-warp benchmark-custom benchmark-report benchmark-clean
 
 # Binary name
 BINARY_NAME=jog
@@ -92,6 +93,41 @@ docker-down:
 docker-logs:
 	docker compose logs -f
 
+# Benchmark targets
+benchmark: benchmark-env benchmark-warp benchmark-report
+	@echo "Benchmark completed. Report generated at benchmark/results/REPORT.md"
+
+benchmark-env:
+	@echo "Starting benchmark environment..."
+	docker compose -f benchmark/docker-compose.benchmark.yml up -d
+	@echo "Waiting for services to be healthy..."
+	@sleep 5
+	@docker compose -f benchmark/docker-compose.benchmark.yml ps
+
+benchmark-warp:
+	@echo "Running Warp benchmarks..."
+	./benchmark/scripts/run-warp.sh both throughput
+
+benchmark-warp-all:
+	@echo "Running all Warp benchmarks..."
+	./benchmark/scripts/run-warp.sh both all
+
+benchmark-custom:
+	@echo "Running custom Go benchmarks..."
+	./benchmark/scripts/run-custom.sh jog
+	./benchmark/scripts/run-custom.sh minio
+
+benchmark-report:
+	@echo "Generating benchmark report..."
+	./benchmark/scripts/generate-report.sh
+	@echo "Report generated at benchmark/results/REPORT.md"
+
+benchmark-clean:
+	@echo "Stopping benchmark environment..."
+	docker compose -f benchmark/docker-compose.benchmark.yml down -v
+	rm -rf benchmark/data/jog/* benchmark/data/minio/*
+	@echo "Benchmark environment cleaned"
+
 # Help
 help:
 	@echo "Available targets:"
@@ -110,3 +146,12 @@ help:
 	@echo "  make docker-up       - Start Docker containers"
 	@echo "  make docker-down     - Stop Docker containers"
 	@echo "  make docker-logs     - View Docker container logs"
+	@echo ""
+	@echo "Benchmark targets:"
+	@echo "  make benchmark       - Run full benchmark suite"
+	@echo "  make benchmark-env   - Start JOG and MinIO containers"
+	@echo "  make benchmark-warp  - Run Warp throughput benchmarks"
+	@echo "  make benchmark-warp-all - Run all Warp benchmarks"
+	@echo "  make benchmark-custom - Run custom Go benchmarks"
+	@echo "  make benchmark-report - Generate benchmark report"
+	@echo "  make benchmark-clean - Stop and clean benchmark environment"

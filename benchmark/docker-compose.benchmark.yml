@@ -1,0 +1,55 @@
+services:
+  jog:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: jog-benchmark
+    ports:
+      - "9200:9000"
+    environment:
+      - JOG_SERVER_PORT=9000
+      - JOG_STORAGE_DATA_DIR=/data
+      - JOG_AUTH_ACCESS_KEY=benchadmin
+      - JOG_AUTH_SECRET_KEY=benchadmin
+      - JOG_LOGGING_LEVEL=info
+    volumes:
+      - jog-data:/data
+    networks:
+      - benchmark-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9000/ 2>&1; test $? -le 8"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2025-10-15T17-29-55Z
+    container_name: minio-benchmark
+    ports:
+      - "9300:9000"  # MinIO API port
+      - "9301:9001"  # MinIO Console port
+    environment:
+      - MINIO_ROOT_USER=benchadmin
+      - MINIO_ROOT_PASSWORD=benchadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - benchmark-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  jog-data:
+  minio-data:
+
+networks:
+  benchmark-net:
+    driver: bridge

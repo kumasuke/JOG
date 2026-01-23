@@ -44,3 +44,11 @@ data/
 # Environment files
 .env
 .env.local
+
+# Benchmark
+benchmark/bin/
+benchmark/results/*.txt
+benchmark/results/*.json
+benchmark/results/*.csv
+benchmark/results/REPORT.md
+*.json.zst
