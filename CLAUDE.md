@@ -138,6 +138,24 @@ Environment variables:
 - Bug fixes: `fix: <description>`
 - Refactoring: `refactor: <description>`
 
+## Release
+
+To create a new release:
+
+```bash
+# 1. Update CHANGELOG.md with release notes
+
+# 2. Commit changes
+git add .
+git commit -m "chore: prepare release v0.x.0"
+
+# 3. Create and push tag
+git tag v0.x.0
+git push origin main --tags
+```
+
+GitHub Actions will automatically build binaries for all platforms and create a GitHub Release.
+
 ## Documentation Updates
 
 After implementing a new feature, update the following documentation:
