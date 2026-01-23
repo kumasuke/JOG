@@ -43,6 +43,9 @@ MINIO_PORT=9300
 # Compose file
 COMPOSE_FILE="${BENCHMARK_DIR}/docker-compose.benchmark.yml"
 
+# Docker Compose command (will be set in check_prerequisites)
+COMPOSE_CMD=""
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -216,10 +219,10 @@ parse_args() {
 
 # Cleanup function for trap
 cleanup() {
-    if [[ "${KEEP_RUNNING}" == "false" ]]; then
+    if [[ "${KEEP_RUNNING}" == "false" ]] && [[ -n "${COMPOSE_CMD}" ]]; then
         echo ""
         echo -e "${YELLOW}Cleaning up...${NC}"
-        docker compose -f "${COMPOSE_FILE}" down --remove-orphans 2>/dev/null || true
+        ${COMPOSE_CMD} -f "${COMPOSE_FILE}" down --remove-orphans 2>/dev/null || true
     fi
 }
 
@@ -236,10 +239,15 @@ check_prerequisites() {
         exit 1
     fi
 
-    # Check Docker Compose
+    # Check Docker Compose (try both "docker compose" and "docker-compose")
     if docker compose version &> /dev/null; then
+        COMPOSE_CMD="docker compose"
         local compose_version=$(docker compose version --short 2>/dev/null || echo "unknown")
         log_info "Docker Compose version ${compose_version}"
+    elif command -v docker-compose &> /dev/null; then
+        COMPOSE_CMD="docker-compose"
+        local compose_version=$(docker-compose version --short 2>/dev/null || echo "unknown")
+        log_info "Docker Compose (standalone) version ${compose_version}"
     else
         log_error "Docker Compose is not available"
         exit 1
@@ -302,7 +310,7 @@ prepare_environment() {
     # Clean start if requested
     if [[ "${CLEAN_START}" == "true" ]]; then
         log_info "Removing existing containers and volumes..."
-        docker compose -f "${COMPOSE_FILE}" down -v --remove-orphans 2>/dev/null || true
+        ${COMPOSE_CMD} -f "${COMPOSE_FILE}" down -v --remove-orphans 2>/dev/null || true
     fi
 
     # Create results directory
@@ -315,7 +323,7 @@ start_docker() {
     log_phase "3/6" "Starting Docker environment..."
 
     # Start containers
-    docker compose -f "${COMPOSE_FILE}" up -d
+    ${COMPOSE_CMD} -f "${COMPOSE_FILE}" up -d
 
     # Wait for health checks
     local containers=()
@@ -415,11 +423,11 @@ stop_docker() {
     if [[ "${KEEP_RUNNING}" == "true" ]]; then
         echo ""
         log_info "Containers left running (--keep-running)"
-        log_info "Stop with: docker compose -f ${COMPOSE_FILE} down"
+        log_info "Stop with: ${COMPOSE_CMD} -f ${COMPOSE_FILE} down"
     else
         echo ""
         log_info "Stopping Docker containers..."
-        docker compose -f "${COMPOSE_FILE}" down --remove-orphans
+        ${COMPOSE_CMD} -f "${COMPOSE_FILE}" down --remove-orphans
     fi
 }
 
