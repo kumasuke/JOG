@@ -26,13 +26,17 @@ RUN apk add --no-cache sqlite-libs ca-certificates
 ARG TARGETARCH
 RUN set -eux; \
     case "${TARGETARCH}" in \
-        amd64) LITESTREAM_ARCH='amd64' ;; \
-        arm64) LITESTREAM_ARCH='arm64' ;; \
+        amd64) \
+            LITESTREAM_ARCH='amd64'; \
+            LITESTREAM_SHA256='eb75a3de5cab03875cdae9f5f539e6aedadd66607003d9b1e7a9077948818ba0' ;; \
+        arm64) \
+            LITESTREAM_ARCH='arm64'; \
+            LITESTREAM_SHA256='9585f5a508516bd66af2b2376bab4de256a5ef8e2b73ec760559e679628f2d59' ;; \
         *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
     esac; \
     wget -O /tmp/litestream.tar.gz \
-        "https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-${LITESTREAM_ARCH}-static.tar.gz"; \
-    echo "0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5  /tmp/litestream.tar.gz" | sha256sum -c -; \
+        "https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-${LITESTREAM_ARCH}.tar.gz"; \
+    echo "${LITESTREAM_SHA256}  /tmp/litestream.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/litestream.tar.gz -C /usr/local/bin; \
     rm /tmp/litestream.tar.gz
 
