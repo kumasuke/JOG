@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - S3 compatible API server with core operations
-- Bucket operations: CreateBucket, DeleteBucket, ListBuckets, HeadBucket
+- Bucket operations: CreateBucket, DeleteBucket, ListBuckets, HeadBucket, GetBucketLocation
 - Object operations: PutObject, GetObject, DeleteObject, HeadObject, CopyObject
 - ListObjects (v1/v2) with prefix, delimiter, and pagination support
 - Multipart upload support (CreateMultipartUpload, UploadPart, CompleteMultipartUpload, AbortMultipartUpload, ListParts, ListMultipartUploads)
@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SQLite-based metadata storage with WAL mode
 - Docker and Docker Compose support
 - Comprehensive S3 compatibility test suite using AWS SDK for Go v2
+- Path traversal attack protection for object keys
 
 [unreleased]: https://github.com/kumasuke/jog/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/kumasuke/jog/releases/tag/v0.1.0
