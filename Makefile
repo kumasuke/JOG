@@ -5,6 +5,10 @@
 BINARY_NAME=jog
 BUILD_DIR=bin
 
+# Version info (set from git tags)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
 # Go parameters
 GOCMD=go
 GOBUILD=$(GOCMD) build
@@ -15,7 +19,9 @@ GOFMT=gofmt
 GOLINT=golangci-lint
 
 # Build flags
-LDFLAGS=-ldflags "-s -w"
+LDFLAGS=-ldflags "-s -w \
+  -X github.com/kumasuke/jog/internal/cli.Version=$(VERSION) \
+  -X github.com/kumasuke/jog/internal/cli.Commit=$(COMMIT)"
 
 # Default target
 all: deps lint test build
