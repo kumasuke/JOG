@@ -1,0 +1,168 @@
+# JOG Benchmark Configuration
+# このファイルはベンチマーク実行時の標準パラメータを定義します
+
+# ベンチマーク対象サーバー
+servers:
+  jog:
+    endpoint: "localhost:9000"
+    access_key: "benchadmin"
+    secret_key: "benchadmin"
+    use_tls: false
+
+  minio:
+    endpoint: "localhost:9100"
+    access_key: "benchadmin"
+    secret_key: "benchadmin"
+    use_tls: false
+
+# テストパラメータ
+test_parameters:
+  # オブジェクトサイズ（バイト単位でも指定可能: 1024, 65536など）
+  object_sizes:
+    - "1KB"
+    - "64KB"
+    - "1MB"
+    - "16MB"
+    - "64MB"
+
+  # 並行度（同時実行スレッド数）
+  concurrency_levels:
+    - 1    # シングルスレッド
+    - 4    # 低並行
+    - 8    # 中並行
+    - 16   # 高並行
+    - 32   # 非常に高並行
+    - 64   # 最大並行
+
+  # テスト実行時間（秒）
+  duration: 60
+
+  # ウォームアップ時間（秒）
+  warmup_duration: 10
+
+  # オブジェクト数（GET/DELETEテスト用の事前準備）
+  num_objects: 1000
+
+  # バケット名プレフィックス
+  bucket_prefix: "benchmark"
+
+# ワークロード設定
+workloads:
+  # 混合ワークロード（実際のユースケースに近い）
+  mixed:
+    get_ratio: 70    # GET操作の割合（%）
+    put_ratio: 30    # PUT操作の割合（%）
+    delete_ratio: 0  # DELETE操作の割合（%）
+
+  # 読み取り重視
+  read_heavy:
+    get_ratio: 90
+    put_ratio: 10
+    delete_ratio: 0
+
+  # 書き込み重視
+  write_heavy:
+    get_ratio: 10
+    put_ratio: 90
+    delete_ratio: 0
+
+  # バランス型
+  balanced:
+    get_ratio: 50
+    put_ratio: 50
+    delete_ratio: 0
+
+# レポート設定
+reporting:
+  # 結果保存ディレクトリ
+  output_dir: "../results"
+
+  # レポート形式
+  formats:
+    - "text"   # テキスト形式
+    - "json"   # JSON形式（機械可読）
+    - "csv"    # CSV形式（スプレッドシート用）
+
+  # パーセンタイル指定
+  percentiles:
+    - 50   # 中央値
+    - 90   # 90パーセンタイル
+    - 95   # 95パーセンタイル
+    - 99   # 99パーセンタイル
+
+  # メトリクス収集間隔（秒）
+  metrics_interval: 5
+
+# Warpコマンドテンプレート
+# 実際のコマンド実行時の参考として使用
+warp_templates:
+  put:
+    command: |
+      warp put \
+        --host={{.Endpoint}} \
+        --access-key={{.AccessKey}} \
+        --secret-key={{.SecretKey}} \
+        --tls={{.UseTLS}} \
+        --bucket={{.Bucket}} \
+        --objects={{.NumObjects}} \
+        --obj.size={{.ObjectSize}} \
+        --concurrent={{.Concurrency}} \
+        --duration={{.Duration}}s
+
+  get:
+    command: |
+      warp get \
+        --host={{.Endpoint}} \
+        --access-key={{.AccessKey}} \
+        --secret-key={{.SecretKey}} \
+        --tls={{.UseTLS}} \
+        --bucket={{.Bucket}} \
+        --concurrent={{.Concurrency}} \
+        --duration={{.Duration}}s
+
+  mixed:
+    command: |
+      warp mixed \
+        --host={{.Endpoint}} \
+        --access-key={{.AccessKey}} \
+        --secret-key={{.SecretKey}} \
+        --tls={{.UseTLS}} \
+        --bucket={{.Bucket}} \
+        --obj.size={{.ObjectSize}} \
+        --get-distrib={{.GetRatio}} \
+        --put-distrib={{.PutRatio}} \
+        --concurrent={{.Concurrency}} \
+        --duration={{.Duration}}s
+
+# システム要件（参考情報）
+system_requirements:
+  minimum:
+    cpu_cores: 2
+    memory_gb: 4
+    disk_space_gb: 20
+
+  recommended:
+    cpu_cores: 4
+    memory_gb: 8
+    disk_space_gb: 50
+
+  optimal:
+    cpu_cores: 8
+    memory_gb: 16
+    disk_space_gb: 100
+
+# ベンチマーク実行前のチェックリスト
+pre_benchmark_checklist:
+  - "Docker containers are running and healthy"
+  - "No other heavy processes running on the system"
+  - "Sufficient disk space available"
+  - "Network conditions are stable"
+  - "Previous benchmark data is backed up if needed"
+
+# ベンチマーク後の推奨アクション
+post_benchmark_actions:
+  - "Save results with timestamp"
+  - "Generate comparison report if baseline exists"
+  - "Update performance documentation"
+  - "Identify performance bottlenecks"
+  - "Plan optimization tasks if needed"
