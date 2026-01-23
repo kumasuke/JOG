@@ -4,13 +4,13 @@
 # ベンチマーク対象サーバー
 servers:
   jog:
-    endpoint: "localhost:9000"
+    endpoint: "localhost:9200"
     access_key: "benchadmin"
     secret_key: "benchadmin"
     use_tls: false
 
   minio:
-    endpoint: "localhost:9100"
+    endpoint: "localhost:9300"
     access_key: "benchadmin"
     secret_key: "benchadmin"
     use_tls: false
