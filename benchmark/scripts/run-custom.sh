@@ -13,8 +13,8 @@
 set -euo pipefail
 
 # Configuration
-JOG_ENDPOINT="http://localhost:9000"
-MINIO_ENDPOINT="http://localhost:9100"
+JOG_ENDPOINT="http://localhost:9200"
+MINIO_ENDPOINT="http://localhost:9300"
 ACCESS_KEY="benchadmin"
 SECRET_KEY="benchadmin"
 RESULTS_DIR="benchmark/results"
@@ -136,32 +136,30 @@ run_go_benchmarks() {
     log_info "Endpoint: ${endpoint}"
 
     # Set environment variables for benchmarks
-    export BENCH_ENDPOINT="${endpoint}"
-    export BENCH_ACCESS_KEY="${ACCESS_KEY}"
-    export BENCH_SECRET_KEY="${SECRET_KEY}"
-    export BENCH_TARGET="${target}"
+    export BENCHMARK_ENDPOINT="${endpoint}"
+    export BENCHMARK_ACCESS_KEY="${ACCESS_KEY}"
+    export BENCHMARK_SECRET_KEY="${SECRET_KEY}"
+    export BENCHMARK_TARGET="${target}"
 
     log_info "Environment variables set:"
-    log_info "  BENCH_ENDPOINT=${BENCH_ENDPOINT}"
-    log_info "  BENCH_ACCESS_KEY=${BENCH_ACCESS_KEY}"
-    log_info "  BENCH_TARGET=${BENCH_TARGET}"
+    log_info "  BENCHMARK_ENDPOINT=${BENCHMARK_ENDPOINT}"
+    log_info "  BENCHMARK_ACCESS_KEY=${BENCHMARK_ACCESS_KEY}"
+    log_info "  BENCHMARK_TARGET=${BENCHMARK_TARGET}"
 
     # Run benchmarks
     log_info "Running benchmarks (this may take several minutes)..."
 
-    cd "${BENCHMARK_DIR}" || {
-        log_error "Failed to change to benchmark directory"
-        return 1
-    }
+    # Convert result_file to absolute path
+    local abs_result_file
+    abs_result_file="$(pwd)/${result_file}"
+    mkdir -p "$(dirname "${abs_result_file}")"
 
     # Run with benchstat-compatible output
-    go test -bench=. -benchmem -benchtime=10s -timeout=30m . > "${result_file}" 2>&1 || {
+    go test -bench=. -benchmem -benchtime=10s -timeout=30m "./${BENCHMARK_DIR}/..." > "${abs_result_file}" 2>&1 || {
         log_error "Benchmark execution failed"
         log_error "Check ${result_file} for details"
         return 1
     }
-
-    cd - > /dev/null || true
 
     log_info "Results saved: ${result_file}"
 
@@ -170,10 +168,10 @@ run_go_benchmarks() {
     grep "^Benchmark" "${result_file}" | head -n 10 || true
 
     # Unset environment variables
-    unset BENCH_ENDPOINT
-    unset BENCH_ACCESS_KEY
-    unset BENCH_SECRET_KEY
-    unset BENCH_TARGET
+    unset BENCHMARK_ENDPOINT
+    unset BENCHMARK_ACCESS_KEY
+    unset BENCHMARK_SECRET_KEY
+    unset BENCHMARK_TARGET
 }
 
 # Check if benchstat is available

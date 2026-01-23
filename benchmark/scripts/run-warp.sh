@@ -13,13 +13,23 @@
 
 set -euo pipefail
 
+# Script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BENCHMARK_DIR="$(dirname "${SCRIPT_DIR}")"
+
 # Configuration
-JOG_ENDPOINT="localhost:9000"
-MINIO_ENDPOINT="localhost:9100"
+JOG_ENDPOINT="localhost:9200"
+MINIO_ENDPOINT="localhost:9300"
 ACCESS_KEY="benchadmin"
 SECRET_KEY="benchadmin"
 RESULTS_DIR="benchmark/results"
 BUCKET_NAME="warp-benchmark"
+
+# Warp binary (prefer local binary)
+WARP_BIN="${BENCHMARK_DIR}/bin/warp"
+if [[ ! -x "${WARP_BIN}" ]]; then
+    WARP_BIN="warp"  # Fallback to system warp
+fi
 
 # Object size scenarios (in bytes)
 OBJECT_SIZES=(1024 65536 1048576 16777216 67108864)
@@ -83,18 +93,21 @@ EOF
 
 # Check if warp is installed
 check_warp() {
-    if ! command -v warp &> /dev/null; then
+    if [[ ! -x "${WARP_BIN}" ]] && ! command -v warp &> /dev/null; then
         log_error "warp CLI is not installed"
         echo ""
-        echo "Please install warp from: https://github.com/minio/warp"
+        echo "Please install warp using one of the following methods:"
         echo ""
-        echo "Installation:"
-        echo "  macOS:   brew install minio/stable/warp"
-        echo "  Linux:   wget https://github.com/minio/warp/releases/latest/download/warp_Linux_x86_64 -O warp && chmod +x warp"
-        echo "  Go:      go install github.com/minio/warp@latest"
+        echo "  Option 1 (Recommended): Download to benchmark/bin/"
+        echo "    ./benchmark/scripts/install-warp.sh"
+        echo ""
+        echo "  Option 2: Install globally"
+        echo "    macOS:   brew install minio/stable/warp"
+        echo "    Linux:   Download from https://github.com/minio/warp/releases"
+        echo "    Go:      go install github.com/minio/warp@latest"
         exit 1
     fi
-    log_info "warp CLI found: $(warp --version 2>&1 | head -n1)"
+    log_info "warp CLI found: $(${WARP_BIN} --version 2>&1 | head -n1)"
 }
 
 # Create results directory
@@ -118,7 +131,7 @@ run_throughput_benchmark() {
 
         log_info "Testing object size: ${label} (${size} bytes)"
 
-        warp get \
+        ${WARP_BIN} get \
             --host="${endpoint}" \
             --access-key="${ACCESS_KEY}" \
             --secret-key="${SECRET_KEY}" \
@@ -149,7 +162,7 @@ run_concurrency_benchmark() {
 
         log_info "Testing concurrency level: ${concurrency}"
 
-        warp get \
+        ${WARP_BIN} get \
             --host="${endpoint}" \
             --access-key="${ACCESS_KEY}" \
             --secret-key="${SECRET_KEY}" \
@@ -177,7 +190,7 @@ run_mixed_benchmark() {
     log_info "Running mixed workload benchmark on ${target}..."
     log_info "Workload: 70% GET, 30% PUT"
 
-    warp mixed \
+    ${WARP_BIN} mixed \
         --host="${endpoint}" \
         --access-key="${ACCESS_KEY}" \
         --secret-key="${SECRET_KEY}" \

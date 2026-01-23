@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -25,7 +26,7 @@ func getEnv(key, defaultValue string) string {
 
 // getS3Client creates an S3 client from environment variables.
 func getS3Client() *s3.Client {
-	endpoint := getEnv("BENCHMARK_ENDPOINT", "http://localhost:9000")
+	endpoint := getEnv("BENCHMARK_ENDPOINT", "http://localhost:9200")
 	accessKey := getEnv("BENCHMARK_ACCESS_KEY", "benchadmin")
 	secretKey := getEnv("BENCHMARK_SECRET_KEY", "benchadmin")
 
@@ -63,12 +64,17 @@ func setupBucket(b *testing.B, client *s3.Client, bucketName string) {
 	b.Helper()
 	ctx := context.Background()
 
-	// Create bucket
+	// Create bucket (ignore if already exists)
 	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String(bucketName),
 	})
 	if err != nil {
-		b.Fatalf("failed to create bucket: %v", err)
+		// Ignore BucketAlreadyOwnedByYou error
+		var baoby *types.BucketAlreadyOwnedByYou
+		var bae *types.BucketAlreadyExists
+		if !errors.As(err, &baoby) && !errors.As(err, &bae) {
+			b.Fatalf("failed to create bucket: %v", err)
+		}
 	}
 
 	// Register cleanup

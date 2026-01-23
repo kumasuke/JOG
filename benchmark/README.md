@@ -49,9 +49,9 @@ docker compose -f docker-compose.benchmark.yml logs -f
 ```
 
 起動確認:
-- JOG: http://localhost:9000
-- MinIO API: http://localhost:9100
-- MinIO Console: http://localhost:9101
+- JOG: http://localhost:9200
+- MinIO API: http://localhost:9300
+- MinIO Console: http://localhost:9301
 
 認証情報（共通）:
 - Access Key: `benchadmin`
@@ -74,7 +74,7 @@ docker compose -f docker-compose.benchmark.yml down -v
 ```bash
 # JOGに対するベンチマーク（PUTオペレーション）
 warp put \
-  --host=localhost:9000 \
+  --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
   --tls=false \
@@ -86,7 +86,7 @@ warp put \
 
 # MinIOに対するベンチマーク（比較用）
 warp put \
-  --host=localhost:9100 \
+  --host=localhost:9300 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
   --tls=false \
@@ -103,7 +103,7 @@ warp put \
 
 ```bash
 warp put \
-  --host=localhost:9000 \
+  --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
   --tls=false \
@@ -118,7 +118,7 @@ warp put \
 ```bash
 # まずデータを準備
 warp put \
-  --host=localhost:9000 \
+  --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
   --tls=false \
@@ -128,7 +128,7 @@ warp put \
 
 # GETベンチマーク実行
 warp get \
-  --host=localhost:9000 \
+  --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
   --tls=false \
@@ -141,7 +141,7 @@ warp get \
 
 ```bash
 warp mixed \
-  --host=localhost:9000 \
+  --host=localhost:9200 \
   --access-key=benchadmin \
   --secret-key=benchadmin \
   --tls=false \
@@ -157,35 +157,35 @@ warp mixed \
 
 ```bash
 # 1KB
-warp put --host=localhost:9000 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1KB --concurrent=16 --duration=60s
+warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1KB --concurrent=16 --duration=60s
 
 # 64KB
-warp put --host=localhost:9000 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=64KB --concurrent=16 --duration=60s
+warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=64KB --concurrent=16 --duration=60s
 
 # 1MB
-warp put --host=localhost:9000 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=16 --duration=60s
+warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=16 --duration=60s
 
 # 16MB
-warp put --host=localhost:9000 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=16MB --concurrent=16 --duration=60s
+warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=16MB --concurrent=16 --duration=60s
 
 # 64MB
-warp put --host=localhost:9000 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=64MB --concurrent=8 --duration=60s
+warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=64MB --concurrent=8 --duration=60s
 ```
 
 #### 5. 並行度を変えたテスト
 
 ```bash
 # 並行度 1（シングルスレッド）
-warp put --host=localhost:9000 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=1 --duration=60s
+warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=1 --duration=60s
 
 # 並行度 4
-warp put --host=localhost:9000 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=4 --duration=60s
+warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=4 --duration=60s
 
 # 並行度 16
-warp put --host=localhost:9000 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=16 --duration=60s
+warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=16 --duration=60s
 
 # 並行度 64
-warp put --host=localhost:9000 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=64 --duration=60s
+warp put --host=localhost:9200 --access-key=benchadmin --secret-key=benchadmin --tls=false --bucket=benchmark --obj.size=1MB --concurrent=64 --duration=60s
 ```
 
 ### Warpの主要オプション
@@ -228,7 +228,7 @@ go test -bench=. -benchmem -benchtime=10s ./... > results/jog-bench.txt
 
 # MinIOのベンチマーク実行（エンドポイント変更）
 # 環境変数でエンドポイント指定
-BENCH_ENDPOINT=localhost:9100 go test -bench=. -benchmem -benchtime=10s ./... > results/minio-bench.txt
+BENCHMARK_ENDPOINT=http://localhost:9300 go test -bench=. -benchmem -benchtime=10s ./... > results/minio-bench.txt
 
 # 結果比較
 benchstat results/jog-bench.txt results/minio-bench.txt
@@ -328,6 +328,20 @@ go test -bench=. ... > results/go-bench-$(date +%Y%m%d).txt
 - 今後の最適化ポイント: [具体的な改善案]
 ```
 
+## 既知の制限事項
+
+### WarpとJOGの互換性
+
+現時点では、WarpベンチマークはJOGに対して正常に動作しません。これはWarpが使用する署名方式（UNSIGNED-PAYLOADやストリーミング署名）がJOGの認証実装と互換性がないためです。
+
+**推奨するベンチマーク方法:**
+- **JOG**: カスタムGoベンチマーク（AWS SDK使用）で測定
+- **MinIO**: Warpベンチマークで測定
+
+両者の比較は、カスタムGoベンチマークを使用して行ってください。
+
+---
+
 ## トラブルシューティング
 
 ### コンテナが起動しない
@@ -349,12 +363,12 @@ rm -rf data/
 
 ```bash
 # エンドポイント疎通確認
-curl http://localhost:9000/
-curl http://localhost:9100/
+curl http://localhost:9200/
+curl http://localhost:9300/
 
 # バケット作成（手動）
 aws s3 mb s3://benchmark \
-  --endpoint-url http://localhost:9000 \
+  --endpoint-url http://localhost:9200 \
   --no-verify-ssl
 ```
 
