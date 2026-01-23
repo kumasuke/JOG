@@ -164,9 +164,9 @@ After implementing a new feature, update the following documentation:
 
 ## Benchmark
 
-ベンチマーク関連の作業は `benchmark` ディレクトリ内で行う。詳細は以下を参照:
-- `benchmark/README.md` - ベンチマーク実行ガイド
-- `benchmark/CLAUDE.md` - ベンチマーク作業のガイドライン
+Run benchmarks in the `benchmark` directory. See:
+- `benchmark/README.md` - Benchmark execution guide
+- `benchmark/CLAUDE.md` - Benchmark development guidelines
 
 ## Implementation Order (TDD)
 
