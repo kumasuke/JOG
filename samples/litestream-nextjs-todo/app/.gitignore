@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+
+# Next.js build
+.next/
+
+# Misc
+*.log
+.DS_Store
+*.tsbuildinfo
