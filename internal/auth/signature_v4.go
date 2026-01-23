@@ -160,8 +160,9 @@ func (m *Middleware) createCanonicalRequest(r *http.Request, signedHeaders strin
 	// HTTP method
 	method := r.Method
 
-	// Canonical URI
-	uri := r.URL.Path
+	// Canonical URI - must use EscapedPath to match AWS SDK's signature calculation
+	// Go's HTTP server decodes the URI automatically, but AWS Signature V4 uses the encoded form
+	uri := r.URL.EscapedPath()
 	if uri == "" {
 		uri = "/"
 	}
@@ -305,7 +306,8 @@ func (m *Middleware) verifyPresignedURL(r *http.Request) *api.S3Error {
 func (m *Middleware) calculatePresignedSignature(r *http.Request, date, region, service, signedHeaders, amzDate string) string {
 	// Create canonical request
 	method := r.Method
-	uri := r.URL.Path
+	// Use EscapedPath to match AWS SDK's signature calculation for presigned URLs
+	uri := r.URL.EscapedPath()
 	if uri == "" {
 		uri = "/"
 	}
