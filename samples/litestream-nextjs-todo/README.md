@@ -78,7 +78,8 @@ docker compose stop app
 docker compose rm -f app
 
 # ボリュームを削除（データを失う）
-docker volume rm litestream-nextjs-todo_app-data
+docker compose down -v --remove-orphans
+docker compose up jog -d  # JOGを先に起動
 
 # 再起動（JOGからデータが復元される）
 docker compose up app
