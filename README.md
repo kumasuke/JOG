@@ -1,6 +1,7 @@
 # JOG - Just Object Gateway
 
 [![S3 API Coverage](https://img.shields.io/badge/S3_API-66%25_covered-yellow)](docs/S3_API_CHECKLIST.md)
+[![GitHub Downloads](https://img.shields.io/github/downloads/kumasuke/JOG/total?color=blue)](https://github.com/kumasuke/JOG/releases)
 
 A fast, lightweight S3-compatible object storage server written in Go.
 Fully developed with AI assistance using Claude Code.
