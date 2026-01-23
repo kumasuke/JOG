@@ -1,0 +1,28 @@
+services:
+  jog:
+    build: .
+    ports:
+      - "9000:9000"
+    volumes:
+      - jog-data:/data
+    environment:
+      JOG_PORT: 9000
+      JOG_DATA_DIR: /data
+      JOG_ACCESS_KEY: ${JOG_ACCESS_KEY:-minioadmin}
+      JOG_SECRET_KEY: ${JOG_SECRET_KEY:-minioadmin}
+      JOG_LOG_LEVEL: ${JOG_LOG_LEVEL:-info}
+      # Litestream replication (optional)
+      # Uncomment and set these to enable metadata replication
+      # LITESTREAM_REPLICA_URL: s3://backup-bucket/jog/metadata
+      # AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      # AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -q --spider http://localhost:9000/ 2>&1 | grep -qE '(200 OK|403 Forbidden)' || wget -O- -q http://localhost:9000/ >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  jog-data:
