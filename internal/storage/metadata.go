@@ -423,14 +423,35 @@ func (m *Metadata) CountObjects(ctx context.Context, bucket string) (int, error)
 	return count, err
 }
 
-// ListObjects returns objects matching a prefix.
-func (m *Metadata) ListObjects(ctx context.Context, bucket, prefix string) ([]Object, error) {
-	rows, err := m.db.QueryContext(ctx, `
-		SELECT key, size, last_modified, etag, content_type, metadata
-		FROM objects
-		WHERE bucket = ? AND key LIKE ?
-		ORDER BY key
-	`, bucket, prefix+"%")
+// ListObjects returns objects matching a prefix with pagination support.
+// startAfter specifies the key to start after (exclusive).
+// maxKeys limits the number of results (0 means default 1000).
+func (m *Metadata) ListObjects(ctx context.Context, bucket, prefix, startAfter string, maxKeys int32) ([]Object, error) {
+	if maxKeys <= 0 {
+		maxKeys = 1000
+	}
+
+	var rows *sql.Rows
+	var err error
+
+	if startAfter != "" {
+		rows, err = m.db.QueryContext(ctx, `
+			SELECT key, size, last_modified, etag, content_type
+			FROM objects
+			WHERE bucket = ? AND key LIKE ? AND key > ?
+			ORDER BY key
+			LIMIT ?
+		`, bucket, prefix+"%", startAfter, maxKeys+1)
+	} else {
+		rows, err = m.db.QueryContext(ctx, `
+			SELECT key, size, last_modified, etag, content_type
+			FROM objects
+			WHERE bucket = ? AND key LIKE ?
+			ORDER BY key
+			LIMIT ?
+		`, bucket, prefix+"%", maxKeys+1)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -439,14 +460,8 @@ func (m *Metadata) ListObjects(ctx context.Context, bucket, prefix string) ([]Ob
 	var objects []Object
 	for rows.Next() {
 		var obj Object
-		var metadataStr string
-		if err := rows.Scan(&obj.Key, &obj.Size, &obj.LastModified, &obj.ETag, &obj.ContentType, &metadataStr); err != nil {
+		if err := rows.Scan(&obj.Key, &obj.Size, &obj.LastModified, &obj.ETag, &obj.ContentType); err != nil {
 			return nil, err
-		}
-		if metadataStr != "" {
-			if err := json.Unmarshal([]byte(metadataStr), &obj.Metadata); err != nil {
-				return nil, err
-			}
 		}
 		objects = append(objects, obj)
 	}
