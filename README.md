@@ -115,6 +115,7 @@ cd benchmark
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) - Deployment guide and Litestream integration
 - [docs/S3_API_CHECKLIST.md](docs/S3_API_CHECKLIST.md) - S3 API implementation status
 - [benchmark/README.md](benchmark/README.md) - Benchmark execution guide
+- [benchmark/CLAUDE.md](benchmark/CLAUDE.md) - Benchmark guidelines for Claude Code
 
 ## License
 
