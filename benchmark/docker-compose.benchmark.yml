@@ -25,7 +25,7 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-10-15T17-29-55Z
     container_name: minio-benchmark
     ports:
       - "9300:9000"  # MinIO API port

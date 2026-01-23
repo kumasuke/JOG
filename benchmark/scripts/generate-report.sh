@@ -21,15 +21,15 @@ NC='\033[0m' # No Color
 
 # Print colored message
 log_info() {
-    echo -e "${GREEN}[INFO]${NC} $*"
+    echo -e "${GREEN}[INFO]${NC} $@"
 }
 
 log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $*"
+    echo -e "${YELLOW}[WARN]${NC} $@"
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $*"
+    echo -e "${RED}[ERROR]${NC} $@"
 }
 
 # Show help message
@@ -113,8 +113,8 @@ generate_environment_info() {
 
 | Server | Endpoint | Credentials |
 |--------|----------|-------------|
-| JOG | localhost:9000 | benchadmin/benchadmin |
-| MinIO | localhost:9100 | benchadmin/benchadmin |
+| JOG | localhost:9200 | benchadmin/benchadmin |
+| MinIO | localhost:9300 | benchadmin/benchadmin |
 
 EOF
 }

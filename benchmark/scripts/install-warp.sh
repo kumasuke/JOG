@@ -25,15 +25,15 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 log_info() {
-    echo -e "${GREEN}[INFO]${NC} $*"
+    echo -e "${GREEN}[INFO]${NC} $@"
 }
 
 log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $*"
+    echo -e "${YELLOW}[WARN]${NC} $@"
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $*"
+    echo -e "${RED}[ERROR]${NC} $@"
 }
 
 # Detect OS and architecture
