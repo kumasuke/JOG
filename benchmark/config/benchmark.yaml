@@ -8,12 +8,28 @@ servers:
     access_key: "benchadmin"
     secret_key: "benchadmin"
     use_tls: false
+    description: "JOG - Just Object Gateway (SQLite + ローカルストレージ)"
 
   minio:
     endpoint: "localhost:9300"
     access_key: "benchadmin"
     secret_key: "benchadmin"
     use_tls: false
+    description: "MinIO - 高性能分散オブジェクトストレージ"
+
+  rclone:
+    endpoint: "localhost:9400"
+    access_key: "benchadmin"
+    secret_key: "benchadmin"
+    use_tls: false
+    description: "rclone serve s3 - 任意のバックエンドをS3として公開"
+
+  versitygw:
+    endpoint: "localhost:9500"
+    access_key: "benchadmin"
+    secret_key: "benchadmin"
+    use_tls: false
+    description: "Versity Gateway - POSIXファイルシステムS3ゲートウェイ"
 
 # テストパラメータ
 test_parameters:

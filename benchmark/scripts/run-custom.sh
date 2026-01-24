@@ -15,6 +15,8 @@ set -euo pipefail
 # Configuration
 JOG_ENDPOINT="http://localhost:9200"
 MINIO_ENDPOINT="http://localhost:9300"
+RCLONE_ENDPOINT="http://localhost:9400"
+VERSITYGW_ENDPOINT="http://localhost:9500"
 ACCESS_KEY="benchadmin"
 SECRET_KEY="benchadmin"
 RESULTS_DIR="benchmark/results"
@@ -49,28 +51,36 @@ Usage:
 
 Arguments:
   target    Target server to benchmark (default: jog)
-            - jog      : Benchmark JOG
-            - minio    : Benchmark MinIO
+            - jog        : Benchmark JOG
+            - minio      : Benchmark MinIO
+            - rclone     : Benchmark rclone serve s3
+            - versitygw  : Benchmark Versity Gateway
 
 Configuration:
-  JOG endpoint      : ${JOG_ENDPOINT}
-  MinIO endpoint    : ${MINIO_ENDPOINT}
-  Credentials       : ${ACCESS_KEY}/${SECRET_KEY}
-  Results directory : ${RESULTS_DIR}
-  Benchmark source  : ${BENCHMARK_DIR}
+  JOG endpoint        : ${JOG_ENDPOINT}
+  MinIO endpoint      : ${MINIO_ENDPOINT}
+  rclone endpoint     : ${RCLONE_ENDPOINT}
+  versitygw endpoint  : ${VERSITYGW_ENDPOINT}
+  Credentials         : ${ACCESS_KEY}/${SECRET_KEY}
+  Results directory   : ${RESULTS_DIR}
+  Benchmark source    : ${BENCHMARK_DIR}
 
 Examples:
-  $(basename "$0")        # Run benchmarks against JOG
-  $(basename "$0") jog    # Run benchmarks against JOG
-  $(basename "$0") minio  # Run benchmarks against MinIO
+  $(basename "$0")            # Run benchmarks against JOG
+  $(basename "$0") jog        # Run benchmarks against JOG
+  $(basename "$0") minio      # Run benchmarks against MinIO
+  $(basename "$0") rclone     # Run benchmarks against rclone
+  $(basename "$0") versitygw  # Run benchmarks against versitygw
 
 Output:
   Results are saved in benchstat format for easy comparison:
   - ${RESULTS_DIR}/custom_jog_<timestamp>.txt
   - ${RESULTS_DIR}/custom_minio_<timestamp>.txt
+  - ${RESULTS_DIR}/custom_rclone_<timestamp>.txt
+  - ${RESULTS_DIR}/custom_versitygw_<timestamp>.txt
 
   Compare results with benchstat:
-  $ benchstat custom_jog_*.txt custom_minio_*.txt
+  $ benchstat custom_jog_*.txt custom_minio_*.txt custom_rclone_*.txt custom_versitygw_*.txt
 
 EOF
 }
@@ -125,6 +135,12 @@ run_go_benchmarks() {
             ;;
         minio)
             endpoint="${MINIO_ENDPOINT}"
+            ;;
+        rclone)
+            endpoint="${RCLONE_ENDPOINT}"
+            ;;
+        versitygw)
+            endpoint="${VERSITYGW_ENDPOINT}"
             ;;
         *)
             log_error "Unknown target: ${target}"
@@ -196,9 +212,9 @@ main() {
     fi
 
     # Validate arguments
-    if [[ ! "${target}" =~ ^(jog|minio)$ ]]; then
+    if [[ ! "${target}" =~ ^(jog|minio|rclone|versitygw)$ ]]; then
         log_error "Invalid target: ${target}"
-        echo "Valid targets: jog, minio"
+        echo "Valid targets: jog, minio, rclone, versitygw"
         exit 1
     fi
 
