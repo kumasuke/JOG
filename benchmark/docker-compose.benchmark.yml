@@ -47,7 +47,7 @@ services:
     restart: unless-stopped
 
   rclone:
-    image: rclone/rclone:latest
+    image: rclone/rclone:1.72.1
     container_name: rclone-benchmark
     ports:
       - "9400:9000"  # rclone S3 API port
@@ -68,15 +68,14 @@ services:
     restart: unless-stopped
 
   versitygw:
-    image: versity/versitygw:latest
+    image: versity/versitygw:v1.1.0
     container_name: versitygw-benchmark
     ports:
       - "9500:7070"  # versitygw S3 API port
     environment:
       - ROOT_ACCESS_KEY=benchadmin
       - ROOT_SECRET_KEY=benchadmin
-      - VGW_BACKEND=posix
-      - VGW_BACKEND_ARG=/data
+    command: posix /data
     volumes:
       - versitygw-data:/data
     networks:

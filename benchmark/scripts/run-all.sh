@@ -7,7 +7,7 @@
 #   ./run-all.sh [target] [scenario] [OPTIONS]
 #
 # Arguments:
-#   target   - jog, minio, or both (default: both)
+#   target   - jog, minio, rclone, versitygw, both, or all (default: all)
 #   scenario - throughput, concurrency, mixed, or all (default: all)
 #
 # Options:
