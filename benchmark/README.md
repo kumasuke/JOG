@@ -225,7 +225,9 @@ docker compose -f docker-compose.benchmark.yml down -v
 
 ## Warpベンチマークの実行
 
-結果の読み方や分析方法については [docs/WARP_ANALYSIS.md](docs/WARP_ANALYSIS.md) を参照してください。
+結果の読み方や分析方法については以下を参照してください:
+- [docs/WARP_ANALYSIS.md](docs/WARP_ANALYSIS.md) - Warp結果の読み方
+- [docs/S3_ALTERNATIVES_COMPARISON.md](docs/S3_ALTERNATIVES_COMPARISON.md) - 4サーバー比較（JOG, MinIO, rclone, versitygw）
 
 ### クイックテスト（動作確認用）
 

@@ -19,6 +19,9 @@ cd benchmark
 
 # フルベンチマーク（20分以上）
 ./scripts/run-all.sh both all
+
+# 全サーバーでベンチマーク（30分以上）
+./scripts/run-all.sh all all
 ```
 
 ### シナリオと所要時間
@@ -106,6 +109,8 @@ docker compose -f docker-compose.benchmark.yml down
 |---------|-----|---------|
 | JOG | http://localhost:9200 | - |
 | MinIO | http://localhost:9300 | http://localhost:9301 |
+| rclone | http://localhost:9400 | - |
+| versitygw | http://localhost:9500 | - |
 
 ### 認証情報
 
@@ -116,7 +121,10 @@ docker compose -f docker-compose.benchmark.yml down
 
 - Warp結果: `results/warp_*.json`
 - Goベンチマーク結果: `results/*.txt`
-- 分析レポート: `docs/BENCHMARK_ANALYSIS.md`, `docs/WARP_ANALYSIS.md`
+- 分析レポート:
+  - `docs/BENCHMARK_ANALYSIS.md` - JOG vs MinIO詳細分析
+  - `docs/WARP_ANALYSIS.md` - Warp結果の読み方
+  - `docs/S3_ALTERNATIVES_COMPARISON.md` - 4サーバー比較（JOG, MinIO, rclone, versitygw）
 
 ## 注意事項
 
