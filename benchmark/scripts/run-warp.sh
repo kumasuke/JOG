@@ -20,6 +20,8 @@ BENCHMARK_DIR="$(dirname "${SCRIPT_DIR}")"
 # Configuration
 JOG_ENDPOINT="localhost:9200"
 MINIO_ENDPOINT="localhost:9300"
+RCLONE_ENDPOINT="localhost:9400"
+VERSITYGW_ENDPOINT="localhost:9500"
 ACCESS_KEY="benchadmin"
 SECRET_KEY="benchadmin"
 RESULTS_DIR="benchmark/results"
@@ -66,10 +68,13 @@ Usage:
   $(basename "$0") [target] [scenario]
 
 Arguments:
-  target    Target server to benchmark (default: both)
-            - jog      : Benchmark JOG only
-            - minio    : Benchmark MinIO only
-            - both     : Benchmark both servers
+  target    Target server to benchmark (default: all)
+            - jog        : Benchmark JOG only
+            - minio      : Benchmark MinIO only
+            - rclone     : Benchmark rclone serve s3 only
+            - versitygw  : Benchmark Versity Gateway only
+            - both       : Benchmark JOG and MinIO (legacy)
+            - all        : Benchmark all servers
 
   scenario  Benchmark scenario to run (default: all)
             - throughput   : Test different object sizes
@@ -78,15 +83,20 @@ Arguments:
             - all          : Run all scenarios
 
 Configuration:
-  JOG endpoint      : ${JOG_ENDPOINT}
-  MinIO endpoint    : ${MINIO_ENDPOINT}
-  Credentials       : ${ACCESS_KEY}/${SECRET_KEY}
-  Results directory : ${RESULTS_DIR}
+  JOG endpoint        : ${JOG_ENDPOINT}
+  MinIO endpoint      : ${MINIO_ENDPOINT}
+  rclone endpoint     : ${RCLONE_ENDPOINT}
+  versitygw endpoint  : ${VERSITYGW_ENDPOINT}
+  Credentials         : ${ACCESS_KEY}/${SECRET_KEY}
+  Results directory   : ${RESULTS_DIR}
 
 Examples:
-  $(basename "$0")                    # Run all scenarios on both servers
-  $(basename "$0") jog throughput     # Run throughput test on JOG only
-  $(basename "$0") minio concurrency  # Run concurrency test on MinIO only
+  $(basename "$0")                      # Run all scenarios on all servers
+  $(basename "$0") jog throughput       # Run throughput test on JOG only
+  $(basename "$0") minio concurrency    # Run concurrency test on MinIO only
+  $(basename "$0") rclone mixed         # Run mixed workload on rclone
+  $(basename "$0") versitygw all        # Run all scenarios on versitygw
+  $(basename "$0") all mixed            # Run mixed workload on all servers
 
 EOF
 }
@@ -222,6 +232,12 @@ run_benchmarks() {
         minio)
             endpoint="${MINIO_ENDPOINT}"
             ;;
+        rclone)
+            endpoint="${RCLONE_ENDPOINT}"
+            ;;
+        versitygw)
+            endpoint="${VERSITYGW_ENDPOINT}"
+            ;;
         *)
             log_error "Unknown target: ${target}"
             return 1
@@ -254,7 +270,7 @@ run_benchmarks() {
 
 # Main function
 main() {
-    local target="${1:-both}"
+    local target="${1:-all}"
     local scenario="${2:-all}"
 
     # Show help if requested
@@ -264,9 +280,9 @@ main() {
     fi
 
     # Validate arguments
-    if [[ ! "${target}" =~ ^(jog|minio|both)$ ]]; then
+    if [[ ! "${target}" =~ ^(jog|minio|rclone|versitygw|both|all)$ ]]; then
         log_error "Invalid target: ${target}"
-        echo "Valid targets: jog, minio, both"
+        echo "Valid targets: jog, minio, rclone, versitygw, both, all"
         exit 1
     fi
 
@@ -289,9 +305,22 @@ main() {
         minio)
             run_benchmarks "minio" "${scenario}"
             ;;
+        rclone)
+            run_benchmarks "rclone" "${scenario}"
+            ;;
+        versitygw)
+            run_benchmarks "versitygw" "${scenario}"
+            ;;
         both)
+            # Legacy: run JOG and MinIO only
             run_benchmarks "jog" "${scenario}"
             run_benchmarks "minio" "${scenario}"
+            ;;
+        all)
+            run_benchmarks "jog" "${scenario}"
+            run_benchmarks "minio" "${scenario}"
+            run_benchmarks "rclone" "${scenario}"
+            run_benchmarks "versitygw" "${scenario}"
             ;;
     esac
 

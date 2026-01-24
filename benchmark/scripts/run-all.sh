@@ -27,7 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCHMARK_DIR="$(dirname "${SCRIPT_DIR}")"
 
 # Default values
-TARGET="both"
+TARGET="all"
 SCENARIO="all"
 SKIP_WARP=false
 SKIP_CUSTOM=false
@@ -39,6 +39,8 @@ HEALTH_TIMEOUT=120
 # Ports
 JOG_PORT=9200
 MINIO_PORT=9300
+RCLONE_PORT=9400
+VERSITYGW_PORT=9500
 
 # Compose file
 COMPOSE_FILE="${BENCHMARK_DIR}/docker-compose.benchmark.yml"
@@ -133,10 +135,13 @@ Usage:
   $(basename "$0") [target] [scenario] [OPTIONS]
 
 Arguments:
-  target    Target server to benchmark (default: both)
-            - jog      : Benchmark JOG only
-            - minio    : Benchmark MinIO only
-            - both     : Benchmark both servers
+  target    Target server to benchmark (default: all)
+            - jog        : Benchmark JOG only
+            - minio      : Benchmark MinIO only
+            - rclone     : Benchmark rclone serve s3 only
+            - versitygw  : Benchmark Versity Gateway only
+            - both       : Benchmark JOG and MinIO (legacy)
+            - all        : Benchmark all servers
 
   scenario  Benchmark scenario to run (default: all)
             - throughput   : Test different object sizes
@@ -154,16 +159,19 @@ Options:
   -h, --help         Show this help message
 
 Examples:
-  $(basename "$0")                           # Full benchmark suite
+  $(basename "$0")                           # Full benchmark suite (all servers)
   $(basename "$0") jog throughput            # JOG throughput test only
-  $(basename "$0") both all --clean          # Clean start, full suite
-  $(basename "$0") jog all -k                # Keep containers running
-  $(basename "$0") both all --skip-custom    # Skip Go benchmarks
+  $(basename "$0") all all --clean           # Clean start, full suite
+  $(basename "$0") rclone mixed              # rclone mixed workload test
+  $(basename "$0") versitygw all -k          # versitygw full test, keep containers
+  $(basename "$0") all all --skip-custom     # Skip Go benchmarks
 
 Environment:
-  JOG endpoint   : localhost:${JOG_PORT}
-  MinIO endpoint : localhost:${MINIO_PORT}
-  Compose file   : ${COMPOSE_FILE}
+  JOG endpoint        : localhost:${JOG_PORT}
+  MinIO endpoint      : localhost:${MINIO_PORT}
+  rclone endpoint     : localhost:${RCLONE_PORT}
+  versitygw endpoint  : localhost:${VERSITYGW_PORT}
+  Compose file        : ${COMPOSE_FILE}
 
 EOF
 }
@@ -200,7 +208,7 @@ parse_args() {
                 HEALTH_TIMEOUT="$2"
                 shift 2
                 ;;
-            jog|minio|both)
+            jog|minio|rclone|versitygw|both|all)
                 TARGET="$1"
                 shift
                 ;;
@@ -289,17 +297,38 @@ check_prerequisites() {
 
     # Check port availability
     local port_conflict=false
-    if lsof -i ":${JOG_PORT}" &> /dev/null; then
-        log_warn "Port ${JOG_PORT} is already in use"
-        port_conflict=true
-    fi
-    if lsof -i ":${MINIO_PORT}" &> /dev/null; then
-        log_warn "Port ${MINIO_PORT} is already in use"
-        port_conflict=true
-    fi
+    local ports_to_check=()
+
+    case "${TARGET}" in
+        jog)
+            ports_to_check=(${JOG_PORT})
+            ;;
+        minio)
+            ports_to_check=(${MINIO_PORT})
+            ;;
+        rclone)
+            ports_to_check=(${RCLONE_PORT})
+            ;;
+        versitygw)
+            ports_to_check=(${VERSITYGW_PORT})
+            ;;
+        both)
+            ports_to_check=(${JOG_PORT} ${MINIO_PORT})
+            ;;
+        all)
+            ports_to_check=(${JOG_PORT} ${MINIO_PORT} ${RCLONE_PORT} ${VERSITYGW_PORT})
+            ;;
+    esac
+
+    for port in "${ports_to_check[@]}"; do
+        if lsof -i ":${port}" &> /dev/null; then
+            log_warn "Port ${port} is already in use"
+            port_conflict=true
+        fi
+    done
 
     if [[ "${port_conflict}" == "false" ]]; then
-        log_info "Ports ${JOG_PORT}, ${MINIO_PORT} available"
+        log_info "All required ports available"
     fi
 }
 
@@ -327,12 +356,26 @@ start_docker() {
 
     # Wait for health checks
     local containers=()
-    if [[ "${TARGET}" == "jog" ]] || [[ "${TARGET}" == "both" ]]; then
-        containers+=("jog-benchmark")
-    fi
-    if [[ "${TARGET}" == "minio" ]] || [[ "${TARGET}" == "both" ]]; then
-        containers+=("minio-benchmark")
-    fi
+    case "${TARGET}" in
+        jog)
+            containers+=("jog-benchmark")
+            ;;
+        minio)
+            containers+=("minio-benchmark")
+            ;;
+        rclone)
+            containers+=("rclone-benchmark")
+            ;;
+        versitygw)
+            containers+=("versitygw-benchmark")
+            ;;
+        both)
+            containers+=("jog-benchmark" "minio-benchmark")
+            ;;
+        all)
+            containers+=("jog-benchmark" "minio-benchmark" "rclone-benchmark" "versitygw-benchmark")
+            ;;
+    esac
 
     for container in "${containers[@]}"; do
         wait_for_healthy "${container}"
@@ -391,17 +434,33 @@ run_custom_benchmarks() {
 
     log_phase "5/6" "Running custom Go benchmarks..."
 
-    if [[ "${TARGET}" == "jog" ]] || [[ "${TARGET}" == "both" ]]; then
-        "${SCRIPT_DIR}/run-custom.sh" jog || {
-            log_warn "JOG custom benchmarks had errors, continuing..."
-        }
-    fi
+    local targets=()
+    case "${TARGET}" in
+        jog)
+            targets+=("jog")
+            ;;
+        minio)
+            targets+=("minio")
+            ;;
+        rclone)
+            targets+=("rclone")
+            ;;
+        versitygw)
+            targets+=("versitygw")
+            ;;
+        both)
+            targets+=("jog" "minio")
+            ;;
+        all)
+            targets+=("jog" "minio" "rclone" "versitygw")
+            ;;
+    esac
 
-    if [[ "${TARGET}" == "minio" ]] || [[ "${TARGET}" == "both" ]]; then
-        "${SCRIPT_DIR}/run-custom.sh" minio || {
-            log_warn "MinIO custom benchmarks had errors, continuing..."
+    for target in "${targets[@]}"; do
+        "${SCRIPT_DIR}/run-custom.sh" "${target}" || {
+            log_warn "${target} custom benchmarks had errors, continuing..."
         }
-    fi
+    done
 }
 
 # Generate report

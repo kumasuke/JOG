@@ -46,9 +46,54 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  rclone:
+    image: rclone/rclone:latest
+    container_name: rclone-benchmark
+    ports:
+      - "9400:9000"  # rclone S3 API port
+    environment:
+      - RCLONE_S3_ACCESS_KEY_ID=benchadmin
+      - RCLONE_S3_SECRET_ACCESS_KEY=benchadmin
+    command: serve s3 /data --addr :9000 --auth-key benchadmin,benchadmin
+    volumes:
+      - rclone-data:/data
+    networks:
+      - benchmark-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9000/ 2>&1; test $? -le 8"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  versitygw:
+    image: versity/versitygw:latest
+    container_name: versitygw-benchmark
+    ports:
+      - "9500:7070"  # versitygw S3 API port
+    environment:
+      - ROOT_ACCESS_KEY=benchadmin
+      - ROOT_SECRET_KEY=benchadmin
+      - VGW_BACKEND=posix
+      - VGW_BACKEND_ARG=/data
+    volumes:
+      - versitygw-data:/data
+    networks:
+      - benchmark-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7070/ 2>&1; test $? -le 8"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   jog-data:
   minio-data:
+  rclone-data:
+  versitygw-data:
 
 networks:
   benchmark-net:

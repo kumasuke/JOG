@@ -2,7 +2,16 @@
 
 ## 概要
 
-このディレクトリには、JOGのパフォーマンスを測定するためのベンチマーク環境が含まれています。Warp（MinIO公式のS3ベンチマークツール）とカスタムGoベンチマークを使用して、JOGとMinIOのパフォーマンスを比較できます。
+このディレクトリには、JOGのパフォーマンスを測定するためのベンチマーク環境が含まれています。Warp（MinIO公式のS3ベンチマークツール）とカスタムGoベンチマークを使用して、JOGと他のS3互換サーバーのパフォーマンスを比較できます。
+
+### 比較対象サーバー
+
+| サーバー | ポート | 説明 |
+|---------|--------|------|
+| **JOG** | 9200 | Just Object Gateway - SQLite + ローカルストレージ |
+| **MinIO** | 9300 | 高性能分散オブジェクトストレージ |
+| **rclone** | 9400 | rclone serve s3 - 任意のバックエンドをS3として公開 |
+| **versitygw** | 9500 | Versity Gateway - POSIXファイルシステムS3ゲートウェイ |
 
 **注意**: ベンチマーク関連の操作は、すべて `benchmark` ディレクトリ内で実行してください。
 
@@ -54,8 +63,16 @@ go test -bench=. -benchmem -benchtime=10s ./custom/...
 
 | 引数 | 説明 | デフォルト |
 |------|------|-----------|
-| `target` | jog / minio / both | both |
+| `target` | jog / minio / rclone / versitygw / both / all | all |
 | `scenario` | throughput / concurrency / mixed / all | all |
+
+**ターゲット一覧:**
+- `jog` - JOGのみ
+- `minio` - MinIOのみ
+- `rclone` - rclone serve s3のみ
+- `versitygw` - Versity Gatewayのみ
+- `both` - JOGとMinIO（レガシー互換）
+- `all` - 全サーバー
 
 ### シナリオの選び方
 
@@ -78,8 +95,12 @@ go test -bench=. -benchmem -benchtime=10s ./custom/...
 # 通常の開発時（約5分）
 ./scripts/run-all.sh jog mixed
 
-# フルベンチマーク（20分以上）
-./scripts/run-all.sh both all
+# 全サーバーでフルベンチマーク（30分以上）
+./scripts/run-all.sh all all
+
+# rcloneとversitygwのみテスト
+./scripts/run-all.sh rclone mixed
+./scripts/run-all.sh versitygw mixed
 ```
 
 ### オプション
@@ -97,20 +118,23 @@ go test -bench=. -benchmem -benchtime=10s ./custom/...
 ### 実行例
 
 ```bash
-# 全ベンチマーク実行
+# 全ベンチマーク実行（全サーバー）
 ./scripts/run-all.sh
 
 # JOGのみ、スループットテスト
 ./scripts/run-all.sh jog throughput
 
 # クリーンスタートで全ベンチマーク
-./scripts/run-all.sh both all --clean
+./scripts/run-all.sh all all --clean
+
+# rcloneの混合ワークロードテスト
+./scripts/run-all.sh rclone mixed
+
+# versitygwのフルテスト、コンテナを停止しない
+./scripts/run-all.sh versitygw all -k
 
 # Warpのみ実行（カスタムGoベンチマークとレポートをスキップ）
-./scripts/run-all.sh both all --skip-custom --skip-report
-
-# コンテナを停止せずに終了
-./scripts/run-all.sh both all -k
+./scripts/run-all.sh all all --skip-custom --skip-report
 ```
 
 ### 処理フロー
@@ -182,8 +206,10 @@ docker compose -f docker-compose.benchmark.yml logs -f
 - JOG: http://localhost:9200
 - MinIO API: http://localhost:9300
 - MinIO Console: http://localhost:9301
+- rclone: http://localhost:9400
+- versitygw: http://localhost:9500
 
-認証情報（共通）:
+認証情報（全サーバー共通）:
 - Access Key: `benchadmin`
 - Secret Key: `benchadmin`
 
@@ -566,3 +592,5 @@ aws s3 mb s3://benchmark \
 - [Warp公式ドキュメント](https://github.com/minio/warp)
 - [Go Benchmarking](https://pkg.go.dev/testing#hdr-Benchmarks)
 - [MinIO Performance Tuning](https://min.io/docs/minio/linux/operations/performance.html)
+- [rclone serve s3](https://rclone.org/commands/rclone_serve_s3/)
+- [Versity Gateway](https://github.com/versity/versitygw)
