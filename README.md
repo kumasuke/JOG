@@ -106,7 +106,9 @@ aws s3 cp s3://my-bucket/file.txt ./downloaded.txt
 
 ## Benchmark
 
-Benchmark JOG against MinIO. See [benchmark/README.md](benchmark/README.md) for details.
+Benchmark JOG against MinIO, rclone, and versitygw. See [benchmark/README.md](benchmark/README.md) for details.
+
+For a detailed comparison with other S3-compatible servers, see [S3 Alternatives Comparison](benchmark/docs/S3_ALTERNATIVES_COMPARISON.md).
 
 ## Contributing
 
