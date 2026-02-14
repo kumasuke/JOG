@@ -39,6 +39,33 @@ tar xzf jog_darwin_amd64.tar.gz
 sudo mv jog /usr/local/bin/
 ```
 
+### Docker
+
+```bash
+docker run -p 9000:9000 ghcr.io/kumasuke/jog:latest
+```
+
+With persistent storage and custom credentials:
+
+```bash
+docker run -p 9000:9000 \
+  -v jog-data:/data \
+  -e JOG_ACCESS_KEY=myaccesskey \
+  -e JOG_SECRET_KEY=mysecretkey \
+  ghcr.io/kumasuke/jog:latest
+```
+
+To enable automatic metadata backup via Litestream:
+
+```bash
+docker run -p 9000:9000 \
+  -v jog-data:/data \
+  -e LITESTREAM_REPLICA_URL=s3://my-backup-bucket/jog \
+  -e AWS_ACCESS_KEY_ID=... \
+  -e AWS_SECRET_ACCESS_KEY=... \
+  ghcr.io/kumasuke/jog:latest
+```
+
 ### Install with Go
 
 ```bash
