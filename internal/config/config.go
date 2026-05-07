@@ -134,15 +134,18 @@ func applyEnv(cfg *Config) error {
 	return nil
 }
 
+// Empty values (`JOG_FOO=`) are treated as "unset" to match viper's
+// historical behavior — otherwise an empty env var would clobber the
+// default/file value with "" (or fail Atoi for int fields).
 func envString(key string, dst *string) {
-	if v, ok := os.LookupEnv(key); ok {
+	if v := os.Getenv(key); v != "" {
 		*dst = v
 	}
 }
 
 func envInt(key string, dst *int) error {
-	v, ok := os.LookupEnv(key)
-	if !ok {
+	v := os.Getenv(key)
+	if v == "" {
 		return nil
 	}
 	n, err := strconv.Atoi(v)

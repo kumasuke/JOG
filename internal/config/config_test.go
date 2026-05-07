@@ -79,6 +79,43 @@ func TestLoad_InvalidPortEnv_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 }
 
+// Empty env vars must be treated as "unset" so that environments which
+// export JOG_* keys with empty defaults (CI matrices, container
+// orchestrators, shell scripts that pre-declare every var) don't clobber
+// file/default values. This matches viper's pre-rewrite behavior.
+func TestLoad_EmptyEnv_TreatedAsUnset(t *testing.T) {
+	dir := chdirTemp(t)
+
+	// File sets non-default values for every key.
+	yaml := []byte(`
+server:
+  port: 7777
+  address: 192.168.0.1
+storage:
+  data_dir: /srv/data
+auth:
+  access_key: file-ak
+logging:
+  level: warn
+`)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), yaml, 0o644))
+
+	// All env vars set to empty — these must not override the file.
+	t.Setenv("JOG_SERVER_PORT", "")
+	t.Setenv("JOG_SERVER_ADDRESS", "")
+	t.Setenv("JOG_STORAGE_DATA_DIR", "")
+	t.Setenv("JOG_AUTH_ACCESS_KEY", "")
+	t.Setenv("JOG_LOGGING_LEVEL", "")
+
+	cfg, err := Load()
+	require.NoError(t, err) // empty JOG_SERVER_PORT must NOT cause Atoi failure
+	assert.Equal(t, 7777, cfg.Server.Port)
+	assert.Equal(t, "192.168.0.1", cfg.Server.Address)
+	assert.Equal(t, "/srv/data", cfg.Storage.DataDir)
+	assert.Equal(t, "file-ak", cfg.Auth.AccessKey)
+	assert.Equal(t, "warn", cfg.Logging.Level)
+}
+
 func TestLoad_FileOverridesDefaults(t *testing.T) {
 	dir := chdirTemp(t)
 
