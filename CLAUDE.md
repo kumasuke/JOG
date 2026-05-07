@@ -194,7 +194,7 @@ Run benchmarks in the `benchmark` directory. See:
 
 Main:
 - `github.com/spf13/cobra` - CLI
-- `github.com/spf13/viper` - Config
+- `gopkg.in/yaml.v3` - Config (YAML parsing; env vars overlaid by hand in `internal/config`)
 - `github.com/rs/zerolog` - Logging
 - `github.com/google/uuid` - UUID
 - `modernc.org/sqlite` - Metadata DB (Pure Go)

@@ -169,7 +169,7 @@ jog/
 | ライブラリ | 用途 |
 |-----------|------|
 | `github.com/spf13/cobra` | CLIフレームワーク |
-| `github.com/spf13/viper` | 設定管理 |
+| `gopkg.in/yaml.v3` | 設定管理 (YAML パース。環境変数バインドは `internal/config` で実装) |
 | `modernc.org/sqlite` | メタデータDB (Pure Go) |
 | `github.com/google/uuid` | UUID生成 |
 | `github.com/rs/zerolog` | ロギング |
@@ -430,7 +430,7 @@ jobs:
 
 ### MVP (最小実行可能製品) のスコープ
 
-1. **CLIの基本構造** - cobra/viperによるCLI
+1. **CLIの基本構造** - cobra による CLI
 2. **HTTPサーバー** - 基本的なルーティング
 3. **CreateBucket / ListBuckets** - バケット操作の基本
 4. **PutObject / GetObject** - オブジェクトの読み書き
