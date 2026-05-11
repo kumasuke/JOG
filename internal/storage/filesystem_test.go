@@ -117,21 +117,35 @@ func TestFileSystemObjectCRUDAndRange(t *testing.T) {
 }
 
 func TestFileSystemRejectsInvalidObjectKeys(t *testing.T) {
+	ctx := context.Background()
 	fs := newTestFileSystem(t)
-
-	tests := []string{
-		"",
-		"..",
-		"../outside",
-		"dir/../outside",
-		"dir/..",
+	if err := fs.CreateBucket(ctx, "bucket"); err != nil {
+		t.Fatalf("CreateBucket() error = %v", err)
 	}
 
-	for _, key := range tests {
-		t.Run(key, func(t *testing.T) {
-			if _, err := fs.validateObjectKey("bucket", key); !errors.Is(err, ErrInvalidKey) {
-				t.Fatalf("validateObjectKey(%q) error = %v, want %v", key, err, ErrInvalidKey)
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "empty", key: ""},
+		{name: "dot_dot", key: ".."},
+		{name: "leading_parent", key: "../outside"},
+		{name: "middle_parent", key: "dir/../outside"},
+		{name: "trailing_parent", key: "dir/.."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := fs.validateObjectKey("bucket", tt.key); !errors.Is(err, ErrInvalidKey) {
+				t.Fatalf("validateObjectKey(%q) error = %v, want %v", tt.key, err, ErrInvalidKey)
 			}
 		})
 	}
+
+	t.Run("put_object_public_api", func(t *testing.T) {
+		_, err := fs.PutObject(ctx, "bucket", "../outside", strings.NewReader(""), 0, "", nil)
+		if !errors.Is(err, ErrInvalidKey) {
+			t.Fatalf("PutObject() error = %v, want %v", err, ErrInvalidKey)
+		}
+	})
 }

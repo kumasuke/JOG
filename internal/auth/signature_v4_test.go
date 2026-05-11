@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kumasuke/jog/internal/api"
 )
 
 func TestCanonicalQueryStringSortsAndEncodes(t *testing.T) {
@@ -20,6 +22,8 @@ func TestCanonicalQueryStringSortsAndEncodes(t *testing.T) {
 	m := NewMiddleware("access", "secret")
 
 	got := m.canonicalQueryString(req)
+	// SigV4 canonicalization requires spaces as %20, not '+', and '/' in query
+	// values must be encoded as %2F.
 	want := "multi=a&multi=b&slash=a%2Fb&space=a%20b&z=last"
 	if got != want {
 		t.Fatalf("canonicalQueryString() = %q, want %q", got, want)
@@ -77,8 +81,12 @@ func TestVerifySignatureV4RejectsInvalidInputs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := m.verifySignatureV4(req, tt.auth); err == nil {
+			err := m.verifySignatureV4(req, tt.auth)
+			if err == nil {
 				t.Fatal("verifySignatureV4() returned nil error")
+			}
+			if err.Code != api.ErrAccessDenied.Code {
+				t.Fatalf("error code = %s, want %s", err.Code, api.ErrAccessDenied.Code)
 			}
 		})
 	}
@@ -96,8 +104,12 @@ func TestVerifyPresignedURLRejectsExpiredRequest(t *testing.T) {
 	req.URL.RawQuery = query.Encode()
 
 	m := NewMiddleware("access", "secret")
-	if err := m.verifyPresignedURL(req); err == nil {
+	err := m.verifyPresignedURL(req)
+	if err == nil {
 		t.Fatal("verifyPresignedURL() returned nil error")
+	}
+	if err.Code != api.ErrRequestTimeTooSkewed.Code {
+		t.Fatalf("error code = %s, want %s", err.Code, api.ErrRequestTimeTooSkewed.Code)
 	}
 }
 
