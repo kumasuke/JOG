@@ -1,6 +1,9 @@
 package auth
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -81,7 +84,7 @@ func TestVerifySignatureV4RejectsInvalidInputs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := m.verifySignatureV4(req, tt.auth)
+			_, err := m.verifySignatureV4(req, tt.auth)
 			if err == nil {
 				t.Fatal("verifySignatureV4() returned nil error")
 			}
@@ -110,6 +113,82 @@ func TestVerifyPresignedURLRejectsExpiredRequest(t *testing.T) {
 	}
 	if err.Code != api.ErrRequestTimeTooSkewed.Code {
 		t.Fatalf("error code = %s, want %s", err.Code, api.ErrRequestTimeTooSkewed.Code)
+	}
+}
+
+// TestWrapPayload_UnsignedPayloadSkipsVerification asserts that a request
+// declaring UNSIGNED-PAYLOAD passes through wrapPayload untouched.
+func TestWrapPayload_UnsignedPayloadSkipsVerification(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPut, "/b/o", strings.NewReader("anything-goes"))
+	req.Header.Set("X-Amz-Content-SHA256", "UNSIGNED-PAYLOAD")
+	original := req.Body
+
+	if err := wrapPayload(req, &sigCtx{payloadHashHeader: "UNSIGNED-PAYLOAD"}); err != nil {
+		t.Fatalf("wrapPayload(UNSIGNED-PAYLOAD) = %v, want nil", err)
+	}
+	if req.Body != original {
+		t.Fatal("wrapPayload(UNSIGNED-PAYLOAD) replaced r.Body; want passthrough")
+	}
+}
+
+// TestWrapPayload_HexHashMismatchFails asserts that when the request body's
+// SHA-256 does not match the value declared in X-Amz-Content-SHA256, the
+// wrapped body returns an error on EOF (CR-3).
+func TestWrapPayload_HexHashMismatchFails(t *testing.T) {
+	body := "the wire bytes"
+	declared := strings.Repeat("0", 64) // sha256("") prefix - definitely not body's hash
+
+	req := httptest.NewRequest(http.MethodPut, "/b/o", strings.NewReader(body))
+	req.Header.Set("X-Amz-Content-SHA256", declared)
+
+	if err := wrapPayload(req, &sigCtx{payloadHashHeader: declared}); err != nil {
+		t.Fatalf("wrapPayload returned S3Error %v", err)
+	}
+	_, err := io.ReadAll(req.Body)
+	if err == nil {
+		t.Fatal("io.ReadAll on mismatched-hash body returned nil error; want CR-3 failure")
+	}
+	if !IsPayloadHashMismatch(err) {
+		t.Fatalf("err = %v, want IsPayloadHashMismatch", err)
+	}
+}
+
+// TestWrapPayload_HexHashMatchSucceeds asserts that when the body matches
+// the declared hex digest, the wrapped body returns the bytes verbatim and
+// io.EOF without error.
+func TestWrapPayload_HexHashMatchSucceeds(t *testing.T) {
+	body := "the wire bytes"
+	sum := sha256.Sum256([]byte(body))
+	declared := hex.EncodeToString(sum[:])
+
+	req := httptest.NewRequest(http.MethodPut, "/b/o", strings.NewReader(body))
+	req.Header.Set("X-Amz-Content-SHA256", declared)
+
+	if err := wrapPayload(req, &sigCtx{payloadHashHeader: declared}); err != nil {
+		t.Fatalf("wrapPayload returned S3Error %v", err)
+	}
+	got, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("io.ReadAll on matching-hash body returned %v", err)
+	}
+	if string(got) != body {
+		t.Fatalf("got %q, want %q", got, body)
+	}
+}
+
+// TestWrapPayload_UnknownSentinelIsRejected asserts that an unrecognised
+// payload-hash sentinel (i.e. not UNSIGNED-PAYLOAD, not the streaming
+// constant, and not a 64-char hex) is treated as a SignatureDoesNotMatch.
+func TestWrapPayload_UnknownSentinelIsRejected(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPut, "/b/o", strings.NewReader("x"))
+	req.Header.Set("X-Amz-Content-SHA256", "NOT-A-REAL-SENTINEL")
+
+	err := wrapPayload(req, &sigCtx{payloadHashHeader: "NOT-A-REAL-SENTINEL"})
+	if err == nil {
+		t.Fatal("wrapPayload(unknown sentinel) = nil; want SignatureDoesNotMatch")
+	}
+	if err.Code != api.ErrSignatureDoesNotMatch.Code {
+		t.Fatalf("err.Code = %s, want %s", err.Code, api.ErrSignatureDoesNotMatch.Code)
 	}
 }
 

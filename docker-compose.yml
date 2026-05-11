@@ -6,11 +6,11 @@ services:
     volumes:
       - jog-data:/data
     environment:
-      JOG_PORT: 9000
-      JOG_DATA_DIR: /data
-      JOG_ACCESS_KEY: ${JOG_ACCESS_KEY:-minioadmin}
-      JOG_SECRET_KEY: ${JOG_SECRET_KEY:-minioadmin}
-      JOG_LOG_LEVEL: ${JOG_LOG_LEVEL:-info}
+      JOG_SERVER_PORT: 9000
+      JOG_STORAGE_DATA_DIR: /data
+      JOG_AUTH_ACCESS_KEY: ${JOG_AUTH_ACCESS_KEY:-minioadmin}
+      JOG_AUTH_SECRET_KEY: ${JOG_AUTH_SECRET_KEY:-minioadmin}
+      JOG_LOGGING_LEVEL: ${JOG_LOGGING_LEVEL:-info}
       # Litestream replication (optional)
       # Uncomment and set these to enable metadata replication
       # LITESTREAM_REPLICA_URL: s3://backup-bucket/jog/metadata

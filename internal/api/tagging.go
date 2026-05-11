@@ -57,10 +57,15 @@ type TagXML struct {
 func (h *Handler) PutObjectTagging(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
+	limitBody(w, r, MaxTaggingBodySize)
 
 	// Parse request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isBodyTooLarge(err) {
+			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket+"/"+key)
+			return
+		}
 		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket+"/"+key)
 		return
 	}
@@ -163,10 +168,15 @@ func (h *Handler) DeleteObjectTagging(w http.ResponseWriter, r *http.Request) {
 // PutBucketTagging handles PUT /{bucket}?tagging - PutBucketTagging.
 func (h *Handler) PutBucketTagging(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
+	limitBody(w, r, MaxTaggingBodySize)
 
 	// Parse request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isBodyTooLarge(err) {
+			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
+			return
+		}
 		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket)
 		return
 	}

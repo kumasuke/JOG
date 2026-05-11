@@ -2,7 +2,7 @@
 # See https://litestream.io/reference/config/ for more options
 
 dbs:
-  - path: ${JOG_DATA_DIR}/metadata.db
+  - path: ${JOG_STORAGE_DATA_DIR}/metadata.db
     replicas:
       - url: ${LITESTREAM_REPLICA_URL}
         sync-interval: 1s

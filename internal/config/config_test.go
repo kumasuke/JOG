@@ -246,6 +246,29 @@ server:
 	assert.Equal(t, "minioadmin", cfg.Auth.AccessKey)
 }
 
+// TestLoad_OldEnvNames_NotReflected verifies that legacy env var names
+// (JOG_ACCESS_KEY, JOG_PORT, etc.) have no effect on the loaded config.
+// This is the negative test for the env-name migration (CR-1).
+func TestLoad_OldEnvNames_NotReflected(t *testing.T) {
+	chdirTemp(t)
+
+	t.Setenv("JOG_ACCESS_KEY", "should-not-apply")
+	t.Setenv("JOG_SECRET_KEY", "should-not-apply")
+	t.Setenv("JOG_PORT", "1234")
+	t.Setenv("JOG_DATA_DIR", "/should/not/apply")
+	t.Setenv("JOG_LOG_LEVEL", "debug")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	def := DefaultConfig()
+	assert.Equal(t, def.Auth.AccessKey, cfg.Auth.AccessKey, "legacy JOG_ACCESS_KEY must not override auth.access_key")
+	assert.Equal(t, def.Auth.SecretKey, cfg.Auth.SecretKey, "legacy JOG_SECRET_KEY must not override auth.secret_key")
+	assert.Equal(t, def.Server.Port, cfg.Server.Port, "legacy JOG_PORT must not override server.port")
+	assert.Equal(t, def.Storage.DataDir, cfg.Storage.DataDir, "legacy JOG_DATA_DIR must not override storage.data_dir")
+	assert.Equal(t, def.Logging.Level, cfg.Logging.Level, "legacy JOG_LOG_LEVEL must not override logging.level")
+}
+
 func TestLoadFromFile_NotFound_ReturnsError(t *testing.T) {
 	_, err := LoadFromFile(filepath.Join(t.TempDir(), "missing.yaml"))
 	require.Error(t, err)

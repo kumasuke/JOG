@@ -125,11 +125,14 @@ func TestCreateBucket(t *testing.T) {
 ## Configuration
 
 Environment variables:
-- `JOG_PORT` - Server port (default: 9000)
-- `JOG_DATA_DIR` - Data directory (default: ./data)
-- `JOG_ACCESS_KEY` - Access key (default: minioadmin)
-- `JOG_SECRET_KEY` - Secret key (default: minioadmin)
-- `JOG_LOG_LEVEL` - Log level (default: info)
+- `JOG_SERVER_PORT` - Server port (default: 9000)
+- `JOG_SERVER_ADDRESS` - Listen address (default: 0.0.0.0)
+- `JOG_STORAGE_DATA_DIR` - Data directory (default: ./data)
+- `JOG_STORAGE_METADATA_DB` - Metadata DB path (default: ./data/metadata.db)
+- `JOG_AUTH_ACCESS_KEY` - Access key (default: minioadmin)
+- `JOG_AUTH_SECRET_KEY` - Secret key (default: minioadmin)
+- `JOG_LOGGING_LEVEL` - Log level (default: info)
+- `JOG_LOGGING_FORMAT` - Log format: json or console (default: json)
 
 ## Git Workflow
 

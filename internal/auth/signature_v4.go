@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -47,21 +48,46 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		}
 
 		// Parse and verify AWS Signature V4
-		if err := m.verifySignatureV4(r, auth); err != nil {
+		ctx, err := m.verifySignatureV4(r, auth)
+		if err != nil {
 			api.WriteError(w, err)
 			return
+		}
+
+		// CR-2/CR-3: wrap r.Body so the payload is bound to the verified
+		// signature. wrapPayload returns the request unchanged if the
+		// payload hash is UNSIGNED-PAYLOAD or the body is empty.
+		if r.Body != nil && r.ContentLength != 0 {
+			if err := wrapPayload(r, ctx); err != nil {
+				api.WriteError(w, err)
+				return
+			}
 		}
 
 		next.ServeHTTP(w, r)
 	})
 }
 
-// verifySignatureV4 verifies AWS Signature V4 authentication.
-func (m *Middleware) verifySignatureV4(r *http.Request, auth string) *api.S3Error {
+// sigCtx carries the per-request information needed to bind the payload
+// (request body) to the verified signature for CR-2/CR-3.
+type sigCtx struct {
+	seedSig    string // signature from the Authorization header
+	signingKey []byte // derived kSigning
+	amzDate    string // e.g. "20260102T030405Z"
+	scope      string // e.g. "20260102/us-east-1/s3/aws4_request"
+	// payloadHashHeader is the literal X-Amz-Content-SHA256 value sent by
+	// the client: either "UNSIGNED-PAYLOAD", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
+	// or a 64-char hex sha256.
+	payloadHashHeader string
+}
+
+// verifySignatureV4 verifies AWS Signature V4 authentication and returns
+// the signature context required to bind the request body to the signature.
+func (m *Middleware) verifySignatureV4(r *http.Request, auth string) (*sigCtx, *api.S3Error) {
 	// Parse Authorization header
 	// Format: AWS4-HMAC-SHA256 Credential=ACCESS_KEY/DATE/REGION/s3/aws4_request, SignedHeaders=..., Signature=...
 	if !strings.HasPrefix(auth, "AWS4-HMAC-SHA256 ") {
-		return api.ErrAccessDenied
+		return nil, api.ErrAccessDenied
 	}
 
 	// Parse components
@@ -86,13 +112,13 @@ func (m *Middleware) verifySignatureV4(r *http.Request, auth string) *api.S3Erro
 	providedSignature := authParams["Signature"]
 
 	if credential == "" || signedHeaders == "" || providedSignature == "" {
-		return api.ErrAccessDenied
+		return nil, api.ErrAccessDenied
 	}
 
 	// Parse credential: ACCESS_KEY/DATE/REGION/SERVICE/aws4_request
 	credParts := strings.Split(credential, "/")
 	if len(credParts) != 5 {
-		return api.ErrAccessDenied
+		return nil, api.ErrAccessDenied
 	}
 
 	accessKey := credParts[0]
@@ -102,7 +128,7 @@ func (m *Middleware) verifySignatureV4(r *http.Request, auth string) *api.S3Erro
 
 	// Verify access key
 	if accessKey != m.accessKey {
-		return api.ErrInvalidAccessKeyId
+		return nil, api.ErrInvalidAccessKeyId
 	}
 
 	// Get request date
@@ -120,12 +146,12 @@ func (m *Middleware) verifySignatureV4(r *http.Request, auth string) *api.S3Erro
 		reqTime, err = time.Parse(time.RFC1123, amzDate)
 	}
 	if err != nil {
-		return api.ErrAccessDenied
+		return nil, api.ErrAccessDenied
 	}
 
 	// Check if request is within 15 minutes
 	if time.Since(reqTime).Abs() > 15*time.Minute {
-		return api.ErrRequestTimeTooSkewed
+		return nil, api.ErrRequestTimeTooSkewed
 	}
 
 	// Calculate expected signature
@@ -133,10 +159,16 @@ func (m *Middleware) verifySignatureV4(r *http.Request, auth string) *api.S3Erro
 
 	// Compare signatures
 	if !hmac.Equal([]byte(expectedSignature), []byte(providedSignature)) {
-		return api.ErrSignatureDoesNotMatch
+		return nil, api.ErrSignatureDoesNotMatch
 	}
 
-	return nil
+	return &sigCtx{
+		seedSig:           providedSignature,
+		signingKey:        m.getSigningKey(date, region, service),
+		amzDate:           amzDate,
+		scope:             date + "/" + region + "/" + service + "/aws4_request",
+		payloadHashHeader: r.Header.Get("X-Amz-Content-SHA256"),
+	}, nil
 }
 
 // calculateSignature calculates AWS Signature V4.
@@ -243,6 +275,101 @@ func (m *Middleware) getSigningKey(date, region, service string) []byte {
 	kService := hmacSHA256(kRegion, service)
 	kSigning := hmacSHA256(kService, "aws4_request")
 	return kSigning
+}
+
+// payloadVerifyingReader wraps r.Body with an io.Reader that streams the
+// body through a SHA-256 hasher and, at EOF, compares the digest to the
+// expected hex value declared in X-Amz-Content-SHA256. A mismatch is
+// surfaced as an error on the final Read so that downstream handlers
+// abort instead of persisting unverified bytes (CR-3).
+type payloadVerifyingReader struct {
+	src      io.ReadCloser
+	hasher   hashWriter
+	expected string // lowercase hex
+	done     bool
+}
+
+// hashWriter is the subset of hash.Hash we need; declared locally so this
+// file does not pull in the "hash" package.
+type hashWriter interface {
+	io.Writer
+	Sum(b []byte) []byte
+}
+
+func (p *payloadVerifyingReader) Read(b []byte) (int, error) {
+	if p.done {
+		return 0, io.EOF
+	}
+	n, err := p.src.Read(b)
+	if n > 0 {
+		p.hasher.Write(b[:n])
+	}
+	if err == io.EOF {
+		p.done = true
+		got := hex.EncodeToString(p.hasher.Sum(nil))
+		if !hmac.Equal([]byte(got), []byte(strings.ToLower(p.expected))) {
+			return n, api.ErrPayloadHashMismatch
+		}
+	}
+	return n, err
+}
+
+func (p *payloadVerifyingReader) Close() error {
+	return p.src.Close()
+}
+
+// IsPayloadHashMismatch reports whether err originated from a payload
+// SHA-256 verification failure (CR-3). It is a thin wrapper around the
+// canonical helper in package api so callers in package auth do not
+// need to import api just for the predicate.
+func IsPayloadHashMismatch(err error) bool {
+	return api.IsPayloadHashMismatchErr(err)
+}
+
+// wrapPayload installs a body reader that binds the request payload to
+// the verified signature. The exact wrapping depends on the value of the
+// X-Amz-Content-SHA256 header:
+//
+//   - "UNSIGNED-PAYLOAD": no wrapping (client opted out of payload signing).
+//   - "STREAMING-AWS4-HMAC-SHA256-PAYLOAD": wrap with a signed ChunkedReader
+//     that decodes aws-chunked framing and verifies each chunk's signature
+//     chained from the seed signature (CR-2).
+//   - 64-char hex: wrap with a streaming SHA-256 verifier that fails the
+//     final Read if the digest does not match (CR-3).
+//   - empty / unknown: no wrapping (preserves existing behaviour for
+//     clients that omit the header; the canonical request still includes
+//     "UNSIGNED-PAYLOAD" in that case).
+func wrapPayload(r *http.Request, ctx *sigCtx) *api.S3Error {
+	payloadHash := ctx.payloadHashHeader
+	switch {
+	case payloadHash == "" || payloadHash == "UNSIGNED-PAYLOAD":
+		return nil
+	case payloadHash == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD":
+		decoded := api.NewChunkedReader(r.Body, ctx.seedSig, ctx.signingKey, ctx.amzDate, ctx.scope)
+		r.Body = io.NopCloser(decoded)
+		return nil
+	case len(payloadHash) == 64 && isHex(payloadHash):
+		r.Body = &payloadVerifyingReader{
+			src:      r.Body,
+			hasher:   sha256.New(),
+			expected: payloadHash,
+		}
+		return nil
+	default:
+		// Unknown payload-hash sentinel: be conservative and reject.
+		return api.ErrSignatureDoesNotMatch
+	}
+}
+
+// isHex reports whether s consists entirely of lower-case hex digits.
+func isHex(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // verifyPresignedURL verifies a presigned URL.

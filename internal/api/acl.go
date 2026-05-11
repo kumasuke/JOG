@@ -79,6 +79,7 @@ func (h *Handler) GetBucketAcl(w http.ResponseWriter, r *http.Request) {
 // PutBucketAcl handles PUT /{bucket}?acl - PutBucketAcl.
 func (h *Handler) PutBucketAcl(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
+	limitBody(w, r, MaxACLBodySize)
 
 	// Check for canned ACL header
 	cannedACL := r.Header.Get("x-amz-acl")
@@ -103,6 +104,10 @@ func (h *Handler) PutBucketAcl(w http.ResponseWriter, r *http.Request) {
 	// Parse request body for explicit ACL
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isBodyTooLarge(err) {
+			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
+			return
+		}
 		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket)
 		return
 	}
@@ -160,6 +165,7 @@ func (h *Handler) GetObjectAcl(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) PutObjectAcl(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
+	limitBody(w, r, MaxACLBodySize)
 
 	// Check for canned ACL header
 	cannedACL := r.Header.Get("x-amz-acl")
@@ -188,6 +194,10 @@ func (h *Handler) PutObjectAcl(w http.ResponseWriter, r *http.Request) {
 	// Parse request body for explicit ACL
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isBodyTooLarge(err) {
+			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket+"/"+key)
+			return
+		}
 		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket+"/"+key)
 		return
 	}

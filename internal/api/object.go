@@ -111,7 +111,11 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for aws-chunked encoding (streaming payload signature)
+	// Check for aws-chunked encoding (streaming payload signature). The
+	// auth middleware has already swapped r.Body for a ChunkedReader that
+	// decodes the aws-chunked framing and verifies each chunk's signature
+	// (CR-2). All we need to do here is adopt the decoded content length
+	// so storage receives the right size hint.
 	contentEncoding := r.Header.Get("Content-Encoding")
 	contentSHA256 := r.Header.Get("X-Amz-Content-Sha256")
 	var body io.Reader = r.Body
@@ -125,8 +129,6 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 				contentLength = decodedLength
 			}
 		}
-		// Wrap body with chunked reader to decode aws-chunked format
-		body = NewChunkedReader(r.Body)
 	}
 
 	// Parse custom metadata
@@ -167,6 +169,14 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		// CR-2/CR-3: a body-reader error from the auth middleware
+		// wrapper means the client's payload did not match the signed
+		// hash / chunk-signature chain. Map it back to the canonical
+		// S3 SignatureDoesNotMatch response so callers don't see a 500.
+		if errors.Is(err, ErrChunkSignatureMismatch) || IsPayloadHashMismatchErr(err) {
+			WriteError(w, ErrSignatureDoesNotMatch)
 			return
 		}
 		WriteError(w, ErrInternalError)
@@ -470,10 +480,15 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 // DeleteObjects handles POST /{bucket}?delete - DeleteObjects.
 func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
+	limitBody(w, r, MaxDeleteObjectsSize)
 
 	// Parse request body
 	var deleteReq DeleteRequest
 	if err := xml.NewDecoder(r.Body).Decode(&deleteReq); err != nil {
+		if isBodyTooLarge(err) {
+			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
+			return
+		}
 		WriteError(w, ErrMalformedXML)
 		return
 	}
@@ -691,6 +706,12 @@ func (h *Handler) ListObjects(w http.ResponseWriter, r *http.Request) {
 			maxKeys = int32(mk)
 		}
 	}
+	// Clamp to [1, 1000] to prevent overflow in storage layer (H-14).
+	if maxKeys < 1 {
+		maxKeys = 1
+	} else if maxKeys > 1000 {
+		maxKeys = 1000
+	}
 
 	// Use marker as start-after for the storage layer
 	input := &storage.ListObjectsInput{
@@ -766,6 +787,12 @@ func (h *Handler) ListObjectsV2(w http.ResponseWriter, r *http.Request) {
 		if mk, err := strconv.ParseInt(maxKeysStr, 10, 32); err == nil {
 			maxKeys = int32(mk)
 		}
+	}
+	// Clamp to [1, 1000] to prevent overflow in storage layer (H-14).
+	if maxKeys < 1 {
+		maxKeys = 1
+	} else if maxKeys > 1000 {
+		maxKeys = 1000
 	}
 
 	input := &storage.ListObjectsInput{

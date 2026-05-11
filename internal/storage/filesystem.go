@@ -498,17 +498,18 @@ func (fs *FileSystem) ListObjectsV2(ctx context.Context, input *ListObjectsInput
 	}
 
 	// Get objects with prefix, pagination handled by SQL
-	// Request more objects when delimiter is used (we may need to skip common prefixes)
-	fetchLimit := maxKeys
+	// Request more objects when delimiter is used (we may need to skip common prefixes).
+	// Use int64 arithmetic to prevent overflow before clamping back to int32 (H-14).
+	var fetchLimit int64 = int64(maxKeys)
 	if input.Delimiter != "" {
 		// Fetch more to account for common prefixes that will be collapsed
-		fetchLimit = maxKeys * 10
+		fetchLimit = int64(maxKeys) * 10
 		if fetchLimit > 10000 {
 			fetchLimit = 10000
 		}
 	}
 
-	objects, err := fs.metadata.ListObjects(ctx, input.Bucket, input.Prefix, startKey, fetchLimit)
+	objects, err := fs.metadata.ListObjects(ctx, input.Bucket, input.Prefix, startKey, int32(fetchLimit))
 	if err != nil {
 		return nil, err
 	}
@@ -2330,8 +2331,30 @@ func (fs *FileSystem) validateObjectKey(bucket, key string) (string, error) {
 		return "", ErrInvalidKey
 	}
 
-	// Reject keys containing path traversal sequences
-	// Check for ".." as a path component
+	// Reject control characters that can be used to smuggle commands or
+	// bypass log sanitisation (\x00, \r, \n).
+	for _, c := range key {
+		if c == 0x00 || c == '\r' || c == '\n' {
+			return "", ErrInvalidKey
+		}
+	}
+
+	// Reject backslash — on POSIX filesystems it is a valid filename
+	// character but it creates normalisation confusion on Windows and in
+	// URLs.
+	if strings.Contains(key, "\\") {
+		return "", ErrInvalidKey
+	}
+
+	// Reject normalisation-collision patterns: "./" prefix, "/." suffix,
+	// and double slashes anywhere.  These can survive filepath.Clean if the
+	// component resolves to the same directory after cleaning.
+	if strings.HasPrefix(key, "./") || strings.HasSuffix(key, "/.") ||
+		strings.Contains(key, "//") {
+		return "", ErrInvalidKey
+	}
+
+	// Reject keys containing path traversal sequences (".." components).
 	if key == ".." || strings.HasPrefix(key, "../") || strings.HasSuffix(key, "/..") || strings.Contains(key, "/../") {
 		return "", ErrInvalidKey
 	}
@@ -2345,8 +2368,13 @@ func (fs *FileSystem) validateObjectKey(bucket, key string) (string, error) {
 	// Verify the cleaned path is within the bucket directory
 	bucketPath := filepath.Clean(filepath.Join(fs.dataDir, bucket))
 
-	// The clean path must be inside the bucket directory (not equal to it)
+	// The clean path must be inside the bucket directory (not equal to it).
+	// filepath.IsLocal provides an additional deep-defence layer on top of
+	// our explicit checks above.
 	if !strings.HasPrefix(cleanPath, bucketPath+string(filepath.Separator)) {
+		return "", ErrInvalidKey
+	}
+	if !filepath.IsLocal(key) {
 		return "", ErrInvalidKey
 	}
 

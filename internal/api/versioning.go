@@ -21,19 +21,19 @@ type VersioningConfiguration struct {
 
 // ListVersionsResult represents the response for ListObjectVersions.
 type ListVersionsResult struct {
-	XMLName             xml.Name             `xml:"ListVersionsResult"`
-	Xmlns               string               `xml:"xmlns,attr"`
-	Name                string               `xml:"Name"`
-	Prefix              string               `xml:"Prefix,omitempty"`
-	KeyMarker           string               `xml:"KeyMarker,omitempty"`
-	VersionIdMarker     string               `xml:"VersionIdMarker,omitempty"`
-	NextKeyMarker       string               `xml:"NextKeyMarker,omitempty"`
-	NextVersionIdMarker string               `xml:"NextVersionIdMarker,omitempty"`
-	MaxKeys             int32                `xml:"MaxKeys"`
-	IsTruncated         bool                 `xml:"IsTruncated"`
-	Versions            []VersionInfo        `xml:"Version,omitempty"`
-	DeleteMarkers       []DeleteMarkerInfo   `xml:"DeleteMarker,omitempty"`
-	CommonPrefixes      []CommonPrefix       `xml:"CommonPrefixes,omitempty"`
+	XMLName             xml.Name           `xml:"ListVersionsResult"`
+	Xmlns               string             `xml:"xmlns,attr"`
+	Name                string             `xml:"Name"`
+	Prefix              string             `xml:"Prefix,omitempty"`
+	KeyMarker           string             `xml:"KeyMarker,omitempty"`
+	VersionIdMarker     string             `xml:"VersionIdMarker,omitempty"`
+	NextKeyMarker       string             `xml:"NextKeyMarker,omitempty"`
+	NextVersionIdMarker string             `xml:"NextVersionIdMarker,omitempty"`
+	MaxKeys             int32              `xml:"MaxKeys"`
+	IsTruncated         bool               `xml:"IsTruncated"`
+	Versions            []VersionInfo      `xml:"Version,omitempty"`
+	DeleteMarkers       []DeleteMarkerInfo `xml:"DeleteMarker,omitempty"`
+	CommonPrefixes      []CommonPrefix     `xml:"CommonPrefixes,omitempty"`
 }
 
 // VersionInfo represents a version in the listing.
@@ -58,10 +58,15 @@ type DeleteMarkerInfo struct {
 // PutBucketVersioning handles PUT /{bucket}?versioning - PutBucketVersioning.
 func (h *Handler) PutBucketVersioning(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
+	limitBody(w, r, MaxVersioningBodySize)
 
 	// Parse request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isBodyTooLarge(err) {
+			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
+			return
+		}
 		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket)
 		return
 	}

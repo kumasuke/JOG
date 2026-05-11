@@ -53,9 +53,9 @@ RUN chmod +x /entrypoint.sh
 RUN mkdir -p /data
 
 # Default environment variables
-ENV JOG_PORT=9000
-ENV JOG_DATA_DIR=/data
-ENV JOG_LOG_LEVEL=info
+ENV JOG_SERVER_PORT=9000
+ENV JOG_STORAGE_DATA_DIR=/data
+ENV JOG_LOGGING_LEVEL=info
 
 VOLUME /data
 EXPOSE 9000

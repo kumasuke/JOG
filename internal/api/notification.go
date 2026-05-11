@@ -66,9 +66,14 @@ type FilterRule struct {
 // PutBucketNotification handles PUT /{bucket}?notification.
 func (h *Handler) PutBucketNotification(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
+	limitBody(w, r, MaxNotificationBodySize)
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isBodyTooLarge(err) {
+			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
+			return
+		}
 		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket)
 		return
 	}

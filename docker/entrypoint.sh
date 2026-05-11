@@ -7,7 +7,7 @@ if [ -n "$LITESTREAM_REPLICA_URL" ]; then
 
     # Attempt to restore from existing backup (if exists)
     echo "INFO: Checking for existing metadata backup..."
-    if litestream restore -if-replica-exists -config /etc/litestream.yml "$JOG_DATA_DIR/metadata.db" 2>&1; then
+    if litestream restore -if-replica-exists -config /etc/litestream.yml "${JOG_STORAGE_DATA_DIR}/metadata.db" 2>&1; then
         echo "INFO: Metadata restored successfully from backup"
     else
         echo "INFO: No existing backup found or restore failed, starting with fresh database"

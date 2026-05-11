@@ -12,9 +12,9 @@ import (
 
 // ServerSideEncryptionConfiguration represents the XML structure for SSE configuration.
 type ServerSideEncryptionConfiguration struct {
-	XMLName xml.Name                      `xml:"ServerSideEncryptionConfiguration"`
-	Xmlns   string                        `xml:"xmlns,attr,omitempty"`
-	Rules   []ServerSideEncryptionRule    `xml:"Rule"`
+	XMLName xml.Name                   `xml:"ServerSideEncryptionConfiguration"`
+	Xmlns   string                     `xml:"xmlns,attr,omitempty"`
+	Rules   []ServerSideEncryptionRule `xml:"Rule"`
 }
 
 // ServerSideEncryptionRule represents a single SSE rule.
@@ -32,10 +32,15 @@ type ServerSideEncryptionByDefault struct {
 // PutBucketEncryption handles PUT /{bucket}?encryption - PutBucketEncryption.
 func (h *Handler) PutBucketEncryption(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
+	limitBody(w, r, MaxEncryptionBodySize)
 
 	// Parse request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isBodyTooLarge(err) {
+			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
+			return
+		}
 		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket)
 		return
 	}

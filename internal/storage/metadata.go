@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -24,7 +25,7 @@ func NewMetadata(dbPath string) (*Metadata, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -36,6 +37,16 @@ func NewMetadata(dbPath string) (*Metadata, error) {
 	}
 
 	return m, nil
+}
+
+// escapeLikePattern escapes '%' and '_' characters in a SQLite LIKE pattern
+// so they are treated as literals rather than wildcards.  The caller must
+// append the ESCAPE '\' clause to the query when using this function.
+func escapeLikePattern(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "%", `\%`)
+	s = strings.ReplaceAll(s, "_", `\_`)
+	return s
 }
 
 func (m *Metadata) initialize() error {
@@ -446,22 +457,23 @@ func (m *Metadata) ListObjects(ctx context.Context, bucket, prefix, startAfter s
 	var rows *sql.Rows
 	var err error
 
+	likePrefix := escapeLikePattern(prefix) + "%"
 	if startAfter != "" {
 		rows, err = m.db.QueryContext(ctx, `
 			SELECT key, size, last_modified, etag, content_type
 			FROM objects
-			WHERE bucket = ? AND key LIKE ? AND key > ?
+			WHERE bucket = ? AND key LIKE ? ESCAPE '\' AND key > ?
 			ORDER BY key
 			LIMIT ?
-		`, bucket, prefix+"%", startAfter, maxKeys+1)
+		`, bucket, likePrefix, startAfter, maxKeys+1)
 	} else {
 		rows, err = m.db.QueryContext(ctx, `
 			SELECT key, size, last_modified, etag, content_type
 			FROM objects
-			WHERE bucket = ? AND key LIKE ?
+			WHERE bucket = ? AND key LIKE ? ESCAPE '\'
 			ORDER BY key
 			LIMIT ?
-		`, bucket, prefix+"%", maxKeys+1)
+		`, bucket, likePrefix, maxKeys+1)
 	}
 
 	if err != nil {
@@ -608,25 +620,26 @@ func (m *Metadata) ListMultipartUploadsByBucket(ctx context.Context, bucket, pre
 	var rows *sql.Rows
 	var err error
 
+	likePrefix := escapeLikePattern(prefix) + "%"
 	if keyMarker == "" {
 		// No pagination marker, just prefix filter
 		rows, err = m.db.QueryContext(ctx, `
 			SELECT upload_id, bucket, key, content_type, metadata, initiated
 			FROM multipart_uploads
-			WHERE bucket = ? AND key LIKE ?
+			WHERE bucket = ? AND key LIKE ? ESCAPE '\'
 			ORDER BY key, upload_id
 			LIMIT ?
-		`, bucket, prefix+"%", maxUploads+1)
+		`, bucket, likePrefix, maxUploads+1)
 	} else {
 		// With pagination marker
 		rows, err = m.db.QueryContext(ctx, `
 			SELECT upload_id, bucket, key, content_type, metadata, initiated
 			FROM multipart_uploads
-			WHERE bucket = ? AND key LIKE ?
+			WHERE bucket = ? AND key LIKE ? ESCAPE '\'
 			  AND (key > ? OR (key = ? AND upload_id > ?))
 			ORDER BY key, upload_id
 			LIMIT ?
-		`, bucket, prefix+"%", keyMarker, keyMarker, uploadIDMarker, maxUploads+1)
+		`, bucket, likePrefix, keyMarker, keyMarker, uploadIDMarker, maxUploads+1)
 	}
 
 	if err != nil {
@@ -911,23 +924,24 @@ func (m *Metadata) ListObjectVersions(ctx context.Context, bucket, prefix string
 	var rows *sql.Rows
 	var err error
 
+	likePrefix := escapeLikePattern(prefix) + "%"
 	if keyMarker == "" {
 		rows, err = m.db.QueryContext(ctx, `
 			SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
 			FROM object_versions
-			WHERE bucket = ? AND key LIKE ?
+			WHERE bucket = ? AND key LIKE ? ESCAPE '\'
 			ORDER BY key, last_modified DESC
 			LIMIT ?
-		`, bucket, prefix+"%", maxKeys+1)
+		`, bucket, likePrefix, maxKeys+1)
 	} else {
 		rows, err = m.db.QueryContext(ctx, `
 			SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
 			FROM object_versions
-			WHERE bucket = ? AND key LIKE ?
+			WHERE bucket = ? AND key LIKE ? ESCAPE '\'
 			  AND (key > ? OR (key = ? AND version_id > ?))
 			ORDER BY key, last_modified DESC
 			LIMIT ?
-		`, bucket, prefix+"%", keyMarker, keyMarker, versionIDMarker, maxKeys+1)
+		`, bucket, likePrefix, keyMarker, keyMarker, versionIDMarker, maxKeys+1)
 	}
 
 	if err != nil {

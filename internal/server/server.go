@@ -40,11 +40,13 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Create HTTP server
 	httpServer := &http.Server{
-		Addr:         fmt.Sprintf("%s:%d", cfg.Server.Address, cfg.Server.Port),
-		Handler:      router,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:              fmt.Sprintf("%s:%d", cfg.Server.Address, cfg.Server.Port),
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MiB
 	}
 
 	return &Server{
