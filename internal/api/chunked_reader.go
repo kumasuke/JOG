@@ -223,8 +223,9 @@ func (cr *ChunkedReader) verifyCurrentChunk() error {
 		payloadHash
 	mac := hmac.New(sha256.New, cr.signingKey)
 	mac.Write([]byte(sts))
-	expected := hex.EncodeToString(mac.Sum(nil))
-	if !hmac.Equal([]byte(expected), []byte(cr.curSig)) {
+	expectedRaw := mac.Sum(nil)
+	providedRaw, decodeErr := hex.DecodeString(cr.curSig)
+	if decodeErr != nil || !hmac.Equal(expectedRaw, providedRaw) {
 		return ErrChunkSignatureMismatch
 	}
 	cr.prevSig = cr.curSig

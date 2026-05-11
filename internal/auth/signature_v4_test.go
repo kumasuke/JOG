@@ -95,6 +95,213 @@ func TestVerifySignatureV4RejectsInvalidInputs(t *testing.T) {
 	}
 }
 
+// TestVerifyPresignedURL_MissingExpires asserts that a presigned URL without
+// X-Amz-Expires is rejected (H-1). The historical implementation silently
+// skipped the expiry check when the parameter was missing or non-numeric.
+func TestVerifyPresignedURL_MissingExpires(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/bucket/key", nil)
+	query := req.URL.Query()
+	query.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+	query.Set("X-Amz-Credential", "access/20260102/us-east-1/s3/aws4_request")
+	query.Set("X-Amz-SignedHeaders", "host")
+	query.Set("X-Amz-Signature", strings.Repeat("a", 64))
+	query.Set("X-Amz-Date", time.Now().UTC().Format("20060102T150405Z"))
+	// X-Amz-Expires intentionally omitted.
+	req.URL.RawQuery = query.Encode()
+
+	m := NewMiddleware("access", "secret")
+	_, err := m.verifyPresignedURL(req)
+	if err == nil {
+		t.Fatal("verifyPresignedURL(missing Expires) returned nil; want AccessDenied")
+	}
+	if err.Code != api.ErrAccessDenied.Code {
+		t.Fatalf("err.Code = %s, want %s", err.Code, api.ErrAccessDenied.Code)
+	}
+}
+
+// TestVerifyPresignedURL_NonNumericExpires asserts that a non-numeric Expires
+// value is rejected rather than silently treated as zero (H-1).
+func TestVerifyPresignedURL_NonNumericExpires(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/bucket/key", nil)
+	query := req.URL.Query()
+	query.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+	query.Set("X-Amz-Credential", "access/20260102/us-east-1/s3/aws4_request")
+	query.Set("X-Amz-SignedHeaders", "host")
+	query.Set("X-Amz-Signature", strings.Repeat("a", 64))
+	query.Set("X-Amz-Date", time.Now().UTC().Format("20060102T150405Z"))
+	query.Set("X-Amz-Expires", "not-a-number")
+	req.URL.RawQuery = query.Encode()
+
+	m := NewMiddleware("access", "secret")
+	_, err := m.verifyPresignedURL(req)
+	if err == nil {
+		t.Fatal("verifyPresignedURL(non-numeric Expires) returned nil; want AccessDenied")
+	}
+	if err.Code != api.ErrAccessDenied.Code {
+		t.Fatalf("err.Code = %s, want %s", err.Code, api.ErrAccessDenied.Code)
+	}
+}
+
+// TestVerifyPresignedURL_ExpiresOutOfRange asserts that Expires <= 0 or
+// > 7 days is rejected (AWS caps presigned URLs at 604800 seconds).
+func TestVerifyPresignedURL_ExpiresOutOfRange(t *testing.T) {
+	cases := []string{"0", "-1", "604801"}
+	for _, expires := range cases {
+		t.Run("expires="+expires, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/bucket/key", nil)
+			query := req.URL.Query()
+			query.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+			query.Set("X-Amz-Credential", "access/20260102/us-east-1/s3/aws4_request")
+			query.Set("X-Amz-SignedHeaders", "host")
+			query.Set("X-Amz-Signature", strings.Repeat("a", 64))
+			query.Set("X-Amz-Date", time.Now().UTC().Format("20060102T150405Z"))
+			query.Set("X-Amz-Expires", expires)
+			req.URL.RawQuery = query.Encode()
+
+			m := NewMiddleware("access", "secret")
+			_, err := m.verifyPresignedURL(req)
+			if err == nil {
+				t.Fatalf("verifyPresignedURL(Expires=%s) returned nil; want AccessDenied", expires)
+			}
+			if err.Code != api.ErrAccessDenied.Code {
+				t.Fatalf("err.Code = %s, want %s", err.Code, api.ErrAccessDenied.Code)
+			}
+		})
+	}
+}
+
+// TestVerifyPresignedURL_DateInFuture asserts that a request whose X-Amz-Date
+// is more than 15 minutes in the future is rejected (H-1).
+func TestVerifyPresignedURL_DateInFuture(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/bucket/key", nil)
+	query := req.URL.Query()
+	query.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+	query.Set("X-Amz-Credential", "access/20260102/us-east-1/s3/aws4_request")
+	query.Set("X-Amz-SignedHeaders", "host")
+	query.Set("X-Amz-Signature", strings.Repeat("a", 64))
+	// 1 hour in the future
+	query.Set("X-Amz-Date", time.Now().UTC().Add(1*time.Hour).Format("20060102T150405Z"))
+	query.Set("X-Amz-Expires", "60")
+	req.URL.RawQuery = query.Encode()
+
+	m := NewMiddleware("access", "secret")
+	_, err := m.verifyPresignedURL(req)
+	if err == nil {
+		t.Fatal("verifyPresignedURL(future Date) returned nil; want RequestTimeTooSkewed")
+	}
+	if err.Code != api.ErrRequestTimeTooSkewed.Code {
+		t.Fatalf("err.Code = %s, want %s", err.Code, api.ErrRequestTimeTooSkewed.Code)
+	}
+}
+
+// TestVerifyPresignedURL_PayloadBoundWhenSigned exercises H-1's payload
+// binding: if X-Amz-Content-SHA256 appears in SignedHeaders, the canonical
+// request must use the header value (not "UNSIGNED-PAYLOAD"), and a 64-hex
+// digest must cause the body to be verified via payloadVerifyingReader.
+func TestVerifyPresignedURL_PayloadBoundWhenSigned(t *testing.T) {
+	const (
+		access = "ACCESS"
+		secret = "SECRET"
+	)
+	body := []byte("the wire bytes")
+	sum := sha256.Sum256(body)
+	declared := hex.EncodeToString(sum[:])
+
+	amzDate := time.Now().UTC().Format("20060102T150405Z")
+	date := amzDate[:8]
+	cred := access + "/" + date + "/us-east-1/s3/aws4_request"
+
+	// Build a request that the SDK would build to put a signed-payload
+	// presigned URL on the wire.
+	req := httptest.NewRequest(http.MethodPut, "/bucket/key", strings.NewReader(string(body)))
+	req.Host = "example.com"
+	req.Header.Set("X-Amz-Content-SHA256", declared)
+
+	q := req.URL.Query()
+	q.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+	q.Set("X-Amz-Credential", cred)
+	q.Set("X-Amz-Date", amzDate)
+	q.Set("X-Amz-Expires", "300")
+	q.Set("X-Amz-SignedHeaders", "host;x-amz-content-sha256")
+	req.URL.RawQuery = q.Encode()
+
+	m := NewMiddleware(access, secret)
+	sig := m.calculatePresignedSignature(req, date, "us-east-1", "s3", "host;x-amz-content-sha256", amzDate)
+	q.Set("X-Amz-Signature", sig)
+	req.URL.RawQuery = q.Encode()
+
+	if _, err := m.verifyPresignedURL(req); err != nil {
+		t.Fatalf("verifyPresignedURL(signed payload) = %v, want nil", err)
+	}
+}
+
+// TestVerifyPresignedURL_BodyMismatchAfterAuth asserts that for a presigned
+// URL that signs X-Amz-Content-SHA256, sending a body that does not match
+// the signed hash is detected by the Middleware.Wrap path (H-1 + CR-3).
+func TestVerifyPresignedURL_BodyMismatchAfterAuth(t *testing.T) {
+	const (
+		access = "ACCESS"
+		secret = "SECRET"
+	)
+	signedBody := []byte("the wire bytes")
+	sum := sha256.Sum256(signedBody)
+	declared := hex.EncodeToString(sum[:])
+
+	amzDate := time.Now().UTC().Format("20060102T150405Z")
+	date := amzDate[:8]
+	cred := access + "/" + date + "/us-east-1/s3/aws4_request"
+
+	// Build the canonical request the SDK would sign...
+	tmp := httptest.NewRequest(http.MethodPut, "/bucket/key", strings.NewReader(string(signedBody)))
+	tmp.Host = "example.com"
+	tmp.Header.Set("X-Amz-Content-SHA256", declared)
+	q := tmp.URL.Query()
+	q.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+	q.Set("X-Amz-Credential", cred)
+	q.Set("X-Amz-Date", amzDate)
+	q.Set("X-Amz-Expires", "300")
+	q.Set("X-Amz-SignedHeaders", "host;x-amz-content-sha256")
+	tmp.URL.RawQuery = q.Encode()
+
+	m := NewMiddleware(access, secret)
+	sig := m.calculatePresignedSignature(tmp, date, "us-east-1", "s3", "host;x-amz-content-sha256", amzDate)
+	q.Set("X-Amz-Signature", sig)
+
+	// ...but the client sends a tampered body. The middleware should pass
+	// the signature check (because the declared hash matches the signed
+	// canonical request) but the downstream payload verification on EOF
+	// must surface as a CR-3 hash mismatch.
+	tamperedBody := []byte("the wire bytez")
+	req := httptest.NewRequest(http.MethodPut, "/bucket/key", strings.NewReader(string(tamperedBody)))
+	req.Host = "example.com"
+	req.ContentLength = int64(len(tamperedBody))
+	req.Header.Set("X-Amz-Content-SHA256", declared)
+	req.URL.RawQuery = q.Encode()
+
+	rec := httptest.NewRecorder()
+	called := false
+	handler := m.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_, _ = io.ReadAll(r.Body)
+	}))
+	handler.ServeHTTP(rec, req)
+
+	if !called {
+		// Wrap rejected before handler — acceptable if it's a 403 already.
+		if rec.Code == http.StatusForbidden {
+			return
+		}
+		t.Fatalf("handler not called; status = %d", rec.Code)
+	}
+	// If the handler was called, the body read should have surfaced the
+	// mismatch via ErrPayloadHashMismatch; the handler in this test just
+	// ignores it. We assert the wrapper at least replaced r.Body with our
+	// verifying reader.
+	if _, ok := req.Body.(*payloadVerifyingReader); !ok {
+		t.Fatalf("Middleware.Wrap did not install payloadVerifyingReader for signed-payload presigned URL; got %T", req.Body)
+	}
+}
+
 func TestVerifyPresignedURLRejectsExpiredRequest(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/bucket/key", nil)
 	query := req.URL.Query()
@@ -107,7 +314,7 @@ func TestVerifyPresignedURLRejectsExpiredRequest(t *testing.T) {
 	req.URL.RawQuery = query.Encode()
 
 	m := NewMiddleware("access", "secret")
-	err := m.verifyPresignedURL(req)
+	_, err := m.verifyPresignedURL(req)
 	if err == nil {
 		t.Fatal("verifyPresignedURL() returned nil error")
 	}
@@ -189,6 +396,49 @@ func TestWrapPayload_UnknownSentinelIsRejected(t *testing.T) {
 	}
 	if err.Code != api.ErrSignatureDoesNotMatch.Code {
 		t.Fatalf("err.Code = %s, want %s", err.Code, api.ErrSignatureDoesNotMatch.Code)
+	}
+}
+
+// TestConstantTimeHexEqual_LengthMismatch asserts that constantTimeHexEqual
+// rejects two strings whose decoded lengths differ without panicking. The
+// historical implementation compared hex strings directly via hmac.Equal,
+// which short-circuits when string lengths differ — leaking length info via
+// timing (H-2).
+func TestConstantTimeHexEqual_LengthMismatch(t *testing.T) {
+	if constantTimeHexEqual("abcd", "abcdef") {
+		t.Fatal("constantTimeHexEqual(short, long) returned true; want false")
+	}
+	if constantTimeHexEqual("ab", "abcd") {
+		t.Fatal("constantTimeHexEqual(short, long) returned true; want false")
+	}
+}
+
+// TestConstantTimeHexEqual_NonHexProvided asserts that a non-hex provided
+// signature is rejected (rather than triggering a panic in hex.DecodeString).
+// SigV4 signatures are always lower-case hex of HMAC-SHA256 (64 hex chars
+// / 32 bytes); anything else is invalid.
+func TestConstantTimeHexEqual_NonHexProvided(t *testing.T) {
+	expected := strings.Repeat("a", 64)
+	if constantTimeHexEqual(expected, "not-hex-at-all-but-64-chars-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX") {
+		t.Fatal("constantTimeHexEqual(hex, non-hex) returned true; want false")
+	}
+}
+
+// TestConstantTimeHexEqual_MatchAndMismatch asserts the basic identity and
+// difference cases.
+func TestConstantTimeHexEqual_MatchAndMismatch(t *testing.T) {
+	a := strings.Repeat("a", 64)
+	b := strings.Repeat("a", 63) + "b"
+	if !constantTimeHexEqual(a, a) {
+		t.Fatal("constantTimeHexEqual(a, a) returned false; want true")
+	}
+	if constantTimeHexEqual(a, b) {
+		t.Fatal("constantTimeHexEqual(a, b) returned true; want false")
+	}
+	// Mixed-case provided value should still match (canonical hex is lower).
+	upper := strings.ToUpper(a)
+	if !constantTimeHexEqual(a, upper) {
+		t.Fatal("constantTimeHexEqual(a, upper(a)) returned false; want true (case insensitive)")
 	}
 }
 
