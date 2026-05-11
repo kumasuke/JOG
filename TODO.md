@@ -127,7 +127,8 @@ Each feature follows TDD (Test-Driven Development):
 ## Phase 8: Future Enhancements (Optional)
 
 ### Not Prioritized
-- [x] Bucket Notification (GetBucketNotification / PutBucketNotification)
+- [x] Bucket Notification configuration API (GetBucketNotification / PutBucketNotification)
+- [ ] Bucket Notification event delivery (SNS/SQS/Lambda/EventBridge)
 - [ ] Object Select (SelectObjectContent)
 
 ---
