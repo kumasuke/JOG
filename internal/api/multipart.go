@@ -171,6 +171,17 @@ func (h *Handler) UploadPart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// CR-2: for STREAMING-AWS4-HMAC-SHA256-PAYLOAD the auth middleware
+	// has replaced r.Body with a decoded ChunkedReader; switch to the
+	// declared decoded length so storage sees the right size.
+	if IsAWSChunked(r.Header.Get("Content-Encoding"), r.Header.Get("X-Amz-Content-Sha256")) {
+		if v := r.Header.Get("X-Amz-Decoded-Content-Length"); v != "" {
+			if decoded, perr := strconv.ParseInt(v, 10, 64); perr == nil {
+				contentLength = decoded
+			}
+		}
+	}
+
 	part, err := h.storage.UploadPart(r.Context(), bucket, key, uploadID, int32(partNumber), r.Body, contentLength)
 	if err != nil {
 		if errors.Is(err, storage.ErrUploadNotFound) {
@@ -179,6 +190,10 @@ func (h *Handler) UploadPart(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		if errors.Is(err, ErrChunkSignatureMismatch) || IsPayloadHashMismatchErr(err) {
+			WriteError(w, ErrSignatureDoesNotMatch)
 			return
 		}
 		log.Error().Err(err).Msg("Failed to upload part")
@@ -306,6 +321,7 @@ func (h *Handler) UploadPartCopy(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
+	limitBody(w, r, MaxMultipartCompleteSize)
 
 	query := r.URL.Query()
 	uploadID := query.Get("uploadId")
@@ -313,6 +329,10 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 	// Parse request body
 	var req CompleteMultipartUploadRequest
 	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
+		if isBodyTooLarge(err) {
+			WriteError(w, ErrEntityTooLarge)
+			return
+		}
 		WriteError(w, ErrInvalidRequest)
 		return
 	}

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/rs/zerolog/log"
 	"gopkg.in/yaml.v3"
 )
 
@@ -98,6 +99,11 @@ func Load() (*Config, error) {
 	if err := applyEnv(cfg); err != nil {
 		return nil, err
 	}
+
+	if cfg.Auth.AccessKey == "minioadmin" {
+		log.Warn().Msg("JOG_AUTH_ACCESS_KEY is using the default value 'minioadmin'; set it to a strong key in production")
+	}
+
 	return cfg, nil
 }
 

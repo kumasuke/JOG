@@ -212,6 +212,12 @@ var (
 		Message:    "This policy contains invalid Json.",
 		HTTPStatus: http.StatusBadRequest,
 	}
+
+	ErrEntityTooLarge = &S3Error{
+		Code:       "EntityTooLarge",
+		Message:    "Your proposed upload exceeds the maximum allowed size.",
+		HTTPStatus: http.StatusBadRequest,
+	}
 )
 
 // WriteError writes an S3 error response.

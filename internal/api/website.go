@@ -11,12 +11,12 @@ import (
 
 // WebsiteConfigurationXML represents the XML format for website configuration.
 type WebsiteConfigurationXML struct {
-	XMLName               xml.Name                     `xml:"WebsiteConfiguration"`
-	Xmlns                 string                       `xml:"xmlns,attr,omitempty"`
-	IndexDocument         *IndexDocumentXML            `xml:"IndexDocument,omitempty"`
-	ErrorDocument         *ErrorDocumentXML            `xml:"ErrorDocument,omitempty"`
-	RedirectAllRequestsTo *RedirectAllRequestsToXML    `xml:"RedirectAllRequestsTo,omitempty"`
-	RoutingRules          *RoutingRulesXML             `xml:"RoutingRules,omitempty"`
+	XMLName               xml.Name                  `xml:"WebsiteConfiguration"`
+	Xmlns                 string                    `xml:"xmlns,attr,omitempty"`
+	IndexDocument         *IndexDocumentXML         `xml:"IndexDocument,omitempty"`
+	ErrorDocument         *ErrorDocumentXML         `xml:"ErrorDocument,omitempty"`
+	RedirectAllRequestsTo *RedirectAllRequestsToXML `xml:"RedirectAllRequestsTo,omitempty"`
+	RoutingRules          *RoutingRulesXML          `xml:"RoutingRules,omitempty"`
 }
 
 // IndexDocumentXML represents the index document in XML.
@@ -64,9 +64,14 @@ type RedirectXML struct {
 // PutBucketWebsite handles PUT /{bucket}?website - PutBucketWebsite.
 func (h *Handler) PutBucketWebsite(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
+	limitBody(w, r, MaxWebsiteBodySize)
 
 	var xmlConfig WebsiteConfigurationXML
 	if err := xml.NewDecoder(r.Body).Decode(&xmlConfig); err != nil {
+		if isBodyTooLarge(err) {
+			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
+			return
+		}
 		WriteError(w, ErrMalformedXML)
 		return
 	}

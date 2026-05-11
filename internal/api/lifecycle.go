@@ -78,10 +78,15 @@ type AbortIncompleteMultipartUpload struct {
 // PutBucketLifecycleConfiguration handles PUT /{bucket}?lifecycle - PutBucketLifecycleConfiguration.
 func (h *Handler) PutBucketLifecycleConfiguration(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
+	limitBody(w, r, MaxLifecycleBodySize)
 
 	// Parse request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isBodyTooLarge(err) {
+			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
+			return
+		}
 		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket)
 		return
 	}

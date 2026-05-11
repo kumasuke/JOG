@@ -13,10 +13,10 @@ import (
 
 // ObjectLockConfiguration represents the XML structure for object lock configuration.
 type ObjectLockConfiguration struct {
-	XMLName           xml.Name             `xml:"ObjectLockConfiguration"`
-	Xmlns             string               `xml:"xmlns,attr,omitempty"`
-	ObjectLockEnabled string               `xml:"ObjectLockEnabled,omitempty"`
-	Rule              *ObjectLockRule      `xml:"Rule,omitempty"`
+	XMLName           xml.Name        `xml:"ObjectLockConfiguration"`
+	Xmlns             string          `xml:"xmlns,attr,omitempty"`
+	ObjectLockEnabled string          `xml:"ObjectLockEnabled,omitempty"`
+	Rule              *ObjectLockRule `xml:"Rule,omitempty"`
 }
 
 // ObjectLockRule represents the object lock rule.
@@ -49,10 +49,15 @@ type ObjectLockLegalHold struct {
 // PutObjectLockConfiguration handles PUT /{bucket}?object-lock - PutObjectLockConfiguration.
 func (h *Handler) PutObjectLockConfiguration(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
+	limitBody(w, r, MaxObjectLockBodySize)
 
 	// Parse request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isBodyTooLarge(err) {
+			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
+			return
+		}
 		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket)
 		return
 	}
@@ -146,10 +151,15 @@ func (h *Handler) GetObjectLockConfiguration(w http.ResponseWriter, r *http.Requ
 func (h *Handler) PutObjectRetention(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
+	limitBody(w, r, MaxObjectLockBodySize)
 
 	// Parse request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isBodyTooLarge(err) {
+			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket+"/"+key)
+			return
+		}
 		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket+"/"+key)
 		return
 	}
@@ -231,10 +241,15 @@ func (h *Handler) GetObjectRetention(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) PutObjectLegalHold(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
+	limitBody(w, r, MaxObjectLockBodySize)
 
 	// Parse request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if isBodyTooLarge(err) {
+			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket+"/"+key)
+			return
+		}
 		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket+"/"+key)
 		return
 	}
