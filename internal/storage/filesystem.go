@@ -2256,27 +2256,70 @@ func (fs *FileSystem) DeleteBucketWebsite(ctx context.Context, bucket string) er
 	return fs.metadata.DeleteBucketWebsite(ctx, bucket)
 }
 
+// PutBucketNotification stores bucket notification configuration.
+func (fs *FileSystem) PutBucketNotification(ctx context.Context, bucket string, config *NotificationConfiguration) error {
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	data, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+
+	return fs.metadata.PutBucketNotification(ctx, bucket, string(data))
+}
+
+// GetBucketNotification returns bucket notification configuration.
+func (fs *FileSystem) GetBucketNotification(ctx context.Context, bucket string) (*NotificationConfiguration, error) {
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrBucketNotFound
+	}
+
+	data, err := fs.metadata.GetBucketNotification(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if data == "" {
+		return &NotificationConfiguration{}, nil
+	}
+
+	var config NotificationConfiguration
+	if err := json.Unmarshal([]byte(data), &config); err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
 // Errors
 var (
-	ErrBucketNotFound                   = errors.New("bucket not found")
-	ErrBucketAlreadyExists              = errors.New("bucket already exists")
-	ErrBucketNotEmpty                   = errors.New("bucket not empty")
-	ErrObjectNotFound                   = errors.New("object not found")
-	ErrInvalidBucketName                = errors.New("invalid bucket name")
-	ErrInvalidKey                       = errors.New("invalid object key")
-	ErrUploadNotFound                   = errors.New("upload not found")
-	ErrInvalidPart                      = errors.New("invalid part")
-	ErrInvalidRange                     = errors.New("invalid range")
-	ErrNoSuchTagSet                     = errors.New("no such tag set")
-	ErrNoSuchCORSConfiguration          = errors.New("no such CORS configuration")
-	ErrNoSuchEncryptionConfiguration    = errors.New("no such encryption configuration")
-	ErrNoSuchLifecycleConfiguration     = errors.New("no such lifecycle configuration")
-	ErrObjectLockConfigurationNotFound  = errors.New("object lock configuration not found")
-	ErrNoSuchObjectLockConfiguration    = errors.New("no such object lock configuration")
-	ErrInvalidRequestObjectLock         = errors.New("bucket is not object lock enabled")
-	ErrMalformedXML                     = errors.New("malformed XML")
-	ErrNoSuchBucketPolicy               = errors.New("no such bucket policy")
-	ErrNoSuchWebsiteConfiguration       = errors.New("no such website configuration")
+	ErrBucketNotFound                  = errors.New("bucket not found")
+	ErrBucketAlreadyExists             = errors.New("bucket already exists")
+	ErrBucketNotEmpty                  = errors.New("bucket not empty")
+	ErrObjectNotFound                  = errors.New("object not found")
+	ErrInvalidBucketName               = errors.New("invalid bucket name")
+	ErrInvalidKey                      = errors.New("invalid object key")
+	ErrUploadNotFound                  = errors.New("upload not found")
+	ErrInvalidPart                     = errors.New("invalid part")
+	ErrInvalidRange                    = errors.New("invalid range")
+	ErrNoSuchTagSet                    = errors.New("no such tag set")
+	ErrNoSuchCORSConfiguration         = errors.New("no such CORS configuration")
+	ErrNoSuchEncryptionConfiguration   = errors.New("no such encryption configuration")
+	ErrNoSuchLifecycleConfiguration    = errors.New("no such lifecycle configuration")
+	ErrObjectLockConfigurationNotFound = errors.New("object lock configuration not found")
+	ErrNoSuchObjectLockConfiguration   = errors.New("no such object lock configuration")
+	ErrInvalidRequestObjectLock        = errors.New("bucket is not object lock enabled")
+	ErrMalformedXML                    = errors.New("malformed XML")
+	ErrNoSuchBucketPolicy              = errors.New("no such bucket policy")
+	ErrNoSuchWebsiteConfiguration      = errors.New("no such website configuration")
 )
 
 // validateObjectKey validates the object key to prevent path traversal attacks.

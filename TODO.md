@@ -127,7 +127,7 @@ Each feature follows TDD (Test-Driven Development):
 ## Phase 8: Future Enhancements (Optional)
 
 ### Not Prioritized
-- [ ] Bucket Notification (GetBucketNotification / PutBucketNotification)
+- [x] Bucket Notification (GetBucketNotification / PutBucketNotification)
 - [ ] Object Select (SelectObjectContent)
 
 ---

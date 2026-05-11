@@ -305,6 +305,18 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create bucket_website table: %w", err)
 	}
 
+	// Create bucket_notification table (stores notification config as JSON)
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS bucket_notification (
+			bucket TEXT PRIMARY KEY,
+			notification_config TEXT NOT NULL,
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create bucket_notification table: %w", err)
+	}
+
 	return nil
 }
 
@@ -835,7 +847,6 @@ func (m *Metadata) PutObjectVersion(ctx context.Context, bucket string, version 
 	return err
 }
 
-
 // GetObjectVersion returns a specific version of an object.
 func (m *Metadata) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (*ObjectVersion, error) {
 	var version ObjectVersion
@@ -1246,6 +1257,30 @@ func (m *Metadata) GetBucketWebsite(ctx context.Context, bucket string) (string,
 func (m *Metadata) DeleteBucketWebsite(ctx context.Context, bucket string) error {
 	_, err := m.db.ExecContext(ctx, `DELETE FROM bucket_website WHERE bucket = ?`, bucket)
 	return err
+}
+
+// PutBucketNotification stores the notification configuration for a bucket.
+func (m *Metadata) PutBucketNotification(ctx context.Context, bucket string, notificationConfig string) error {
+	_, err := m.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO bucket_notification (bucket, notification_config)
+		VALUES (?, ?)
+	`, bucket, notificationConfig)
+	return err
+}
+
+// GetBucketNotification returns the notification configuration for a bucket.
+func (m *Metadata) GetBucketNotification(ctx context.Context, bucket string) (string, error) {
+	var notificationConfig string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT notification_config FROM bucket_notification WHERE bucket = ?
+	`, bucket).Scan(&notificationConfig)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return notificationConfig, nil
 }
 
 // Close closes the database connection.
