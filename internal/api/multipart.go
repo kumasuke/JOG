@@ -170,6 +170,11 @@ func (h *Handler) UploadPart(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, ErrMissingContentLength)
 		return
 	}
+	// H-11: reject oversized parts before reading any body bytes.
+	if contentLength > MaxUploadPartSize {
+		WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket+"/"+key)
+		return
+	}
 
 	// CR-2: for STREAMING-AWS4-HMAC-SHA256-PAYLOAD the auth middleware
 	// has replaced r.Body with a decoded ChunkedReader; switch to the

@@ -18,6 +18,13 @@ const (
 	MaxWebsiteBodySize       int64 = 16 * 1024       // 16 KiB
 	MaxMultipartCompleteSize int64 = 1 * 1024 * 1024 // 1 MiB (10001 parts * ~100 B)
 	MaxDeleteObjectsSize     int64 = 2 * 1024 * 1024 // 2 MiB (1000 keys * ~2 KB)
+
+	// H-11: per-request body upper bounds for object data. Mirrors AWS S3's
+	// documented limits so a single client cannot exhaust local disk by
+	// declaring a huge Content-Length. The check fires before the body is
+	// streamed so storage is never touched for oversized requests.
+	MaxPutObjectSize  int64 = 5 * 1024 * 1024 * 1024 // 5 GiB per single PUT
+	MaxUploadPartSize int64 = 5 * 1024 * 1024 * 1024 // 5 GiB per UploadPart
 )
 
 // limitBody wraps r.Body with http.MaxBytesReader.

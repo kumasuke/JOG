@@ -110,6 +110,12 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, ErrMissingContentLength)
 		return
 	}
+	// H-11: reject oversized uploads before reading any body bytes so a
+	// single client cannot exhaust disk by declaring a huge Content-Length.
+	if contentLength > MaxPutObjectSize {
+		WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket+"/"+key)
+		return
+	}
 
 	// Check for aws-chunked encoding (streaming payload signature). The
 	// auth middleware has already swapped r.Body for a ChunkedReader that

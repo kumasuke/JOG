@@ -271,6 +271,50 @@ func TestCompleteMultipartUpload_BodyTooLarge(t *testing.T) {
 	}
 }
 
+// TestPutObject_ContentLengthExceedsMax verifies that PutObject rejects
+// requests whose declared Content-Length exceeds MaxPutObjectSize before
+// the body is read (H-11). This prevents a single-PUT upload from
+// consuming unbounded disk space.
+func TestPutObject_ContentLengthExceedsMax(t *testing.T) {
+	h := newHandlerWithMock()
+
+	req := httptest.NewRequest(http.MethodPut, "/test-bucket/test-key", strings.NewReader(""))
+	req.ContentLength = MaxPutObjectSize + 1
+	req = setContext(req, "test-bucket", "test-key")
+	rr := httptest.NewRecorder()
+
+	h.PutObject(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+	code := parseS3ErrorCode(t, rr.Body.String())
+	if code != "EntityTooLarge" {
+		t.Fatalf("error code = %q, want %q", code, "EntityTooLarge")
+	}
+}
+
+// TestUploadPart_ContentLengthExceedsMax verifies that UploadPart rejects
+// requests whose declared Content-Length exceeds MaxUploadPartSize (H-11).
+func TestUploadPart_ContentLengthExceedsMax(t *testing.T) {
+	h := newHandlerWithMock()
+
+	req := httptest.NewRequest(http.MethodPut, "/test-bucket/test-key?partNumber=1&uploadId=abc", strings.NewReader(""))
+	req.ContentLength = MaxUploadPartSize + 1
+	req = setContext(req, "test-bucket", "test-key")
+	rr := httptest.NewRecorder()
+
+	h.UploadPart(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+	code := parseS3ErrorCode(t, rr.Body.String())
+	if code != "EntityTooLarge" {
+		t.Fatalf("error code = %q, want %q", code, "EntityTooLarge")
+	}
+}
+
 // TestIsBodyTooLarge verifies the isBodyTooLarge helper correctly identifies MaxBytesError.
 func TestIsBodyTooLarge(t *testing.T) {
 	// Simulate what MaxBytesReader returns when limit is exceeded
