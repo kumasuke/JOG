@@ -188,9 +188,9 @@ const (
 type ACLGranteeType string
 
 const (
-	ACLGranteeTypeCanonicalUser   ACLGranteeType = "CanonicalUser"
-	ACLGranteeTypeAmazonCustomer  ACLGranteeType = "AmazonCustomerByEmail"
-	ACLGranteeTypeGroup           ACLGranteeType = "Group"
+	ACLGranteeTypeCanonicalUser  ACLGranteeType = "CanonicalUser"
+	ACLGranteeTypeAmazonCustomer ACLGranteeType = "AmazonCustomerByEmail"
+	ACLGranteeTypeGroup          ACLGranteeType = "Group"
 )
 
 // ACLGrant represents a single grant in an ACL.
@@ -230,8 +230,8 @@ const AuthenticatedUsersGroupURI = "http://acs.amazonaws.com/groups/global/Authe
 type SSEAlgorithm string
 
 const (
-	SSEAlgorithmAES256 SSEAlgorithm = "AES256"
-	SSEAlgorithmKMS    SSEAlgorithm = "aws:kms"
+	SSEAlgorithmAES256  SSEAlgorithm = "AES256"
+	SSEAlgorithmKMS     SSEAlgorithm = "aws:kms"
 	SSEAlgorithmKMSDSSE SSEAlgorithm = "aws:kms:dsse"
 )
 
@@ -399,6 +399,57 @@ type Redirect struct {
 	ReplaceKeyWith       string
 }
 
+// NotificationConfiguration holds bucket event notification settings.
+type NotificationConfiguration struct {
+	TopicConfigurations          []TopicNotificationConfiguration
+	QueueConfigurations          []QueueNotificationConfiguration
+	LambdaFunctionConfigurations []LambdaFunctionNotificationConfiguration
+	EventBridgeConfiguration     *EventBridgeNotificationConfiguration
+}
+
+// TopicNotificationConfiguration describes SNS topic notification settings.
+type TopicNotificationConfiguration struct {
+	ID       string
+	TopicArn string
+	Events   []string
+	Filter   *NotificationFilter
+}
+
+// QueueNotificationConfiguration describes SQS queue notification settings.
+type QueueNotificationConfiguration struct {
+	ID       string
+	QueueArn string
+	Events   []string
+	Filter   *NotificationFilter
+}
+
+// LambdaFunctionNotificationConfiguration describes Lambda notification settings.
+type LambdaFunctionNotificationConfiguration struct {
+	ID                string
+	LambdaFunctionArn string
+	Events            []string
+	Filter            *NotificationFilter
+}
+
+// EventBridgeNotificationConfiguration enables EventBridge delivery.
+type EventBridgeNotificationConfiguration struct{}
+
+// NotificationFilter stores object key filter rules.
+type NotificationFilter struct {
+	Key *S3KeyFilter
+}
+
+// S3KeyFilter stores S3 key filter rules.
+type S3KeyFilter struct {
+	FilterRules []FilterRule
+}
+
+// FilterRule stores a single prefix or suffix filter rule.
+type FilterRule struct {
+	Name  string
+	Value string
+}
+
 // Storage defines the interface for storage backends.
 type Storage interface {
 	// Bucket operations
@@ -482,6 +533,10 @@ type Storage interface {
 	PutBucketWebsite(ctx context.Context, bucket string, config *WebsiteConfiguration) error
 	GetBucketWebsite(ctx context.Context, bucket string) (*WebsiteConfiguration, error)
 	DeleteBucketWebsite(ctx context.Context, bucket string) error
+
+	// Bucket Notification operations
+	PutBucketNotification(ctx context.Context, bucket string, config *NotificationConfiguration) error
+	GetBucketNotification(ctx context.Context, bucket string) (*NotificationConfiguration, error)
 
 	// Close releases storage resources.
 	Close() error

@@ -15,11 +15,11 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 | Category | Implemented | Total | Progress |
 |----------|-------------|-------|----------|
 | Bucket - Basic | 5 | 6 | 83% |
-| Bucket - Configuration | 23 | 50+ | ~46% |
+| Bucket - Configuration | 25 | 50+ | ~50% |
 | Object - Basic | 9 | 9 | 100% |
 | Object - Advanced | 13 | 15+ | ~87% |
 | Multipart Upload | 7 | 7 | 100% |
-| **Total (Core APIs)** | **57** | **~87** | **~66%** |
+| **Total (Core APIs)** | **59** | **~87** | **~68%** |
 
 ---
 
@@ -110,8 +110,8 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 
 | Operation | Status | Description |
 |-----------|--------|-------------|
-| GetBucketNotificationConfiguration | [ ] | Get notification configuration |
-| PutBucketNotificationConfiguration | [ ] | Set notification configuration |
+| GetBucketNotificationConfiguration | [x] | Get notification configuration |
+| PutBucketNotificationConfiguration | [x] | Set notification configuration |
 
 ### Replication
 

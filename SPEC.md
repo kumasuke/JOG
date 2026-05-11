@@ -16,35 +16,35 @@ JOG (Just Object Gateway) は、Go言語で実装されたS3互換のオブジ�
 ### Phase 1: 基盤構築 (MVP)
 
 #### 1.1 CLIフレームワーク
-- [ ] `jog server` - サーバー起動コマンド
+- [x] `jog server` - サーバー起動コマンド
 - [ ] `jog config` - 設定管理
-- [ ] `jog version` - バージョン表示
+- [x] `jog version` - バージョン表示
 
 #### 1.2 基本的なS3 API
 **バケット操作**
-- [ ] `PUT /{bucket}` - CreateBucket
-- [ ] `DELETE /{bucket}` - DeleteBucket
-- [ ] `GET /` - ListBuckets
-- [ ] `HEAD /{bucket}` - HeadBucket
+- [x] `PUT /{bucket}` - CreateBucket
+- [x] `DELETE /{bucket}` - DeleteBucket
+- [x] `GET /` - ListBuckets
+- [x] `HEAD /{bucket}` - HeadBucket
 
 **オブジェクト操作**
-- [ ] `PUT /{bucket}/{key}` - PutObject
-- [ ] `GET /{bucket}/{key}` - GetObject
-- [ ] `DELETE /{bucket}/{key}` - DeleteObject
-- [ ] `GET /{bucket}?list-type=2` - ListObjectsV2
-- [ ] `HEAD /{bucket}/{key}` - HeadObject
+- [x] `PUT /{bucket}/{key}` - PutObject
+- [x] `GET /{bucket}/{key}` - GetObject
+- [x] `DELETE /{bucket}/{key}` - DeleteObject
+- [x] `GET /{bucket}?list-type=2` - ListObjectsV2
+- [x] `HEAD /{bucket}/{key}` - HeadObject
 
 #### 1.3 ストレージバックエンド
-- [ ] ローカルファイルシステムバックエンド
-- [ ] メタデータ管理 (SQLite)
+- [x] ローカルファイルシステムバックエンド
+- [x] メタデータ管理 (SQLite)
 
 #### 1.4 認証
-- [ ] Access Key / Secret Key認証 (AWS Signature V4)
+- [x] Access Key / Secret Key認証 (AWS Signature V4)
 
 #### 1.5 S3互換性テスト
-- [ ] AWS SDK for Go v2 を使った統合テスト
-- [ ] 全APIエンドポイントの互換性テスト
-- [ ] エラーレスポンス形式の互換性テスト
+- [x] AWS SDK for Go v2 を使った統合テスト
+- [x] 全APIエンドポイントの互換性テスト
+- [x] エラーレスポンス形式の互換性テスト
 
 ### Phase 2: 機能拡充
 
@@ -54,22 +54,27 @@ JOG (Just Object Gateway) は、Go言語で実装されたS3互換のオブジ�
 - [x] CompleteMultipartUpload
 - [x] AbortMultipartUpload
 - [x] ListParts
-- [ ] ListMultipartUploads (未実装)
+- [x] ListMultipartUploads
 
 #### 2.2 追加オブジェクト操作
-- [ ] CopyObject
-- [ ] DeleteObjects (一括削除)
-- [ ] GetObjectAttributes
+- [x] CopyObject
+- [x] DeleteObjects (一括削除)
+- [x] GetObjectAttributes
 
 #### 2.3 バケットポリシー
-- [ ] PutBucketPolicy
-- [ ] GetBucketPolicy
-- [ ] DeleteBucketPolicy
+- [x] PutBucketPolicy
+- [x] GetBucketPolicy
+- [x] DeleteBucketPolicy
 
 #### 2.4 バージョニング
-- [ ] PutBucketVersioning
-- [ ] GetBucketVersioning
-- [ ] オブジェクトバージョン管理
+- [x] PutBucketVersioning
+- [x] GetBucketVersioning
+- [x] オブジェクトバージョン管理
+
+#### 2.5 バケット通知
+- [x] PutBucketNotificationConfiguration
+- [x] GetBucketNotificationConfiguration
+- [ ] 通知イベント配信 (SNS/SQS/Lambda/EventBridge)
 
 ### Phase 3: 運用機能
 
@@ -77,7 +82,7 @@ JOG (Just Object Gateway) は、Go言語で実装されたS3互換のオブジ�
 - [ ] メトリクス (Prometheus形式)
 - [ ] ヘルスチェックエンドポイント
 - [ ] TLS対応
-- [ ] CORS設定
+- [x] CORS設定
 
 ### Phase 4: WebUI (将来)
 

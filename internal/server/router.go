@@ -98,6 +98,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("website") {
 					// GET /{bucket}?website - GetBucketWebsite
 					r.handler.GetBucketWebsite(w, req)
+				} else if query.Has("notification") {
+					// GET /{bucket}?notification - GetBucketNotification
+					r.handler.GetBucketNotification(w, req)
 				} else if query.Get("list-type") == "2" {
 					// GET /{bucket}?list-type=2 - ListObjectsV2
 					r.handler.ListObjectsV2(w, req)
@@ -157,6 +160,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("website") {
 					// PUT /{bucket}?website - PutBucketWebsite
 					r.handler.PutBucketWebsite(w, req)
+				} else if query.Has("notification") {
+					// PUT /{bucket}?notification - PutBucketNotification
+					r.handler.PutBucketNotification(w, req)
 				} else {
 					// PUT /{bucket} - CreateBucket
 					r.handler.CreateBucket(w, req)
