@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/kumasuke/jog/internal/config"
@@ -14,12 +16,12 @@ import (
 )
 
 var (
-	configFile string
-	port       int
-	dataDir    string
-	accessKey  string
-	secretKey  string
-	logLevel   string
+	configFile    string
+	port          int
+	dataDir       string
+	accessKey     string
+	secretKeyFile string
+	logLevel      string
 )
 
 // NewServerCmd creates the server command.
@@ -35,7 +37,7 @@ func NewServerCmd() *cobra.Command {
 	cmd.Flags().IntVarP(&port, "port", "p", 0, "server port (default 9000)")
 	cmd.Flags().StringVarP(&dataDir, "data-dir", "d", "", "data directory")
 	cmd.Flags().StringVar(&accessKey, "access-key", "", "access key")
-	cmd.Flags().StringVar(&secretKey, "secret-key", "", "secret key")
+	cmd.Flags().StringVar(&secretKeyFile, "secret-key-file", "", "path to file containing the secret key (alternative to JOG_AUTH_SECRET_KEY env var; file must be 0600)")
 	cmd.Flags().StringVar(&logLevel, "log-level", "", "log level (debug, info, warn, error)")
 
 	return cmd
@@ -65,8 +67,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if accessKey != "" {
 		cfg.Auth.AccessKey = accessKey
 	}
-	if secretKey != "" {
-		cfg.Auth.SecretKey = secretKey
+	if secretKeyFile != "" {
+		sk, err := readSecretKeyFile(secretKeyFile)
+		if err != nil {
+			return fmt.Errorf("failed to read secret key file: %w", err)
+		}
+		cfg.Auth.SecretKey = sk
 	}
 	if logLevel != "" {
 		cfg.Logging.Level = logLevel
@@ -102,6 +108,29 @@ func runServer(cmd *cobra.Command, args []string) error {
 		log.Info().Str("signal", sig.String()).Msg("Received shutdown signal")
 		return srv.Shutdown()
 	}
+}
+
+// readSecretKeyFile reads a secret key from a file, enforcing 0600
+// permissions so the secret cannot leak via process listing or world-
+// readable files (H-6). Trailing whitespace is trimmed because the
+// natural shell idiom `echo secret > file` appends a newline.
+func readSecretKeyFile(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		return "", fmt.Errorf("secret key file %q has insecure permissions %o (want 0600); refusing to read", path, mode)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	secret := strings.TrimSpace(string(data))
+	if secret == "" {
+		return "", errors.New("secret key file is empty after trimming whitespace")
+	}
+	return secret, nil
 }
 
 func setupLogging(cfg config.LoggingConfig) {
