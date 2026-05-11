@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"io"
 	"net/http"
@@ -17,6 +18,14 @@ import (
 // mockStorage is a minimal storage.Storage stub for limit tests.
 type mockStorage struct {
 	storage.Storage
+}
+
+// CopyObject is implemented on the mock so handler tests that reach the
+// storage call (after validation succeeds) do not panic on the unembedded
+// interface; it returns ErrObjectNotFound so the handler converts it into a
+// NoSuchKey response that tests can distinguish from validation rejections.
+func (s *mockStorage) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string, metadata map[string]string) (*storage.Object, error) {
+	return nil, storage.ErrObjectNotFound
 }
 
 func newHandlerWithMock() *Handler {

@@ -581,6 +581,21 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 	if metadataDirective == "" {
 		metadataDirective = "COPY"
 	}
+	// H-10: reject unknown metadata-directive values. The historical
+	// behaviour treated anything except "COPY" as REPLACE, silently
+	// honouring typos and attacker-supplied junk as a metadata rewrite.
+	if metadataDirective != "COPY" && metadataDirective != "REPLACE" {
+		WriteErrorWithResource(w, ErrInvalidArgument, "/"+dstBucket+"/"+dstKey)
+		return
+	}
+	// H-10: AWS S3 rejects a self-copy (src == dst, including bucket) with
+	// metadata-directive=COPY because the request would be a no-op rewrite
+	// with nothing to change. Mirror that behaviour so misbehaving clients
+	// surface the issue instead of triggering pointless writes.
+	if metadataDirective == "COPY" && srcBucket == dstBucket && srcKey == dstKey {
+		WriteErrorWithResource(w, ErrInvalidRequest, "/"+dstBucket+"/"+dstKey)
+		return
+	}
 
 	var metadata map[string]string
 	if metadataDirective == "REPLACE" {
