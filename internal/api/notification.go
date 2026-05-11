@@ -90,6 +90,7 @@ func (h *Handler) PutBucketNotification(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	w.Header().Set("Content-Length", "0")
 	w.WriteHeader(http.StatusOK)
 }
 
