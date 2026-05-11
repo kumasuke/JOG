@@ -442,6 +442,51 @@ func TestConstantTimeHexEqual_MatchAndMismatch(t *testing.T) {
 	}
 }
 
+// TestWrap_CORSPreflightBypassesAuth verifies that CORS preflight requests
+// (OPTIONS with Origin + Access-Control-Request-Method) are passed through
+// to the next handler without authentication (H-5). Browsers cannot attach
+// SigV4 credentials to preflights, so a 403 here would block any cross-origin
+// access to a publicly-CORS-enabled bucket.
+func TestWrap_CORSPreflightBypassesAuth(t *testing.T) {
+	m := NewMiddleware("access", "secret")
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodOptions, "/bucket/key", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	rec := httptest.NewRecorder()
+	m.Wrap(next).ServeHTTP(rec, req)
+
+	if !called {
+		t.Fatal("CORS preflight was blocked by auth middleware; next handler not called")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+// TestWrap_OptionsWithoutCORSHeadersStillRequiresAuth confirms that a plain
+// OPTIONS request without the preflight indicator headers still requires
+// authentication. The bypass must be narrowly scoped to actual preflights.
+func TestWrap_OptionsWithoutCORSHeadersStillRequiresAuth(t *testing.T) {
+	m := NewMiddleware("access", "secret")
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next handler should not be invoked when auth fails")
+	})
+
+	req := httptest.NewRequest(http.MethodOptions, "/bucket/key", nil)
+	rec := httptest.NewRecorder()
+	m.Wrap(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d (AccessDenied)", rec.Code, http.StatusForbidden)
+	}
+}
+
 func TestDisabledMiddlewareReturnsOriginalHandler(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

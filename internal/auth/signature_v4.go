@@ -32,6 +32,16 @@ func NewMiddleware(accessKey, secretKey string) *Middleware {
 // Wrap wraps an HTTP handler with authentication.
 func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// H-5: CORS preflight requests cannot carry SigV4 credentials
+		// (browsers strip them on OPTIONS), so requiring auth here would
+		// make any cross-origin access impossible even for buckets with
+		// a permissive CORS policy. Bypass only the narrow signature:
+		// OPTIONS with both Origin and Access-Control-Request-Method.
+		if isCORSPreflight(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Check for Authorization header
 		auth := r.Header.Get("Authorization")
 		var ctx *sigCtx
@@ -478,6 +488,16 @@ func (m *Middleware) verifyPresignedURL(r *http.Request) (*sigCtx, *api.S3Error)
 		scope:             date + "/" + region + "/" + service + "/aws4_request",
 		payloadHashHeader: payloadHashHeader,
 	}, nil
+}
+
+// isCORSPreflight reports whether r is a CORS preflight request. A
+// preflight is OPTIONS + Origin + Access-Control-Request-Method (the
+// trio browsers always send together). A bare OPTIONS without these
+// headers does not qualify and still requires authentication.
+func isCORSPreflight(r *http.Request) bool {
+	return r.Method == http.MethodOptions &&
+		r.Header.Get("Origin") != "" &&
+		r.Header.Get("Access-Control-Request-Method") != ""
 }
 
 // containsSignedHeader reports whether name (lower-case) appears in the
