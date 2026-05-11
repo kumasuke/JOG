@@ -49,8 +49,12 @@ COPY docker/entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh
 
-# Create data directory
-RUN mkdir -p /data
+# H-8: run as a non-root, unprivileged user. UID/GID 10001 is high enough to
+# avoid collisions with host users in bind-mount scenarios.
+RUN addgroup -S -g 10001 jog \
+    && adduser -S -D -H -u 10001 -G jog -s /sbin/nologin jog \
+    && mkdir -p /data \
+    && chown -R jog:jog /data /etc/litestream.yml
 
 # Default environment variables
 ENV JOG_SERVER_PORT=9000
@@ -59,5 +63,7 @@ ENV JOG_LOGGING_LEVEL=info
 
 VOLUME /data
 EXPOSE 9000
+
+USER jog:jog
 
 ENTRYPOINT ["/entrypoint.sh"]
