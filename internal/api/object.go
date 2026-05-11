@@ -157,6 +157,19 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 	// Check if versioning is enabled
 	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
 
+	// CR-5: on a non-versioned bucket a PUT to an existing key permanently
+	// replaces the prior object, which would silently bypass Object Lock.
+	// Enforce retention/legal-hold here before any bytes are written.
+	// (On a versioned bucket the prior locked version is preserved as a
+	// non-current version, so overwriting is not a lock violation.)
+	if versioningStatus != storage.VersioningStatusEnabled {
+		bypassGovernance := parseBypassGovernanceHeader(r.Header.Get("x-amz-bypass-governance-retention"))
+		if s3Err := h.evaluateObjectLock(r.Context(), bucket, key, bypassGovernance); s3Err != nil {
+			WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+			return
+		}
+	}
+
 	var obj *storage.Object
 	var versionID string
 
@@ -463,6 +476,16 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("x-amz-delete-marker", "true")
 		}
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// CR-5: enforce Object Lock before deleting. On a non-versioned bucket
+	// the DELETE permanently removes the object, so retention/legal-hold
+	// must be honoured here (the versioned branch creates a delete marker
+	// and intentionally remains permissive in this batch).
+	bypassGovernance := parseBypassGovernanceHeader(r.Header.Get("x-amz-bypass-governance-retention"))
+	if s3Err := h.evaluateObjectLock(r.Context(), bucket, key, bypassGovernance); s3Err != nil {
+		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
 		return
 	}
 
