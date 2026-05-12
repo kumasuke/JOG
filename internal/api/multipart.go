@@ -370,6 +370,37 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 		return parts[i].PartNumber < parts[j].PartNumber
 	})
 
+	// Canonical-error ordering: validate the uploadId BEFORE evaluating
+	// Object Lock. Otherwise a Complete with a stale / aborted / fabricated
+	// uploadId would surface AccessDenied (from the lock check) instead of
+	// the spec-mandated NoSuchUpload, breaking SDK error-handling code
+	// that branches on that code. ListParts is the cheapest read-only
+	// primitive on the Storage interface that combines uploadId existence
+	// + (bucket, key) matching, returning ErrUploadNotFound on any
+	// mismatch.
+	if _, listErr := h.storage.ListParts(r.Context(), &storage.ListPartsInput{
+		Bucket:   bucket,
+		Key:      key,
+		UploadID: uploadID,
+		MaxParts: 1,
+	}); listErr != nil {
+		switch {
+		case errors.Is(listErr, storage.ErrUploadNotFound):
+			WriteErrorWithResource(w, ErrNoSuchUpload, "/"+bucket+"/"+key)
+			return
+		case errors.Is(listErr, storage.ErrBucketNotFound):
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		case errors.Is(listErr, storage.ErrInvalidKey):
+			WriteErrorWithResource(w, ErrInvalidArgument, "/"+bucket+"/"+key)
+			return
+		default:
+			log.Error().Err(listErr).Str("bucket", bucket).Str("key", key).Str("uploadId", uploadID).Msg("ListParts failed during CompleteMultipartUpload pre-check")
+			WriteErrorWithResource(w, ErrInternalError, "/"+bucket+"/"+key)
+			return
+		}
+	}
+
 	// H-1: CompleteMultipartUpload finishes by replacing whatever is at the
 	// destination key (storage.CompleteMultipartUpload routes through the
 	// same metadata.PutObject path used by single-shot PUT, which

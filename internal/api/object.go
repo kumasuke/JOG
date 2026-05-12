@@ -649,6 +649,31 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Canonical-error ordering: validate the source object's existence
+	// BEFORE evaluating the destination's Object Lock. Otherwise a copy
+	// with a non-existent src would surface AccessDenied (from the dst
+	// lock check) instead of the spec-mandated NoSuchKey / NoSuchBucket,
+	// breaking SDK error-handling code that branches on those codes.
+	// Known client errors here are translated into the canonical S3
+	// responses; only a true backend failure is fail-closed.
+	if _, srcHeadErr := h.storage.HeadObject(r.Context(), srcBucket, srcKey); srcHeadErr != nil {
+		switch {
+		case errors.Is(srcHeadErr, storage.ErrObjectNotFound):
+			WriteErrorWithResource(w, ErrNoSuchKey, "/"+srcBucket+"/"+srcKey)
+			return
+		case errors.Is(srcHeadErr, storage.ErrBucketNotFound):
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+srcBucket)
+			return
+		case errors.Is(srcHeadErr, storage.ErrInvalidKey):
+			WriteErrorWithResource(w, ErrInvalidArgument, "/"+srcBucket+"/"+srcKey)
+			return
+		default:
+			log.Error().Err(srcHeadErr).Str("srcBucket", srcBucket).Str("srcKey", srcKey).Msg("HeadObject failed on source during CopyObject")
+			WriteErrorWithResource(w, ErrInternalError, "/"+srcBucket+"/"+srcKey)
+			return
+		}
+	}
+
 	// CR-5: a CopyObject that targets an existing destination key replaces
 	// the live row in metadata.PutObject, which unconditionally clears
 	// object_retention / object_legal_hold (PK'd on (bucket, key) without a

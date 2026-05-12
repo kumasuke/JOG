@@ -1955,3 +1955,92 @@ func TestCompleteMultipartUpload_VersioningEnabledStillEnforcesObjectLock(t *tes
 		UploadId: createResult.UploadId,
 	})
 }
+
+// TestCopyObject_VersioningEnabled_NonExistentSourceReturnsNoSuchKey verifies
+// canonical-error ordering: when the destination is locked but the source
+// key does not exist, the response must be NoSuchKey (404), not AccessDenied
+// (403). SDK error-handling code branches on the error code, so a regression
+// to AccessDenied here would silently break clients that retry on NoSuchKey.
+func TestCopyObject_VersioningEnabled_NonExistentSourceReturnsNoSuchKey(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName, dstKey, _, cleanup := versioningEnabledLockedBucket(t, ts, "destination-original")
+	defer cleanup()
+
+	// src key does NOT exist (bucket exists, key does not).
+	_, err := client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(dstKey),
+		CopySource: aws.String(bucketName + "/non-existent-src-key"),
+	})
+	require.Error(t, err)
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "NoSuchKey", apiErr.ErrorCode(),
+			"missing source must surface NoSuchKey, not AccessDenied from the dst lock check")
+	}
+}
+
+// TestCopyObject_VersioningEnabled_NonExistentSourceBucketReturnsNoSuchBucket
+// verifies canonical-error ordering when the source bucket itself does not
+// exist: the response must be NoSuchBucket, not AccessDenied.
+func TestCopyObject_VersioningEnabled_NonExistentSourceBucketReturnsNoSuchBucket(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName, dstKey, _, cleanup := versioningEnabledLockedBucket(t, ts, "destination-original")
+	defer cleanup()
+
+	missingSrcBucket := "missing-" + testutil.RandomBucketName()
+	_, err := client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(dstKey),
+		CopySource: aws.String(missingSrcBucket + "/any-key"),
+	})
+	require.Error(t, err)
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "NoSuchBucket", apiErr.ErrorCode(),
+			"missing source bucket must surface NoSuchBucket, not AccessDenied from the dst lock check")
+	}
+}
+
+// TestCompleteMultipartUpload_VersioningEnabled_NonExistentUploadIdReturnsNoSuchUpload
+// verifies canonical-error ordering for the multipart finish path: when the
+// destination key is locked but the supplied uploadId does not exist (or is
+// stale/aborted), the response must be NoSuchUpload, not AccessDenied.
+func TestCompleteMultipartUpload_VersioningEnabled_NonExistentUploadIdReturnsNoSuchUpload(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName, objectKey, _, cleanup := versioningEnabledLockedBucket(t, ts, "v1-locked")
+	defer cleanup()
+
+	// Fabricated uploadId — never created on this bucket+key.
+	_, err := client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(objectKey),
+		UploadId: aws.String("fabricated-upload-id"),
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: []types.CompletedPart{
+				{PartNumber: aws.Int32(1), ETag: aws.String("\"deadbeef\"")},
+			},
+		},
+	})
+	require.Error(t, err)
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "NoSuchUpload", apiErr.ErrorCode(),
+			"non-existent uploadId must surface NoSuchUpload, not AccessDenied from the lock check")
+	}
+}
