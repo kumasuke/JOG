@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +19,37 @@ import (
 // mockStorage is a minimal storage.Storage stub for limit tests.
 type mockStorage struct {
 	storage.Storage
+}
+
+// CopyObject is implemented on the mock so handler tests that reach the
+// storage call (after validation succeeds) do not panic on the unembedded
+// interface; it returns ErrObjectNotFound so the handler converts it into a
+// NoSuchKey response that tests can distinguish from validation rejections.
+func (s *mockStorage) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string, metadata map[string]string) (*storage.Object, error) {
+	return nil, storage.ErrObjectNotFound
+}
+
+// GetBucketVersioning lets the CR-5 evaluation paths in PutObject /
+// DeleteObject / DeleteObjects / CopyObject reach the storage call instead
+// of nil-deref'ing the embedded interface. Defaulting to "Disabled" means
+// the lock-evaluation branch is the one being exercised in tests below.
+func (s *mockStorage) GetBucketVersioning(ctx context.Context, bucket string) (storage.VersioningStatus, error) {
+	return storage.VersioningStatusDisabled, nil
+}
+
+// HeadObject is needed by the CR-5 destination check in CopyObject.
+// Returning ErrObjectNotFound mimics "destination key does not yet exist",
+// so the lock evaluation is correctly skipped (nothing to protect).
+func (s *mockStorage) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	return nil, storage.ErrObjectNotFound
+}
+
+// GetObjectLockConfiguration is invoked from evaluateObjectLock as the
+// short-circuit "is the bucket Object-Lock-enabled at all?" check.
+// Returning nil means the helper exits early as a no-op, which matches
+// the standard test-bucket setup used by the limit/copy tests.
+func (s *mockStorage) GetObjectLockConfiguration(ctx context.Context, bucket string) (*storage.ObjectLockConfiguration, error) {
+	return nil, nil
 }
 
 func newHandlerWithMock() *Handler {
@@ -271,6 +304,50 @@ func TestCompleteMultipartUpload_BodyTooLarge(t *testing.T) {
 	}
 }
 
+// TestPutObject_ContentLengthExceedsMax verifies that PutObject rejects
+// requests whose declared Content-Length exceeds MaxPutObjectSize before
+// the body is read (H-11). This prevents a single-PUT upload from
+// consuming unbounded disk space.
+func TestPutObject_ContentLengthExceedsMax(t *testing.T) {
+	h := newHandlerWithMock()
+
+	req := httptest.NewRequest(http.MethodPut, "/test-bucket/test-key", strings.NewReader(""))
+	req.ContentLength = MaxPutObjectSize + 1
+	req = setContext(req, "test-bucket", "test-key")
+	rr := httptest.NewRecorder()
+
+	h.PutObject(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+	code := parseS3ErrorCode(t, rr.Body.String())
+	if code != "EntityTooLarge" {
+		t.Fatalf("error code = %q, want %q", code, "EntityTooLarge")
+	}
+}
+
+// TestUploadPart_ContentLengthExceedsMax verifies that UploadPart rejects
+// requests whose declared Content-Length exceeds MaxUploadPartSize (H-11).
+func TestUploadPart_ContentLengthExceedsMax(t *testing.T) {
+	h := newHandlerWithMock()
+
+	req := httptest.NewRequest(http.MethodPut, "/test-bucket/test-key?partNumber=1&uploadId=abc", strings.NewReader(""))
+	req.ContentLength = MaxUploadPartSize + 1
+	req = setContext(req, "test-bucket", "test-key")
+	rr := httptest.NewRecorder()
+
+	h.UploadPart(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+	code := parseS3ErrorCode(t, rr.Body.String())
+	if code != "EntityTooLarge" {
+		t.Fatalf("error code = %q, want %q", code, "EntityTooLarge")
+	}
+}
+
 // TestIsBodyTooLarge verifies the isBodyTooLarge helper correctly identifies MaxBytesError.
 func TestIsBodyTooLarge(t *testing.T) {
 	// Simulate what MaxBytesReader returns when limit is exceeded
@@ -282,4 +359,29 @@ func TestIsBodyTooLarge(t *testing.T) {
 	_, err := limited.Read(buf)
 	require.Error(t, err)
 	assert.True(t, isBodyTooLarge(err), "isBodyTooLarge should return true for MaxBytesError")
+}
+
+// failClosedLockStorage embeds the limit-test mockStorage and overrides
+// GetObjectLockConfiguration to return an arbitrary non-sentinel error,
+// modelling a transient DB outage. evaluateObjectLock must treat this as
+// deny (M-2 fail-closed) rather than the legacy fail-open.
+type failClosedLockStorage struct {
+	mockStorage
+}
+
+var errLockBackend = errors.New("simulated lock-config backend failure")
+
+func (s *failClosedLockStorage) GetObjectLockConfiguration(ctx context.Context, bucket string) (*storage.ObjectLockConfiguration, error) {
+	return nil, errLockBackend
+}
+
+// TestEvaluateObjectLock_GetObjectLockConfigurationErrorFailClosed verifies
+// that an unexpected error from GetObjectLockConfiguration deny-lists the
+// destructive op (M-2). Sentinel "no configuration" errors must continue
+// to allow.
+func TestEvaluateObjectLock_GetObjectLockConfigurationErrorFailClosed(t *testing.T) {
+	h := &Handler{storage: &failClosedLockStorage{}}
+	got := h.evaluateObjectLock(context.Background(), "any-bucket", "any-key", false)
+	require.NotNil(t, got, "non-sentinel storage error must deny via AccessDenied")
+	assert.Equal(t, ErrAccessDenied, got)
 }

@@ -110,6 +110,12 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, ErrMissingContentLength)
 		return
 	}
+	// H-11: reject oversized uploads before reading any body bytes so a
+	// single client cannot exhaust disk by declaring a huge Content-Length.
+	if contentLength > MaxPutObjectSize {
+		WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket+"/"+key)
+		return
+	}
 
 	// Check for aws-chunked encoding (streaming payload signature). The
 	// auth middleware has already swapped r.Body for a ChunkedReader that
@@ -150,6 +156,19 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 
 	// Check if versioning is enabled
 	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
+
+	// CR-5: a PUT to an existing key replaces the live metadata row
+	// (metadata.PutObject unconditionally clears object_retention /
+	// object_legal_hold, which are PK'd on (bucket, key) without a
+	// version_id column). That means the lock metadata is destroyed on
+	// overwrite regardless of versioning status. Until storage learns to
+	// preserve / version lock state, enforce retention + legal-hold here
+	// unconditionally — versioning Enabled is NOT a safe carve-out.
+	bypassGovernance := parseBypassGovernanceHeader(r.Header.Get("x-amz-bypass-governance-retention"))
+	if s3Err := h.evaluateObjectLock(r.Context(), bucket, key, bypassGovernance); s3Err != nil {
+		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+		return
+	}
 
 	var obj *storage.Object
 	var versionID string
@@ -429,6 +448,24 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 	// Check if versioning is enabled
 	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
 
+	// CR-5: enforce Object Lock before deleting. The storage layer's
+	// object_retention / object_legal_hold tables are PK'd on (bucket, key)
+	// with no version_id column, so on a versioned bucket the metadata
+	// row protecting the current version still applies to any unversioned
+	// DELETE. S3 spec also requires retention/legal-hold to be evaluated
+	// on the current version when versionId is not supplied. A
+	// version-targeted DELETE (versionId != "") is a separate semantic
+	// (delete-specific-version requires the per-version retention API
+	// which we don't yet model) and intentionally remains permissive in
+	// this batch.
+	if versionID == "" {
+		bypassGovernance := parseBypassGovernanceHeader(r.Header.Get("x-amz-bypass-governance-retention"))
+		if s3Err := h.evaluateObjectLock(r.Context(), bucket, key, bypassGovernance); s3Err != nil {
+			WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+			return
+		}
+	}
+
 	if versioningStatus == storage.VersioningStatusEnabled || versionID != "" {
 		// Use versioned delete
 		returnedVersionID, isDeleteMarker, err := h.storage.DeleteObjectVersioned(r.Context(), bucket, key, versionID)
@@ -493,10 +530,26 @@ func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract keys from request
-	keys := make([]string, len(deleteReq.Objects))
-	for i, obj := range deleteReq.Objects {
-		keys[i] = obj.Key
+	// CR-5: enforce Object Lock per-key, regardless of versioning. The
+	// storage layer's object_retention / object_legal_hold tables are
+	// PK'd on (bucket, key) with no version_id column, so a DeleteObjects
+	// batch on a versioned bucket would still wipe the live row (and the
+	// associated lock state) without this gate. Versioning Enabled was
+	// previously treated as a carve-out; that was a bypass, not a feature.
+	bypassGovernance := parseBypassGovernanceHeader(r.Header.Get("x-amz-bypass-governance-retention"))
+
+	keys := make([]string, 0, len(deleteReq.Objects))
+	lockErrs := make([]storage.DeleteError, 0)
+	for _, obj := range deleteReq.Objects {
+		if s3Err := h.evaluateObjectLock(r.Context(), bucket, obj.Key, bypassGovernance); s3Err != nil {
+			lockErrs = append(lockErrs, storage.DeleteError{
+				Key:     obj.Key,
+				Code:    s3Err.Code,
+				Message: s3Err.Message,
+			})
+			continue
+		}
+		keys = append(keys, obj.Key)
 	}
 
 	// Delete objects
@@ -508,6 +561,11 @@ func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request) {
 		}
 		WriteError(w, ErrInternalError)
 		return
+	}
+
+	// Merge per-key lock-denied errors with storage errors.
+	if len(lockErrs) > 0 {
+		errs = append(lockErrs, errs...)
 	}
 
 	// Build response
@@ -574,6 +632,85 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 	metadataDirective := r.Header.Get("x-amz-metadata-directive")
 	if metadataDirective == "" {
 		metadataDirective = "COPY"
+	}
+	// H-10: reject unknown metadata-directive values. The historical
+	// behaviour treated anything except "COPY" as REPLACE, silently
+	// honouring typos and attacker-supplied junk as a metadata rewrite.
+	if metadataDirective != "COPY" && metadataDirective != "REPLACE" {
+		WriteErrorWithResource(w, ErrInvalidArgument, "/"+dstBucket+"/"+dstKey)
+		return
+	}
+	// H-10: AWS S3 rejects a self-copy (src == dst, including bucket) with
+	// metadata-directive=COPY because the request would be a no-op rewrite
+	// with nothing to change. Mirror that behaviour so misbehaving clients
+	// surface the issue instead of triggering pointless writes.
+	if metadataDirective == "COPY" && srcBucket == dstBucket && srcKey == dstKey {
+		WriteErrorWithResource(w, ErrInvalidRequest, "/"+dstBucket+"/"+dstKey)
+		return
+	}
+
+	// Canonical-error ordering: validate the source object's existence
+	// BEFORE evaluating the destination's Object Lock. Otherwise a copy
+	// with a non-existent src would surface AccessDenied (from the dst
+	// lock check) instead of the spec-mandated NoSuchKey / NoSuchBucket,
+	// breaking SDK error-handling code that branches on those codes.
+	// Known client errors here are translated into the canonical S3
+	// responses; only a true backend failure is fail-closed.
+	if _, srcHeadErr := h.storage.HeadObject(r.Context(), srcBucket, srcKey); srcHeadErr != nil {
+		switch {
+		case errors.Is(srcHeadErr, storage.ErrObjectNotFound):
+			WriteErrorWithResource(w, ErrNoSuchKey, "/"+srcBucket+"/"+srcKey)
+			return
+		case errors.Is(srcHeadErr, storage.ErrBucketNotFound):
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+srcBucket)
+			return
+		case errors.Is(srcHeadErr, storage.ErrInvalidKey):
+			WriteErrorWithResource(w, ErrInvalidArgument, "/"+srcBucket+"/"+srcKey)
+			return
+		default:
+			log.Error().Err(srcHeadErr).Str("srcBucket", srcBucket).Str("srcKey", srcKey).Msg("HeadObject failed on source during CopyObject")
+			WriteErrorWithResource(w, ErrInternalError, "/"+srcBucket+"/"+srcKey)
+			return
+		}
+	}
+
+	// CR-5: a CopyObject that targets an existing destination key replaces
+	// the live row in metadata.PutObject, which unconditionally clears
+	// object_retention / object_legal_hold (PK'd on (bucket, key) without a
+	// version_id column). The lock metadata is destroyed on overwrite
+	// regardless of destination versioning, so the versioning Enabled
+	// carve-out was a bypass. Honour the destination object's retention /
+	// legal hold before the storage layer rewrites it.
+	//
+	// M-2 follow-up: only a true (non-sentinel) HeadObject failure is
+	// fail-closed. The known client-facing errors (object/bucket missing,
+	// invalid key) must NOT be remapped to InternalError here — they are
+	// not lock violations, and the downstream storage.CopyObject call will
+	// translate them into the canonical S3 responses (NoSuchBucket,
+	// NoSuchKey, InvalidArgument). Returning 500 here would silently
+	// regress those well-formed error responses to 500s.
+	_, headErr := h.storage.HeadObject(r.Context(), dstBucket, dstKey)
+	switch {
+	case headErr == nil:
+		bypassGovernance := parseBypassGovernanceHeader(r.Header.Get("x-amz-bypass-governance-retention"))
+		if s3Err := h.evaluateObjectLock(r.Context(), dstBucket, dstKey, bypassGovernance); s3Err != nil {
+			WriteErrorWithResource(w, s3Err, "/"+dstBucket+"/"+dstKey)
+			return
+		}
+	case errors.Is(headErr, storage.ErrObjectNotFound),
+		errors.Is(headErr, storage.ErrBucketNotFound),
+		errors.Is(headErr, storage.ErrInvalidKey):
+		// Known client-facing conditions: nothing to protect (or the
+		// downstream call will fail with the appropriate S3 error).
+		// Skip the lock evaluation and let storage.CopyObject return
+		// the canonical NoSuchBucket / NoSuchKey / InvalidArgument.
+	default:
+		// True backend failure (e.g. metadata DB outage). Fail-closed
+		// so a transient issue cannot silently allow an overwrite of
+		// a locked destination.
+		log.Error().Err(headErr).Str("bucket", dstBucket).Str("key", dstKey).Msg("HeadObject failed during CopyObject lock check")
+		WriteErrorWithResource(w, ErrInternalError, "/"+dstBucket+"/"+dstKey)
+		return
 	}
 
 	var metadata map[string]string

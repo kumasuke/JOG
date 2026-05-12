@@ -295,3 +295,44 @@ The following operations are specific to AWS infrastructure and are not planned:
 - JOG uses path-style URLs only (e.g., `http://localhost:9000/bucket/key`)
 - Virtual-hosted style URLs are not supported
 - AWS Signature V4 authentication is supported
+
+### Security Limitations
+
+#### Bucket Policy is stored but NOT enforced (CR-7)
+
+`PutBucketPolicy` / `GetBucketPolicy` / `DeleteBucketPolicy` accept and
+return policy documents so AWS SDKs that expect these calls to succeed
+do not crash, but JOG **does not evaluate the policy when making any
+access-control decision**. The only authentication and authorisation in
+effect is AWS Signature V4 against the single root credential pair
+configured via `JOG_AUTH_ACCESS_KEY` / `JOG_AUTH_SECRET_KEY`.
+
+Implications:
+
+- A `"Principal": "*"` / `"Effect": "Allow"` statement does **not** make
+  objects publicly readable. Anonymous requests are still rejected.
+- A `"Effect": "Deny"` statement does **not** block anything. Requests
+  signed with the root credential succeed regardless of the policy
+  (including `NotPrincipal`, `IpAddress`, `aws:SecureTransport`, MFA
+  conditions, etc.).
+- Cross-account principals, IAM users/roles, and federated identities
+  are not modeled — JOG has no concept of additional principals.
+- Condition keys (`s3:x-amz-server-side-encryption`,
+  `aws:MultiFactorAuthAge`, `aws:SourceIp`, …) are silently ignored.
+
+If you need real S3-style policy enforcement, place JOG behind an
+authorisation proxy (e.g. an API gateway or a reverse proxy with a
+policy decision point) and do not expose the JOG endpoint directly.
+
+#### Other compatibility-only handlers
+
+The following endpoints persist or return configuration for SDK
+compatibility but do not produce the corresponding runtime behaviour:
+
+- `PutBucketAcl` / `GetBucketAcl` / `PutObjectAcl` / `GetObjectAcl` —
+  ACLs are stored but not enforced for access control.
+- `PutPublicAccessBlock` / `GetPublicAccessBlock` — not implemented;
+  see Access Control table above.
+- `PutBucketCors` / `GetBucketCors` — the stored CORS configuration is
+  served back, but JOG does not synthesise `Access-Control-Allow-*`
+  response headers from it on cross-origin requests.

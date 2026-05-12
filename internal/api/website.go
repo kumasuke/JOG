@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/kumasuke/jog/internal/storage"
 	"github.com/rs/zerolog/log"
@@ -273,8 +274,16 @@ func validateWebsiteConfig(config *WebsiteConfigurationXML) *S3Error {
 	}
 
 	// RedirectAllRequestsTo must have a non-empty HostName
-	if hasRedirectAll && config.RedirectAllRequestsTo.HostName == "" {
-		return ErrInvalidRequest
+	if hasRedirectAll {
+		if config.RedirectAllRequestsTo.HostName == "" {
+			return ErrInvalidRequest
+		}
+		if !isValidRedirectHostName(config.RedirectAllRequestsTo.HostName) {
+			return ErrInvalidRequest
+		}
+		if !isValidRedirectProtocol(config.RedirectAllRequestsTo.Protocol) {
+			return ErrInvalidRequest
+		}
 	}
 
 	// Validate routing rules
@@ -284,8 +293,61 @@ func validateWebsiteConfig(config *WebsiteConfigurationXML) *S3Error {
 			if rule.Redirect == nil {
 				return ErrInvalidRequest
 			}
+			if rule.Redirect.HostName != "" && !isValidRedirectHostName(rule.Redirect.HostName) {
+				return ErrInvalidRequest
+			}
+			if !isValidRedirectProtocol(rule.Redirect.Protocol) {
+				return ErrInvalidRequest
+			}
+			if !isValidHTTPRedirectCode(rule.Redirect.HttpRedirectCode) {
+				return ErrInvalidRequest
+			}
 		}
 	}
 
 	return nil
+}
+
+// isValidRedirectProtocol reports whether p is an acceptable Protocol value
+// for a website redirect. Empty (use the request's protocol) is allowed;
+// otherwise only "http" or "https" are accepted. Why: this value is
+// concatenated into the Location response header, so allowing "javascript"
+// or other URI schemes here would enable reflected XSS (H-12).
+func isValidRedirectProtocol(p string) bool {
+	switch p {
+	case "", "http", "https":
+		return true
+	default:
+		return false
+	}
+}
+
+// isValidRedirectHostName reports whether host is a syntactically plausible
+// hostname for a redirect target. It rejects values that contain characters
+// which would let an attacker break out of the Host portion of the Location
+// URL: CR/LF (HTTP response splitting), '/' '?' '#' '@' ':' (path/query/
+// userinfo/scheme injection), and whitespace. Why: HostName is concatenated
+// into the redirect URL with minimal escaping (H-12).
+func isValidRedirectHostName(host string) bool {
+	if host == "" {
+		return false
+	}
+	if strings.ContainsAny(host, "\r\n\t /?#@: \\") {
+		return false
+	}
+	return true
+}
+
+// isValidHTTPRedirectCode reports whether code (the string form sent in the
+// XML) is one of the 3xx values S3 documents as supported. Empty is allowed
+// because the field is optional and defaults to 301. Why: feeding an
+// arbitrary status to w.WriteHeader breaks the redirect contract and is
+// an avenue for response manipulation (H-12).
+func isValidHTTPRedirectCode(code string) bool {
+	switch code {
+	case "", "301", "302", "303", "307", "308":
+		return true
+	default:
+		return false
+	}
 }

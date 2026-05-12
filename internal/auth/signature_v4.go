@@ -3,16 +3,31 @@ package auth
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/kumasuke/jog/internal/api"
 )
+
+// hmacCompareKey is a process-local random key used by constantTimeHexEqual
+// to fold both inputs into fixed-size HMAC digests before constant-time
+// comparison (H-2). The key is unknown to attackers and changes per process,
+// so the digest of "provided" reveals no information about its length or
+// contents that could be correlated across runs.
+var hmacCompareKey [32]byte
+
+func init() {
+	if _, err := io.ReadFull(rand.Reader, hmacCompareKey[:]); err != nil {
+		panic("auth: failed to seed constant-time compare key: " + err.Error())
+	}
+}
 
 // Middleware handles AWS Signature V4 authentication.
 type Middleware struct {
@@ -31,33 +46,42 @@ func NewMiddleware(accessKey, secretKey string) *Middleware {
 // Wrap wraps an HTTP handler with authentication.
 func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// H-5: CORS preflight requests cannot carry SigV4 credentials
+		// (browsers strip them on OPTIONS), so requiring auth here would
+		// make any cross-origin access impossible even for buckets with
+		// a permissive CORS policy. Bypass only the narrow signature:
+		// OPTIONS with both Origin and Access-Control-Request-Method.
+		if isCORSPreflight(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Check for Authorization header
 		auth := r.Header.Get("Authorization")
+		var ctx *sigCtx
+		var s3err *api.S3Error
 		if auth == "" {
 			// Check for query string auth (presigned URL)
-			if r.URL.Query().Get("X-Amz-Algorithm") != "" {
-				if err := m.verifyPresignedURL(r); err != nil {
-					api.WriteError(w, err)
-					return
-				}
-				next.ServeHTTP(w, r)
+			if r.URL.Query().Get("X-Amz-Algorithm") == "" {
+				api.WriteError(w, api.ErrAccessDenied)
 				return
 			}
-			api.WriteError(w, api.ErrAccessDenied)
+			ctx, s3err = m.verifyPresignedURL(r)
+		} else {
+			ctx, s3err = m.verifySignatureV4(r, auth)
+		}
+		if s3err != nil {
+			api.WriteError(w, s3err)
 			return
 		}
 
-		// Parse and verify AWS Signature V4
-		ctx, err := m.verifySignatureV4(r, auth)
-		if err != nil {
-			api.WriteError(w, err)
-			return
-		}
-
-		// CR-2/CR-3: wrap r.Body so the payload is bound to the verified
-		// signature. wrapPayload returns the request unchanged if the
-		// payload hash is UNSIGNED-PAYLOAD or the body is empty.
-		if r.Body != nil && r.ContentLength != 0 {
+		// CR-2/CR-3 + H-1: wrap r.Body so the payload is bound to the
+		// verified signature. wrapPayload returns the request unchanged
+		// if the payload hash is UNSIGNED-PAYLOAD or the body is empty.
+		// For presigned URLs this only kicks in when the client included
+		// X-Amz-Content-SHA256 in SignedHeaders (otherwise ctx's payload
+		// hash is empty and wrapPayload short-circuits).
+		if ctx != nil && r.Body != nil && r.ContentLength != 0 {
 			if err := wrapPayload(r, ctx); err != nil {
 				api.WriteError(w, err)
 				return
@@ -157,8 +181,12 @@ func (m *Middleware) verifySignatureV4(r *http.Request, auth string) (*sigCtx, *
 	// Calculate expected signature
 	expectedSignature := m.calculateSignature(r, date, region, service, signedHeaders)
 
-	// Compare signatures
-	if !hmac.Equal([]byte(expectedSignature), []byte(providedSignature)) {
+	// Compare signatures (H-2: hash both inputs through HMAC-SHA256 with a
+	// process-local random key so the comparison runs over equal-length
+	// digests, eliminating the length-mismatch timing leak that bare
+	// hmac.Equal / string equality would have on hex strings of different
+	// lengths). See constantTimeHexEqual for the full rationale.
+	if !constantTimeHexEqual(expectedSignature, providedSignature) {
 		return nil, api.ErrSignatureDoesNotMatch
 	}
 
@@ -307,7 +335,7 @@ func (p *payloadVerifyingReader) Read(b []byte) (int, error) {
 	if err == io.EOF {
 		p.done = true
 		got := hex.EncodeToString(p.hasher.Sum(nil))
-		if !hmac.Equal([]byte(got), []byte(strings.ToLower(p.expected))) {
+		if !constantTimeHexEqual(got, p.expected) {
 			return n, api.ErrPayloadHashMismatch
 		}
 	}
@@ -372,13 +400,43 @@ func isHex(s string) bool {
 	return true
 }
 
+// constantTimeHexEqual reports whether two hex-encoded strings represent
+// the same value, in a way that does not leak the length of "provided"
+// via timing (H-2).
+//
+// Naive `expected == provided` and `hmac.Equal(decoded(expected),
+// decoded(provided))` both short-circuit when input lengths differ:
+// hmac.Equal is subtle.ConstantTimeCompare which returns 0 immediately
+// when len(a) != len(b). For SigV4 expected is always 64 hex chars, so a
+// length-mismatched provided value can be distinguished from a same-
+// length wrong value by timing alone.
+//
+// We sidestep the early-return by hashing both inputs through HMAC-SHA256
+// with a process-local random key, producing fixed 32-byte digests, and
+// comparing those. The HMAC computation itself is roughly linear in input
+// length, but it processes the attacker-controlled provided string only,
+// so the only information leakable through timing is `len(provided)` —
+// which the attacker already knows. Comparison is then over equal-length
+// digests, eliminating the length-mismatch leak.
+//
+// Comparison is case-insensitive: SigV4 canonicalises signatures to
+// lower-case hex, but accepting upper-case keeps clients that use
+// strings.ToUpper-style helpers working without a separate length check.
+func constantTimeHexEqual(expected, provided string) bool {
+	h1 := hmac.New(sha256.New, hmacCompareKey[:])
+	h1.Write([]byte(strings.ToLower(expected)))
+	h2 := hmac.New(sha256.New, hmacCompareKey[:])
+	h2.Write([]byte(strings.ToLower(provided)))
+	return hmac.Equal(h1.Sum(nil), h2.Sum(nil))
+}
+
 // verifyPresignedURL verifies a presigned URL.
-func (m *Middleware) verifyPresignedURL(r *http.Request) *api.S3Error {
+func (m *Middleware) verifyPresignedURL(r *http.Request) (*sigCtx, *api.S3Error) {
 	query := r.URL.Query()
 
 	algorithm := query.Get("X-Amz-Algorithm")
 	if algorithm != "AWS4-HMAC-SHA256" {
-		return api.ErrAccessDenied
+		return nil, api.ErrAccessDenied
 	}
 
 	credential := query.Get("X-Amz-Credential")
@@ -387,14 +445,16 @@ func (m *Middleware) verifyPresignedURL(r *http.Request) *api.S3Error {
 	amzDate := query.Get("X-Amz-Date")
 	expires := query.Get("X-Amz-Expires")
 
-	if credential == "" || signedHeaders == "" || signature == "" || amzDate == "" {
-		return api.ErrAccessDenied
+	// H-1: X-Amz-Expires is required for presigned URLs. Missing or
+	// non-numeric values must not silently disable the expiry check.
+	if credential == "" || signedHeaders == "" || signature == "" || amzDate == "" || expires == "" {
+		return nil, api.ErrAccessDenied
 	}
 
 	// Parse credential
 	credParts := strings.Split(credential, "/")
 	if len(credParts) != 5 {
-		return api.ErrAccessDenied
+		return nil, api.ErrAccessDenied
 	}
 
 	accessKey := credParts[0]
@@ -403,22 +463,30 @@ func (m *Middleware) verifyPresignedURL(r *http.Request) *api.S3Error {
 	service := credParts[3]
 
 	if accessKey != m.accessKey {
-		return api.ErrInvalidAccessKeyId
+		return nil, api.ErrInvalidAccessKeyId
 	}
 
-	// Check expiration
+	// H-1: Validate X-Amz-Expires. AWS requires an integer in (0, 604800]
+	// (1 second to 7 days). Anything else is a malformed request.
+	expiresSec, err := strconv.ParseInt(expires, 10, 64)
+	if err != nil || expiresSec <= 0 || expiresSec > 604800 {
+		return nil, api.ErrAccessDenied
+	}
+
+	// Check expiration window
 	reqTime, err := time.Parse("20060102T150405Z", amzDate)
 	if err != nil {
-		return api.ErrAccessDenied
+		return nil, api.ErrAccessDenied
 	}
 
-	if expires != "" {
-		expiresSec, err := time.ParseDuration(expires + "s")
-		if err == nil {
-			if time.Since(reqTime) > expiresSec {
-				return api.ErrRequestTimeTooSkewed
-			}
-		}
+	now := time.Now().UTC()
+	// H-1: Reject requests whose Date is more than 15 minutes in the
+	// future. AWS enforces clock-skew bounds on both sides.
+	if reqTime.Sub(now) > 15*time.Minute {
+		return nil, api.ErrRequestTimeTooSkewed
+	}
+	if now.Sub(reqTime) > time.Duration(expiresSec)*time.Second {
+		return nil, api.ErrRequestTimeTooSkewed
 	}
 
 	// Create canonical request for presigned URL
@@ -429,11 +497,48 @@ func (m *Middleware) verifyPresignedURL(r *http.Request) *api.S3Error {
 
 	expectedSignature := m.calculatePresignedSignature(r, date, region, service, signedHeaders, amzDate)
 
-	if !hmac.Equal([]byte(expectedSignature), []byte(signature)) {
-		return api.ErrSignatureDoesNotMatch
+	if !constantTimeHexEqual(expectedSignature, signature) {
+		return nil, api.ErrSignatureDoesNotMatch
 	}
 
-	return nil
+	// H-1: when the client included X-Amz-Content-SHA256 in SignedHeaders
+	// the canonical request bound the body to the signature; propagate the
+	// header value so the Middleware.Wrap path can install a payload
+	// verifier (CR-3) for non-UNSIGNED-PAYLOAD hex digests.
+	payloadHashHeader := ""
+	if containsSignedHeader(signedHeaders, "x-amz-content-sha256") {
+		payloadHashHeader = r.Header.Get("X-Amz-Content-SHA256")
+	}
+
+	return &sigCtx{
+		seedSig:           signature,
+		signingKey:        m.getSigningKey(date, region, service),
+		amzDate:           amzDate,
+		scope:             date + "/" + region + "/" + service + "/aws4_request",
+		payloadHashHeader: payloadHashHeader,
+	}, nil
+}
+
+// isCORSPreflight reports whether r is a CORS preflight request. A
+// preflight is OPTIONS + Origin + Access-Control-Request-Method (the
+// trio browsers always send together). A bare OPTIONS without these
+// headers does not qualify and still requires authentication.
+func isCORSPreflight(r *http.Request) bool {
+	return r.Method == http.MethodOptions &&
+		r.Header.Get("Origin") != "" &&
+		r.Header.Get("Access-Control-Request-Method") != ""
+}
+
+// containsSignedHeader reports whether name (lower-case) appears in the
+// semicolon-separated SignedHeaders list. SignedHeaders is canonicalized
+// to lower-case by all AWS SDKs.
+func containsSignedHeader(signedHeaders, name string) bool {
+	for _, h := range strings.Split(signedHeaders, ";") {
+		if strings.EqualFold(strings.TrimSpace(h), name) {
+			return true
+		}
+	}
+	return false
 }
 
 // calculatePresignedSignature calculates signature for presigned URL.
@@ -452,6 +557,7 @@ func (m *Middleware) calculatePresignedSignature(r *http.Request, date, region, 
 	sort.Strings(headersList)
 
 	var canonicalHeaders strings.Builder
+	signedContentSHA := ""
 	for _, h := range headersList {
 		h = strings.ToLower(h)
 		var value string
@@ -460,13 +566,23 @@ func (m *Middleware) calculatePresignedSignature(r *http.Request, date, region, 
 		} else {
 			value = r.Header.Get(h)
 		}
+		if h == "x-amz-content-sha256" {
+			signedContentSHA = strings.TrimSpace(value)
+		}
 		canonicalHeaders.WriteString(h)
 		canonicalHeaders.WriteString(":")
 		canonicalHeaders.WriteString(strings.TrimSpace(value))
 		canonicalHeaders.WriteString("\n")
 	}
 
+	// H-1: if the client included X-Amz-Content-SHA256 in SignedHeaders the
+	// canonical request must use the header value (binding the payload to
+	// the signature); otherwise AWS defaults to UNSIGNED-PAYLOAD for query
+	// string auth.
 	payloadHash := "UNSIGNED-PAYLOAD"
+	if signedContentSHA != "" {
+		payloadHash = signedContentSHA
+	}
 
 	canonicalRequest := method + "\n" +
 		uri + "\n" +
