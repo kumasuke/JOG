@@ -653,16 +653,39 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 	// semantics as PUT). Honour the destination object's retention / legal
 	// hold before the storage layer rewrites it. (Versioned destinations
 	// preserve the prior locked version as a non-current version, so the
-	// overwrite is not a lock violation.) The check is skipped if the
-	// destination key does not yet exist — there is nothing to protect.
+	// overwrite is not a lock violation.)
+	//
+	// M-2 follow-up: only a true (non-sentinel) HeadObject failure is
+	// fail-closed. The known client-facing errors (object/bucket missing,
+	// invalid key) must NOT be remapped to InternalError here — they are
+	// not lock violations, and the downstream storage.CopyObject call will
+	// translate them into the canonical S3 responses (NoSuchBucket,
+	// NoSuchKey, InvalidArgument). Returning 500 here would silently
+	// regress those well-formed error responses to 500s.
 	dstVersioning, _ := h.storage.GetBucketVersioning(r.Context(), dstBucket)
 	if dstVersioning != storage.VersioningStatusEnabled {
-		if _, headErr := h.storage.HeadObject(r.Context(), dstBucket, dstKey); headErr == nil {
+		_, headErr := h.storage.HeadObject(r.Context(), dstBucket, dstKey)
+		switch {
+		case headErr == nil:
 			bypassGovernance := parseBypassGovernanceHeader(r.Header.Get("x-amz-bypass-governance-retention"))
 			if s3Err := h.evaluateObjectLock(r.Context(), dstBucket, dstKey, bypassGovernance); s3Err != nil {
 				WriteErrorWithResource(w, s3Err, "/"+dstBucket+"/"+dstKey)
 				return
 			}
+		case errors.Is(headErr, storage.ErrObjectNotFound),
+			errors.Is(headErr, storage.ErrBucketNotFound),
+			errors.Is(headErr, storage.ErrInvalidKey):
+			// Known client-facing conditions: nothing to protect (or the
+			// downstream call will fail with the appropriate S3 error).
+			// Skip the lock evaluation and let storage.CopyObject return
+			// the canonical NoSuchBucket / NoSuchKey / InvalidArgument.
+		default:
+			// True backend failure (e.g. metadata DB outage). Fail-closed
+			// so a transient issue cannot silently allow an overwrite of
+			// a locked destination.
+			log.Error().Err(headErr).Str("bucket", dstBucket).Str("key", dstKey).Msg("HeadObject failed during CopyObject lock check")
+			WriteErrorWithResource(w, ErrInternalError, "/"+dstBucket+"/"+dstKey)
+			return
 		}
 	}
 

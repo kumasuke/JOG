@@ -370,6 +370,46 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 		return parts[i].PartNumber < parts[j].PartNumber
 	})
 
+	// H-1: CompleteMultipartUpload finishes by replacing whatever is at the
+	// destination key, which on a non-versioned bucket means a permanent
+	// overwrite — the same destructive semantics as a single-shot PutObject.
+	// CR-5 already gates the PUT path; without this gate, any client could
+	// trivially bypass Object Lock by uploading the new payload as multipart
+	// instead. Versioned buckets are exempt: the prior locked version is
+	// preserved as a non-current version.
+	// Known client-facing HeadObject errors (no existing object, missing
+	// destination bucket, invalid key) must NOT be remapped to InternalError
+	// here — they are not lock violations, and the downstream storage
+	// CompleteMultipartUpload call will translate them into the canonical S3
+	// responses (NoSuchBucket / NoSuchUpload / InvalidArgument). Returning
+	// 500 here would silently regress those well-formed error responses.
+	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
+	if versioningStatus != storage.VersioningStatusEnabled {
+		_, headErr := h.storage.HeadObject(r.Context(), bucket, key)
+		switch {
+		case headErr == nil:
+			bypassGovernance := parseBypassGovernanceHeader(r.Header.Get("x-amz-bypass-governance-retention"))
+			if s3Err := h.evaluateObjectLock(r.Context(), bucket, key, bypassGovernance); s3Err != nil {
+				WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+				return
+			}
+		case errors.Is(headErr, storage.ErrObjectNotFound),
+			errors.Is(headErr, storage.ErrBucketNotFound),
+			errors.Is(headErr, storage.ErrInvalidKey):
+			// Known client-facing conditions: nothing to protect (or the
+			// downstream call will fail with the appropriate S3 error).
+			// Skip the lock evaluation and let the downstream call return
+			// the canonical NoSuchBucket / NoSuchUpload / InvalidArgument.
+		default:
+			// True backend failure (e.g. metadata DB outage). Fail-closed
+			// so a transient issue cannot silently allow an overwrite of
+			// a locked object via the multipart path.
+			log.Error().Err(headErr).Str("bucket", bucket).Str("key", key).Msg("HeadObject failed during CompleteMultipartUpload lock check")
+			WriteErrorWithResource(w, ErrInternalError, "/"+bucket+"/"+key)
+			return
+		}
+	}
+
 	obj, err := h.storage.CompleteMultipartUpload(r.Context(), bucket, key, uploadID, parts)
 	if err != nil {
 		if errors.Is(err, storage.ErrUploadNotFound) {

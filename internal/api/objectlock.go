@@ -176,6 +176,17 @@ func (h *Handler) PutObjectRetention(w http.ResponseWriter, r *http.Request) {
 		RetainUntilDate: retention.RetainUntilDate,
 	}
 
+	// C-1: enforce S3's retention-modification rules before INSERT OR REPLACE
+	// silently honours a downgrade or shortening. Without this gate, any
+	// authenticated client could replace an active COMPLIANCE retention with
+	// a near-past GOVERNANCE one and immediately delete the object — a full
+	// bypass of Object Lock with no warning.
+	bypassGovernance := parseBypassGovernanceHeader(r.Header.Get("x-amz-bypass-governance-retention"))
+	if s3Err := h.evaluateRetentionChange(r.Context(), bucket, key, storageRetention, bypassGovernance); s3Err != nil {
+		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+		return
+	}
+
 	// Store object retention
 	err = h.storage.PutObjectRetention(r.Context(), bucket, key, storageRetention)
 	if err != nil {

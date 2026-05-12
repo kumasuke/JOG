@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -358,4 +359,29 @@ func TestIsBodyTooLarge(t *testing.T) {
 	_, err := limited.Read(buf)
 	require.Error(t, err)
 	assert.True(t, isBodyTooLarge(err), "isBodyTooLarge should return true for MaxBytesError")
+}
+
+// failClosedLockStorage embeds the limit-test mockStorage and overrides
+// GetObjectLockConfiguration to return an arbitrary non-sentinel error,
+// modelling a transient DB outage. evaluateObjectLock must treat this as
+// deny (M-2 fail-closed) rather than the legacy fail-open.
+type failClosedLockStorage struct {
+	mockStorage
+}
+
+var errLockBackend = errors.New("simulated lock-config backend failure")
+
+func (s *failClosedLockStorage) GetObjectLockConfiguration(ctx context.Context, bucket string) (*storage.ObjectLockConfiguration, error) {
+	return nil, errLockBackend
+}
+
+// TestEvaluateObjectLock_GetObjectLockConfigurationErrorFailClosed verifies
+// that an unexpected error from GetObjectLockConfiguration deny-lists the
+// destructive op (M-2). Sentinel "no configuration" errors must continue
+// to allow.
+func TestEvaluateObjectLock_GetObjectLockConfigurationErrorFailClosed(t *testing.T) {
+	h := &Handler{storage: &failClosedLockStorage{}}
+	got := h.evaluateObjectLock(context.Background(), "any-bucket", "any-key", false)
+	require.NotNil(t, got, "non-sentinel storage error must deny via AccessDenied")
+	assert.Equal(t, ErrAccessDenied, got)
 }

@@ -181,9 +181,11 @@ func (m *Middleware) verifySignatureV4(r *http.Request, auth string) (*sigCtx, *
 	// Calculate expected signature
 	expectedSignature := m.calculateSignature(r, date, region, service, signedHeaders)
 
-	// Compare signatures (H-2: decode hex and compare raw bytes to avoid
-	// leaking length information through hmac.Equal's length-mismatch
-	// short-circuit on hex strings).
+	// Compare signatures (H-2: hash both inputs through HMAC-SHA256 with a
+	// process-local random key so the comparison runs over equal-length
+	// digests, eliminating the length-mismatch timing leak that bare
+	// hmac.Equal / string equality would have on hex strings of different
+	// lengths). See constantTimeHexEqual for the full rationale.
 	if !constantTimeHexEqual(expectedSignature, providedSignature) {
 		return nil, api.ErrSignatureDoesNotMatch
 	}

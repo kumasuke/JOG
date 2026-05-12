@@ -1,11 +1,29 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/kumasuke/jog/internal/storage"
 )
+
+// copyHeadFailingStorage embeds the limit-test mockStorage and overrides
+// HeadObject to return a non-sentinel error, modelling a transient backend
+// outage. The CopyObject lock-check must fail closed (InternalError) rather
+// than skip the lock evaluation as it did before the M-2 follow-up fix.
+type copyHeadFailingStorage struct {
+	mockStorage
+}
+
+var errHeadBackend = errors.New("simulated head backend failure")
+
+func (s *copyHeadFailingStorage) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	return nil, errHeadBackend
+}
 
 // TestCopyObject_InvalidMetadataDirective verifies that an
 // x-amz-metadata-directive value other than COPY or REPLACE is rejected
@@ -30,6 +48,30 @@ func TestCopyObject_InvalidMetadataDirective(t *testing.T) {
 	code := parseS3ErrorCode(t, rr.Body.String())
 	if code != "InvalidArgument" {
 		t.Fatalf("error code = %q, want %q", code, "InvalidArgument")
+	}
+}
+
+// TestCopyObject_HeadObjectErrorFailClosed verifies that a non-sentinel
+// HeadObject error during the destination lock check (CR-5 path) returns
+// InternalError instead of silently skipping the check. Before the fix,
+// any error other than nil suppressed the lock evaluation, so a transient
+// metadata DB outage could let a copy overwrite a locked destination.
+func TestCopyObject_HeadObjectErrorFailClosed(t *testing.T) {
+	h := &Handler{storage: &copyHeadFailingStorage{}}
+
+	req := httptest.NewRequest(http.MethodPut, "/dst/key", strings.NewReader(""))
+	req.Header.Set("x-amz-copy-source", "/src/src-key")
+	req = setContext(req, "dst", "key")
+	rr := httptest.NewRecorder()
+
+	h.CopyObject(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
+	}
+	code := parseS3ErrorCode(t, rr.Body.String())
+	if code != "InternalError" {
+		t.Fatalf("error code = %q, want %q", code, "InternalError")
 	}
 }
 
