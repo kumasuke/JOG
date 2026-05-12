@@ -28,6 +28,29 @@ func (s *mockStorage) CopyObject(ctx context.Context, srcBucket, srcKey, dstBuck
 	return nil, storage.ErrObjectNotFound
 }
 
+// GetBucketVersioning lets the CR-5 evaluation paths in PutObject /
+// DeleteObject / DeleteObjects / CopyObject reach the storage call instead
+// of nil-deref'ing the embedded interface. Defaulting to "Disabled" means
+// the lock-evaluation branch is the one being exercised in tests below.
+func (s *mockStorage) GetBucketVersioning(ctx context.Context, bucket string) (storage.VersioningStatus, error) {
+	return storage.VersioningStatusDisabled, nil
+}
+
+// HeadObject is needed by the CR-5 destination check in CopyObject.
+// Returning ErrObjectNotFound mimics "destination key does not yet exist",
+// so the lock evaluation is correctly skipped (nothing to protect).
+func (s *mockStorage) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	return nil, storage.ErrObjectNotFound
+}
+
+// GetObjectLockConfiguration is invoked from evaluateObjectLock as the
+// short-circuit "is the bucket Object-Lock-enabled at all?" check.
+// Returning nil means the helper exits early as a no-op, which matches
+// the standard test-bucket setup used by the limit/copy tests.
+func (s *mockStorage) GetObjectLockConfiguration(ctx context.Context, bucket string) (*storage.ObjectLockConfiguration, error) {
+	return nil, nil
+}
+
 func newHandlerWithMock() *Handler {
 	return &Handler{storage: &mockStorage{}}
 }

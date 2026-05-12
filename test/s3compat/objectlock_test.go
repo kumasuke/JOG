@@ -2,6 +2,7 @@ package s3compat
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -817,4 +818,196 @@ func TestPutObject_OverwriteLockedObjectRejected(t *testing.T) {
 	if assert.ErrorAs(t, err, &apiErr) {
 		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
 	}
+}
+
+// TestDeleteObjects_GovernanceRetentionBlocksBatchDelete verifies that the
+// per-key Object Lock evaluation is enforced on the bulk DeleteObjects path
+// (CR-5). Without it, a client could trivially bypass single-object retention
+// by enqueueing the protected key in a multi-delete request — defeating the
+// whole point of the feature.
+func TestDeleteObjects_GovernanceRetentionBlocksBatchDelete(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket:                     aws.String(bucketName),
+		ObjectLockEnabledForBucket: aws.Bool(true),
+	})
+	require.NoError(t, err)
+	defer func() {
+		listOutput, _ := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucketName)})
+		if listOutput != nil {
+			for _, obj := range listOutput.Contents {
+				_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+					Bucket:                    aws.String(bucketName),
+					Key:                       obj.Key,
+					BypassGovernanceRetention: aws.Bool(true),
+				})
+			}
+		}
+		_, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)})
+	}()
+
+	lockedKey := "locked-" + testutil.RandomObjectKey()
+	freeKey := "free-" + testutil.RandomObjectKey()
+
+	for _, k := range []string{lockedKey, freeKey} {
+		_, err = client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucketName),
+			Key:    aws.String(k),
+			Body:   strings.NewReader("payload"),
+		})
+		require.NoError(t, err)
+	}
+
+	retainUntil := time.Now().Add(24 * time.Hour).UTC()
+	_, err = client.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(lockedKey),
+		Retention: &types.ObjectLockRetention{
+			Mode:            types.ObjectLockRetentionModeGovernance,
+			RetainUntilDate: aws.Time(retainUntil),
+		},
+	})
+	require.NoError(t, err)
+
+	// Bulk delete without bypass: the locked key must surface as a per-key
+	// AccessDenied while the free key is removed.
+	out, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		Bucket: aws.String(bucketName),
+		Delete: &types.Delete{
+			Objects: []types.ObjectIdentifier{
+				{Key: aws.String(lockedKey)},
+				{Key: aws.String(freeKey)},
+			},
+		},
+	})
+	require.NoError(t, err, "DeleteObjects request itself must succeed (errors are reported per-key)")
+
+	var sawLockedDenied bool
+	for _, e := range out.Errors {
+		if aws.ToString(e.Key) == lockedKey {
+			sawLockedDenied = true
+			assert.Equal(t, "AccessDenied", aws.ToString(e.Code))
+		}
+	}
+	assert.True(t, sawLockedDenied, "locked key must appear in DeleteObjects errors with AccessDenied")
+
+	// The unprotected key must have been deleted.
+	deletedFree := false
+	for _, d := range out.Deleted {
+		if aws.ToString(d.Key) == freeKey {
+			deletedFree = true
+		}
+	}
+	assert.True(t, deletedFree, "unprotected key must be reported as deleted")
+
+	// The locked key must still exist.
+	_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(lockedKey),
+	})
+	assert.NoError(t, err, "locked key must still be retrievable after blocked delete")
+
+	// With BypassGovernanceRetention the same call must remove it.
+	out, err = client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		Bucket:                    aws.String(bucketName),
+		BypassGovernanceRetention: aws.Bool(true),
+		Delete: &types.Delete{
+			Objects: []types.ObjectIdentifier{
+				{Key: aws.String(lockedKey)},
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, out.Errors, "bypass must clear the per-key error")
+}
+
+// TestCopyObject_OverwriteLockedDestinationRejected verifies that CopyObject
+// honours Object Lock on the destination key when the destination bucket is
+// not versioned (CR-5). Without this guard, a client that cannot directly
+// PUT/DELETE the protected key could simply COPY any source over it,
+// silently defeating retention.
+func TestCopyObject_OverwriteLockedDestinationRejected(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket:                     aws.String(bucketName),
+		ObjectLockEnabledForBucket: aws.Bool(true),
+	})
+	require.NoError(t, err)
+	defer func() {
+		listOutput, _ := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucketName)})
+		if listOutput != nil {
+			for _, obj := range listOutput.Contents {
+				_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+					Bucket:                    aws.String(bucketName),
+					Key:                       obj.Key,
+					BypassGovernanceRetention: aws.Bool(true),
+				})
+			}
+		}
+		_, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)})
+	}()
+
+	dstKey := "dst-" + testutil.RandomObjectKey()
+	srcKey := "src-" + testutil.RandomObjectKey()
+
+	// Seed source and destination with distinct payloads.
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(srcKey),
+		Body:   strings.NewReader("source-payload"),
+	})
+	require.NoError(t, err)
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(dstKey),
+		Body:   strings.NewReader("destination-original"),
+	})
+	require.NoError(t, err)
+
+	// Lock the destination under GOVERNANCE retention.
+	retainUntil := time.Now().Add(24 * time.Hour).UTC()
+	_, err = client.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(dstKey),
+		Retention: &types.ObjectLockRetention{
+			Mode:            types.ObjectLockRetentionModeGovernance,
+			RetainUntilDate: aws.Time(retainUntil),
+		},
+	})
+	require.NoError(t, err)
+
+	// Copy without bypass must be rejected with AccessDenied.
+	_, err = client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(dstKey),
+		CopySource: aws.String(bucketName + "/" + srcKey),
+	})
+	require.Error(t, err, "copy onto a locked destination must be rejected")
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
+	}
+
+	// Verify the destination payload is untouched (original bytes still there).
+	got, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(dstKey),
+	})
+	require.NoError(t, err)
+	defer got.Body.Close()
+	body, err := io.ReadAll(got.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "destination-original", string(body), "destination must keep its original payload after blocked copy")
 }

@@ -522,10 +522,33 @@ func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract keys from request
-	keys := make([]string, len(deleteReq.Objects))
-	for i, obj := range deleteReq.Objects {
-		keys[i] = obj.Key
+	// CR-5: enforce Object Lock per-key for non-versioned buckets. The
+	// single-object DELETE path evaluates retention/legal-hold before
+	// removal; DeleteObjects must apply the same gate or it becomes a
+	// trivial bypass (delete N protected objects in one round trip).
+	// Versioned buckets are intentionally exempt: the underlying storage
+	// records a delete marker rather than purging the locked version.
+	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
+	bypassGovernance := parseBypassGovernanceHeader(r.Header.Get("x-amz-bypass-governance-retention"))
+
+	keys := make([]string, 0, len(deleteReq.Objects))
+	lockErrs := make([]storage.DeleteError, 0)
+	if versioningStatus == storage.VersioningStatusEnabled {
+		for _, obj := range deleteReq.Objects {
+			keys = append(keys, obj.Key)
+		}
+	} else {
+		for _, obj := range deleteReq.Objects {
+			if s3Err := h.evaluateObjectLock(r.Context(), bucket, obj.Key, bypassGovernance); s3Err != nil {
+				lockErrs = append(lockErrs, storage.DeleteError{
+					Key:     obj.Key,
+					Code:    s3Err.Code,
+					Message: s3Err.Message,
+				})
+				continue
+			}
+			keys = append(keys, obj.Key)
+		}
 	}
 
 	// Delete objects
@@ -537,6 +560,11 @@ func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request) {
 		}
 		WriteError(w, ErrInternalError)
 		return
+	}
+
+	// Merge per-key lock-denied errors with storage errors.
+	if len(lockErrs) > 0 {
+		errs = append(lockErrs, errs...)
 	}
 
 	// Build response
@@ -618,6 +646,24 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 	if metadataDirective == "COPY" && srcBucket == dstBucket && srcKey == dstKey {
 		WriteErrorWithResource(w, ErrInvalidRequest, "/"+dstBucket+"/"+dstKey)
 		return
+	}
+
+	// CR-5: when the destination bucket is non-versioned, a CopyObject that
+	// targets an existing key permanently overwrites it (same destructive
+	// semantics as PUT). Honour the destination object's retention / legal
+	// hold before the storage layer rewrites it. (Versioned destinations
+	// preserve the prior locked version as a non-current version, so the
+	// overwrite is not a lock violation.) The check is skipped if the
+	// destination key does not yet exist — there is nothing to protect.
+	dstVersioning, _ := h.storage.GetBucketVersioning(r.Context(), dstBucket)
+	if dstVersioning != storage.VersioningStatusEnabled {
+		if _, headErr := h.storage.HeadObject(r.Context(), dstBucket, dstKey); headErr == nil {
+			bypassGovernance := parseBypassGovernanceHeader(r.Header.Get("x-amz-bypass-governance-retention"))
+			if s3Err := h.evaluateObjectLock(r.Context(), dstBucket, dstKey, bypassGovernance); s3Err != nil {
+				WriteErrorWithResource(w, s3Err, "/"+dstBucket+"/"+dstKey)
+				return
+			}
+		}
 	}
 
 	var metadata map[string]string
