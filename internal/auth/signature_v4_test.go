@@ -424,6 +424,32 @@ func TestConstantTimeHexEqual_NonHexProvided(t *testing.T) {
 	}
 }
 
+// TestConstantTimeHexEqual_NoEarlyReturnOnLengthMismatch is a behavioural
+// regression for H-2: even when provided is dramatically shorter or longer
+// than expected, the comparison must still produce a value (not panic, not
+// short-circuit on length) so that the caller cannot distinguish the two
+// cases by anything other than the constant-time HMAC comparison itself.
+// We can't measure timing reliably in a unit test, but we can at least
+// assert the function tolerates a wide range of lengths and never reports
+// equality by accident.
+func TestConstantTimeHexEqual_NoEarlyReturnOnLengthMismatch(t *testing.T) {
+	expected := strings.Repeat("a", 64)
+	for _, n := range []int{0, 1, 2, 31, 63, 65, 128, 256, 1024} {
+		provided := strings.Repeat("a", n)
+		if n == 64 {
+			continue // would actually match
+		}
+		if constantTimeHexEqual(expected, provided) {
+			t.Fatalf("constantTimeHexEqual(64-char a, %d-char a) returned true; want false", n)
+		}
+	}
+	// Also assert it doesn't panic on arbitrary non-hex bytes of varying
+	// lengths — the HMAC path normalises everything to a 32-byte digest.
+	for _, n := range []int{0, 1, 13, 100} {
+		_ = constantTimeHexEqual(expected, strings.Repeat("\x00\xff\x7f", n))
+	}
+}
+
 // TestConstantTimeHexEqual_MatchAndMismatch asserts the basic identity and
 // difference cases.
 func TestConstantTimeHexEqual_MatchAndMismatch(t *testing.T) {

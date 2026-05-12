@@ -3,6 +3,7 @@ package auth
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -14,6 +15,19 @@ import (
 
 	"github.com/kumasuke/jog/internal/api"
 )
+
+// hmacCompareKey is a process-local random key used by constantTimeHexEqual
+// to fold both inputs into fixed-size HMAC digests before constant-time
+// comparison (H-2). The key is unknown to attackers and changes per process,
+// so the digest of "provided" reveals no information about its length or
+// contents that could be correlated across runs.
+var hmacCompareKey [32]byte
+
+func init() {
+	if _, err := io.ReadFull(rand.Reader, hmacCompareKey[:]); err != nil {
+		panic("auth: failed to seed constant-time compare key: " + err.Error())
+	}
+}
 
 // Middleware handles AWS Signature V4 authentication.
 type Middleware struct {
@@ -384,21 +398,34 @@ func isHex(s string) bool {
 	return true
 }
 
-// constantTimeHexEqual compares two hex-encoded strings in constant time
-// relative to the canonical (expected) length. It decodes both sides to
-// raw bytes and compares them with hmac.Equal, so a length mismatch in
-// the provided string does not leak via early-return timing (H-2).
-// A non-hex provided value is rejected.
+// constantTimeHexEqual reports whether two hex-encoded strings represent
+// the same value, in a way that does not leak the length of "provided"
+// via timing (H-2).
+//
+// Naive `expected == provided` and `hmac.Equal(decoded(expected),
+// decoded(provided))` both short-circuit when input lengths differ:
+// hmac.Equal is subtle.ConstantTimeCompare which returns 0 immediately
+// when len(a) != len(b). For SigV4 expected is always 64 hex chars, so a
+// length-mismatched provided value can be distinguished from a same-
+// length wrong value by timing alone.
+//
+// We sidestep the early-return by hashing both inputs through HMAC-SHA256
+// with a process-local random key, producing fixed 32-byte digests, and
+// comparing those. The HMAC computation itself is roughly linear in input
+// length, but it processes the attacker-controlled provided string only,
+// so the only information leakable through timing is `len(provided)` —
+// which the attacker already knows. Comparison is then over equal-length
+// digests, eliminating the length-mismatch leak.
+//
+// Comparison is case-insensitive: SigV4 canonicalises signatures to
+// lower-case hex, but accepting upper-case keeps clients that use
+// strings.ToUpper-style helpers working without a separate length check.
 func constantTimeHexEqual(expected, provided string) bool {
-	exp, err := hex.DecodeString(expected)
-	if err != nil {
-		return false
-	}
-	prov, err := hex.DecodeString(provided)
-	if err != nil {
-		return false
-	}
-	return hmac.Equal(exp, prov)
+	h1 := hmac.New(sha256.New, hmacCompareKey[:])
+	h1.Write([]byte(strings.ToLower(expected)))
+	h2 := hmac.New(sha256.New, hmacCompareKey[:])
+	h2.Write([]byte(strings.ToLower(provided)))
+	return hmac.Equal(h1.Sum(nil), h2.Sum(nil))
 }
 
 // verifyPresignedURL verifies a presigned URL.
