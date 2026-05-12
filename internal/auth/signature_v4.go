@@ -499,6 +499,21 @@ func (m *Middleware) verifyPresignedURL(r *http.Request) (*sigCtx, *api.S3Error)
 		return nil, api.ErrSignatureDoesNotMatch
 	}
 
+	// H-1 (hardening): a body-bearing presigned method (PUT / POST / PATCH)
+	// must explicitly bind the payload by signing x-amz-content-sha256.
+	// Without it the canonical request silently fell back to
+	// "UNSIGNED-PAYLOAD" and the server cannot tell whether the client
+	// meant to opt out of payload signing or simply forgot — leaving the
+	// body unbound and allowing arbitrary content to be uploaded against
+	// a "signed" URL. The header value itself may be either a 64-hex
+	// SHA-256 digest (binds to a specific payload) or the literal
+	// "UNSIGNED-PAYLOAD" (an explicit opt-out that is itself signed),
+	// but the choice must appear in SignedHeaders so it cannot be
+	// rewritten by the caller.
+	if isBodyBearingPresignedMethod(r.Method) && !containsSignedHeader(signedHeaders, "x-amz-content-sha256") {
+		return nil, api.ErrAccessDenied
+	}
+
 	// H-1: when the client included X-Amz-Content-SHA256 in SignedHeaders
 	// the canonical request bound the body to the signature; propagate the
 	// header value so the Middleware.Wrap path can install a payload
@@ -515,6 +530,19 @@ func (m *Middleware) verifyPresignedURL(r *http.Request) (*sigCtx, *api.S3Error)
 		scope:             date + "/" + region + "/" + service + "/aws4_request",
 		payloadHashHeader: payloadHashHeader,
 	}, nil
+}
+
+// isBodyBearingPresignedMethod reports whether the HTTP method routinely
+// carries a request body whose contents must be bound to a presigned
+// URL's signature. GET / HEAD / DELETE / OPTIONS bodies are either
+// disallowed or ignored by S3, so leaving them outside the strict
+// payload-binding requirement avoids breaking presigned download URLs.
+func isBodyBearingPresignedMethod(method string) bool {
+	switch method {
+	case http.MethodPut, http.MethodPost, http.MethodPatch:
+		return true
+	}
+	return false
 }
 
 // isCORSPreflight reports whether r is a CORS preflight request. A

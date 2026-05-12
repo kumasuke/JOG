@@ -235,6 +235,129 @@ func TestVerifyPresignedURL_PayloadBoundWhenSigned(t *testing.T) {
 	}
 }
 
+// TestVerifyPresignedURL_BodyBearingMethodMissingContentSHA asserts that a
+// presigned URL for a body-bearing method (PUT / POST / PATCH) is rejected
+// when X-Amz-Content-SHA256 is not in SignedHeaders. Without this guard the
+// canonical request silently used "UNSIGNED-PAYLOAD" — i.e. the body was
+// not bound to the signature, so a holder of the URL could PUT arbitrary
+// content. The choice to opt out of payload signing must itself be signed
+// (by including x-amz-content-sha256 with value "UNSIGNED-PAYLOAD" in
+// SignedHeaders).
+func TestVerifyPresignedURL_BodyBearingMethodMissingContentSHA(t *testing.T) {
+	const (
+		access = "ACCESS"
+		secret = "SECRET"
+	)
+
+	for _, method := range []string{http.MethodPut, http.MethodPost, http.MethodPatch} {
+		t.Run(method, func(t *testing.T) {
+			amzDate := time.Now().UTC().Format("20060102T150405Z")
+			date := amzDate[:8]
+			cred := access + "/" + date + "/us-east-1/s3/aws4_request"
+
+			req := httptest.NewRequest(method, "/bucket/key", strings.NewReader("body"))
+			req.Host = "example.com"
+
+			q := req.URL.Query()
+			q.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+			q.Set("X-Amz-Credential", cred)
+			q.Set("X-Amz-Date", amzDate)
+			q.Set("X-Amz-Expires", "300")
+			// Note: SignedHeaders intentionally does NOT include
+			// x-amz-content-sha256 — this is the gap the new check closes.
+			q.Set("X-Amz-SignedHeaders", "host")
+			req.URL.RawQuery = q.Encode()
+
+			m := NewMiddleware(access, secret)
+			sig := m.calculatePresignedSignature(req, date, "us-east-1", "s3", "host", amzDate)
+			q.Set("X-Amz-Signature", sig)
+			req.URL.RawQuery = q.Encode()
+
+			_, err := m.verifyPresignedURL(req)
+			if err == nil {
+				t.Fatalf("verifyPresignedURL(%s without signed content-sha256) = nil; want AccessDenied", method)
+			}
+			if err.Code != api.ErrAccessDenied.Code {
+				t.Fatalf("err.Code = %s, want %s", err.Code, api.ErrAccessDenied.Code)
+			}
+		})
+	}
+}
+
+// TestVerifyPresignedURL_BodyBearingMethodWithUnsignedPayloadAccepted asserts
+// that a body-bearing presigned URL whose SignedHeaders includes
+// x-amz-content-sha256 with the literal "UNSIGNED-PAYLOAD" value is accepted.
+// This is the explicit-opt-out path: the client said "I do not want payload
+// binding" and that choice is itself signed, so an attacker cannot rewrite
+// the canonical request to claim binding (or vice versa).
+func TestVerifyPresignedURL_BodyBearingMethodWithUnsignedPayloadAccepted(t *testing.T) {
+	const (
+		access = "ACCESS"
+		secret = "SECRET"
+	)
+
+	amzDate := time.Now().UTC().Format("20060102T150405Z")
+	date := amzDate[:8]
+	cred := access + "/" + date + "/us-east-1/s3/aws4_request"
+
+	req := httptest.NewRequest(http.MethodPut, "/bucket/key", strings.NewReader("body"))
+	req.Host = "example.com"
+	req.Header.Set("X-Amz-Content-SHA256", "UNSIGNED-PAYLOAD")
+
+	q := req.URL.Query()
+	q.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+	q.Set("X-Amz-Credential", cred)
+	q.Set("X-Amz-Date", amzDate)
+	q.Set("X-Amz-Expires", "300")
+	q.Set("X-Amz-SignedHeaders", "host;x-amz-content-sha256")
+	req.URL.RawQuery = q.Encode()
+
+	m := NewMiddleware(access, secret)
+	sig := m.calculatePresignedSignature(req, date, "us-east-1", "s3", "host;x-amz-content-sha256", amzDate)
+	q.Set("X-Amz-Signature", sig)
+	req.URL.RawQuery = q.Encode()
+
+	if _, err := m.verifyPresignedURL(req); err != nil {
+		t.Fatalf("verifyPresignedURL(explicit UNSIGNED-PAYLOAD) = %v, want nil", err)
+	}
+}
+
+// TestVerifyPresignedURL_GETStillAllowedWithoutContentSHA asserts that the
+// new strict body-binding requirement does NOT apply to bodyless methods
+// (GET / HEAD / DELETE), which is the most common presigned-URL use case
+// (downloads). Otherwise every presigned-download client in the wild would
+// break.
+func TestVerifyPresignedURL_GETStillAllowedWithoutContentSHA(t *testing.T) {
+	const (
+		access = "ACCESS"
+		secret = "SECRET"
+	)
+
+	amzDate := time.Now().UTC().Format("20060102T150405Z")
+	date := amzDate[:8]
+	cred := access + "/" + date + "/us-east-1/s3/aws4_request"
+
+	req := httptest.NewRequest(http.MethodGet, "/bucket/key", nil)
+	req.Host = "example.com"
+
+	q := req.URL.Query()
+	q.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
+	q.Set("X-Amz-Credential", cred)
+	q.Set("X-Amz-Date", amzDate)
+	q.Set("X-Amz-Expires", "300")
+	q.Set("X-Amz-SignedHeaders", "host")
+	req.URL.RawQuery = q.Encode()
+
+	m := NewMiddleware(access, secret)
+	sig := m.calculatePresignedSignature(req, date, "us-east-1", "s3", "host", amzDate)
+	q.Set("X-Amz-Signature", sig)
+	req.URL.RawQuery = q.Encode()
+
+	if _, err := m.verifyPresignedURL(req); err != nil {
+		t.Fatalf("verifyPresignedURL(GET without signed content-sha256) = %v, want nil", err)
+	}
+}
+
 // TestVerifyPresignedURL_BodyMismatchAfterAuth asserts that for a presigned
 // URL that signs X-Amz-Content-SHA256, sending a body that does not match
 // the signed hash is detected by the Middleware.Wrap path (H-1 + CR-3).
