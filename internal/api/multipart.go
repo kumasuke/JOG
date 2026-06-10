@@ -453,7 +453,15 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 	// evaluation is skipped (mirrors PutObject / CopyObject). On a
 	// non-versioning bucket the completion overwrites the null version in
 	// place, so its retention / legal hold must be honoured.
-	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
+	versioningStatus, versioningErr := h.storage.GetBucketVersioning(r.Context(), bucket)
+	if versioningErr != nil {
+		if errors.Is(versioningErr, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		WriteErrorWithResource(w, ErrInternalError, "/"+bucket+"/"+key)
+		return
+	}
 	_, headErr := h.storage.HeadObject(r.Context(), bucket, key)
 	switch {
 	case headErr == nil && versioningStatus != storage.VersioningStatusEnabled:
