@@ -170,25 +170,33 @@ func (h *Handler) PutObjectRetention(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the targeted version (issue #39): "null" → "", unspecified →
+	// current version, missing → NoSuchVersion, delete-marker → MethodNotAllowed.
+	versionID, s3Err := h.resolveLockVersionID(r.Context(), bucket, key, r.URL.Query().Get("versionId"))
+	if s3Err != nil {
+		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+		return
+	}
+
 	// Convert to storage object retention
 	storageRetention := &storage.ObjectRetention{
 		Mode:            storage.ObjectLockRetentionMode(retention.Mode),
 		RetainUntilDate: retention.RetainUntilDate,
 	}
 
-	// C-1: enforce S3's retention-modification rules before INSERT OR REPLACE
+	// C-1: enforce S3's retention-modification rules before the upsert
 	// silently honours a downgrade or shortening. Without this gate, any
 	// authenticated client could replace an active COMPLIANCE retention with
 	// a near-past GOVERNANCE one and immediately delete the object — a full
 	// bypass of Object Lock with no warning.
 	bypassGovernance := parseBypassGovernanceHeader(r.Header.Get("x-amz-bypass-governance-retention"))
-	if s3Err := h.evaluateRetentionChange(r.Context(), bucket, key, storageRetention, bypassGovernance); s3Err != nil {
+	if s3Err := h.evaluateRetentionChange(r.Context(), bucket, key, versionID, storageRetention, bypassGovernance); s3Err != nil {
 		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
 		return
 	}
 
 	// Store object retention
-	err = h.storage.PutObjectRetention(r.Context(), bucket, key, storageRetention)
+	err = h.storage.PutObjectRetention(r.Context(), bucket, key, versionID, storageRetention)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket+"/"+key)
@@ -215,7 +223,13 @@ func (h *Handler) GetObjectRetention(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
 
-	retention, err := h.storage.GetObjectRetention(r.Context(), bucket, key)
+	versionID, s3Err := h.resolveLockVersionID(r.Context(), bucket, key, r.URL.Query().Get("versionId"))
+	if s3Err != nil {
+		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+		return
+	}
+
+	retention, err := h.storage.GetObjectRetention(r.Context(), bucket, key, versionID)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket+"/"+key)
@@ -271,13 +285,19 @@ func (h *Handler) PutObjectLegalHold(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	versionID, s3Err := h.resolveLockVersionID(r.Context(), bucket, key, r.URL.Query().Get("versionId"))
+	if s3Err != nil {
+		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+		return
+	}
+
 	// Convert to storage object legal hold
 	storageLegalHold := &storage.ObjectLegalHold{
 		Status: storage.ObjectLegalHoldStatus(legalHold.Status),
 	}
 
 	// Store object legal hold
-	err = h.storage.PutObjectLegalHold(r.Context(), bucket, key, storageLegalHold)
+	err = h.storage.PutObjectLegalHold(r.Context(), bucket, key, versionID, storageLegalHold)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket+"/"+key)
@@ -304,7 +324,13 @@ func (h *Handler) GetObjectLegalHold(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
 
-	legalHold, err := h.storage.GetObjectLegalHold(r.Context(), bucket, key)
+	versionID, s3Err := h.resolveLockVersionID(r.Context(), bucket, key, r.URL.Query().Get("versionId"))
+	if s3Err != nil {
+		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+		return
+	}
+
+	legalHold, err := h.storage.GetObjectLegalHold(r.Context(), bucket, key, versionID)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket+"/"+key)

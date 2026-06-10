@@ -417,14 +417,24 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 	// CompleteMultipartUpload call will translate them into the canonical S3
 	// responses (NoSuchBucket / NoSuchUpload / InvalidArgument). Returning
 	// 500 here would silently regress those well-formed error responses.
+	//
+	// issue #39: on a versioning-Enabled bucket the completion creates a NEW
+	// version and never overwrites the locked current version, so the lock
+	// evaluation is skipped (mirrors PutObject / CopyObject). On a
+	// non-versioning bucket the completion overwrites the null version in
+	// place, so its retention / legal hold must be honoured.
+	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
 	_, headErr := h.storage.HeadObject(r.Context(), bucket, key)
 	switch {
-	case headErr == nil:
+	case headErr == nil && versioningStatus != storage.VersioningStatusEnabled:
 		bypassGovernance := parseBypassGovernanceHeader(r.Header.Get("x-amz-bypass-governance-retention"))
-		if s3Err := h.evaluateObjectLock(r.Context(), bucket, key, bypassGovernance); s3Err != nil {
+		if s3Err := h.evaluateObjectLock(r.Context(), bucket, key, "", bypassGovernance); s3Err != nil {
 			WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
 			return
 		}
+	case headErr == nil:
+		// Versioning-Enabled bucket: the existing locked version is preserved
+		// and a new version is created below; nothing to evaluate.
 	case errors.Is(headErr, storage.ErrObjectNotFound),
 		errors.Is(headErr, storage.ErrBucketNotFound),
 		errors.Is(headErr, storage.ErrInvalidKey):
@@ -441,7 +451,14 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	obj, err := h.storage.CompleteMultipartUpload(r.Context(), bucket, key, uploadID, parts)
+	var obj *storage.Object
+	var versionID string
+	var err error
+	if versioningStatus == storage.VersioningStatusEnabled {
+		obj, versionID, err = h.storage.CompleteMultipartUploadVersioned(r.Context(), bucket, key, uploadID, parts)
+	} else {
+		obj, err = h.storage.CompleteMultipartUpload(r.Context(), bucket, key, uploadID, parts)
+	}
 	if err != nil {
 		if errors.Is(err, storage.ErrUploadNotFound) {
 			WriteError(w, ErrNoSuchUpload)
@@ -476,6 +493,9 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 	}
 
 	w.Header().Set("Content-Type", "application/xml")
+	if versionID != "" {
+		w.Header().Set("x-amz-version-id", versionID)
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(buf.Bytes())
 }

@@ -466,6 +466,7 @@ type Storage interface {
 	DeleteObject(ctx context.Context, bucket, key string) error
 	DeleteObjects(ctx context.Context, bucket string, keys []string) ([]DeletedObject, []DeleteError, error)
 	CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string, metadata map[string]string) (*Object, error)
+	CopyObjectVersioned(ctx context.Context, srcBucket, srcKey, srcVersionID, dstBucket, dstKey string, metadata map[string]string) (*Object, string, error)
 	ListObjectsV2(ctx context.Context, input *ListObjectsInput) (*ListObjectsOutput, error)
 
 	// Multipart upload operations
@@ -473,6 +474,7 @@ type Storage interface {
 	UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int32, body io.Reader, size int64) (*Part, error)
 	UploadPartCopy(ctx context.Context, bucket, key, uploadID string, partNumber int32, srcBucket, srcKey string, startByte, endByte *int64) (*Part, error)
 	CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error)
+	CompleteMultipartUploadVersioned(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, string, error)
 	AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error
 	ListParts(ctx context.Context, input *ListPartsInput) (*ListPartsOutput, error)
 	ListMultipartUploads(ctx context.Context, input *ListMultipartUploadsInput) (*ListMultipartUploadsOutput, error)
@@ -495,7 +497,7 @@ type Storage interface {
 	GetBucketVersioning(ctx context.Context, bucket string) (VersioningStatus, error)
 	PutObjectVersioned(ctx context.Context, bucket, key string, body io.Reader, size int64, contentType string, metadata map[string]string) (*Object, string, error)
 	GetObjectVersioned(ctx context.Context, bucket, key, versionID string) (*ObjectData, error)
-	DeleteObjectVersioned(ctx context.Context, bucket, key, versionID string) (string, bool, error)
+	DeleteObjectVersioned(ctx context.Context, bucket, key, versionID string, versionTargeted bool) (string, bool, error)
 	ListObjectVersions(ctx context.Context, input *ListObjectVersionsInput) (*ListObjectVersionsOutput, error)
 
 	// ACL operations
@@ -519,10 +521,16 @@ type Storage interface {
 	GetBucketObjectLockEnabled(ctx context.Context, bucket string) (bool, error)
 	PutObjectLockConfiguration(ctx context.Context, bucket string, config *ObjectLockConfiguration) error
 	GetObjectLockConfiguration(ctx context.Context, bucket string) (*ObjectLockConfiguration, error)
-	PutObjectRetention(ctx context.Context, bucket, key string, retention *ObjectRetention) error
-	GetObjectRetention(ctx context.Context, bucket, key string) (*ObjectRetention, error)
-	PutObjectLegalHold(ctx context.Context, bucket, key string, legalHold *ObjectLegalHold) error
-	GetObjectLegalHold(ctx context.Context, bucket, key string) (*ObjectLegalHold, error)
+	PutObjectRetention(ctx context.Context, bucket, key, versionID string, retention *ObjectRetention) error
+	GetObjectRetention(ctx context.Context, bucket, key, versionID string) (*ObjectRetention, error)
+	PutObjectLegalHold(ctx context.Context, bucket, key, versionID string, legalHold *ObjectLegalHold) error
+	GetObjectLegalHold(ctx context.Context, bucket, key, versionID string) (*ObjectLegalHold, error)
+	// ResolveObjectVersion maps a client-supplied versionId selector to a
+	// concrete version. requestedVersionID "" means "current version". The
+	// returned resolvedVersionID is "" for the null version. isDeleteMarker
+	// reports whether the resolved version is a delete marker. ErrObjectNotFound
+	// is returned when no matching version exists.
+	ResolveObjectVersion(ctx context.Context, bucket, key, requestedVersionID string) (resolvedVersionID string, isDeleteMarker bool, err error)
 
 	// Bucket Policy operations
 	PutBucketPolicy(ctx context.Context, bucket string, policy string) error

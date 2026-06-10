@@ -84,6 +84,25 @@ func (h *Handler) PutBucketVersioning(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Object Lock buckets cannot suspend versioning — Object Lock requires
+	// versioning to remain Enabled (issue #39). Reject the downgrade with
+	// InvalidBucketState rather than silently weakening lock guarantees.
+	if status == storage.VersioningStatusSuspended {
+		lockEnabled, lockErr := h.storage.GetBucketObjectLockEnabled(r.Context(), bucket)
+		if lockErr != nil {
+			if errors.Is(lockErr, storage.ErrBucketNotFound) {
+				WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+				return
+			}
+			WriteErrorWithResource(w, ErrInternalError, "/"+bucket)
+			return
+		}
+		if lockEnabled {
+			WriteErrorWithResource(w, ErrInvalidBucketState, "/"+bucket)
+			return
+		}
+	}
+
 	err = h.storage.PutBucketVersioning(r.Context(), bucket, status)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {

@@ -33,7 +33,7 @@ import (
 // fail-closed: returning AccessDenied. The previous `err != nil → allow`
 // behaviour was a fail-open silent bypass — a transient DB outage would
 // have let destructive operations through against locked objects.
-func (h *Handler) evaluateObjectLock(ctx context.Context, bucket, key string, bypassGovernance bool) *S3Error {
+func (h *Handler) evaluateObjectLock(ctx context.Context, bucket, key, versionID string, bypassGovernance bool) *S3Error {
 	cfg, err := h.storage.GetObjectLockConfiguration(ctx, bucket)
 	if err != nil {
 		// Treat "no configuration on this bucket" as allow; everything
@@ -49,14 +49,14 @@ func (h *Handler) evaluateObjectLock(ctx context.Context, bucket, key string, by
 		return nil
 	}
 
-	legalHold, err := h.storage.GetObjectLegalHold(ctx, bucket, key)
+	legalHold, err := h.storage.GetObjectLegalHold(ctx, bucket, key, versionID)
 	if err == nil && legalHold != nil && legalHold.Status == storage.ObjectLegalHoldStatusOn {
 		return ErrAccessDenied
 	} else if err != nil && !errors.Is(err, storage.ErrNoSuchObjectLockConfiguration) && !errors.Is(err, storage.ErrObjectNotFound) {
 		return ErrAccessDenied
 	}
 
-	retention, err := h.storage.GetObjectRetention(ctx, bucket, key)
+	retention, err := h.storage.GetObjectRetention(ctx, bucket, key, versionID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNoSuchObjectLockConfiguration) || errors.Is(err, storage.ErrObjectNotFound) {
 			return nil
@@ -107,14 +107,14 @@ func parseBypassGovernanceHeader(v string) bool {
 //
 // Storage "not configured" / "object not found" errors short-circuit to
 // "no prior retention", matching evaluateObjectLock's allow-list.
-func (h *Handler) evaluateRetentionChange(ctx context.Context, bucket, key string, next *storage.ObjectRetention, bypassGovernance bool) *S3Error {
+func (h *Handler) evaluateRetentionChange(ctx context.Context, bucket, key, versionID string, next *storage.ObjectRetention, bypassGovernance bool) *S3Error {
 	if next == nil {
 		// PutObjectRetention with no body — let the storage layer reject
 		// it via ErrMalformedXML rather than synthesising AccessDenied.
 		return nil
 	}
 
-	prior, err := h.storage.GetObjectRetention(ctx, bucket, key)
+	prior, err := h.storage.GetObjectRetention(ctx, bucket, key, versionID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNoSuchObjectLockConfiguration) ||
 			errors.Is(err, storage.ErrObjectNotFound) ||
@@ -166,4 +166,42 @@ func (h *Handler) evaluateRetentionChange(ctx context.Context, bucket, key strin
 		}
 	}
 	return nil
+}
+
+// resolveLockVersionID maps the raw versionId query parameter for an
+// Object Lock sub-resource handler onto a concrete version_id (issue #39):
+//
+//   - "null"            → "" (the null version)
+//   - "" (unspecified)  → the bucket's current version (resolved via storage)
+//   - "<id>"            → that exact version
+//
+// It returns the resolved version_id and an *S3Error to surface directly:
+// NoSuchKey/NoSuchBucket when the object/bucket is missing, NoSuchVersion when
+// the requested version does not exist, and MethodNotAllowed when the resolved
+// version is a delete marker.
+func (h *Handler) resolveLockVersionID(ctx context.Context, bucket, key, rawVersionID string) (string, *S3Error) {
+	// The literal "null" addresses the null version directly; no resolution
+	// against storage is required.
+	if rawVersionID == "null" {
+		return "", nil
+	}
+
+	resolved, isDeleteMarker, err := h.storage.ResolveObjectVersion(ctx, bucket, key, rawVersionID)
+	if err != nil {
+		switch {
+		case errors.Is(err, storage.ErrBucketNotFound):
+			return "", ErrNoSuchBucket
+		case errors.Is(err, storage.ErrObjectNotFound):
+			if rawVersionID != "" {
+				return "", ErrNoSuchVersion
+			}
+			return "", ErrNoSuchKey
+		default:
+			return "", ErrInternalError
+		}
+	}
+	if isDeleteMarker {
+		return "", ErrMethodNotAllowed
+	}
+	return resolved, nil
 }
