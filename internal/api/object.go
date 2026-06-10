@@ -220,7 +220,9 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 	// and tag failures are treated as non-critical. The object is still
 	// usable without tags, and tags can be set separately via PutObjectTagging.
 	if len(tags) > 0 {
-		if err := h.storage.PutObjectTagging(r.Context(), bucket, key, tags); err != nil {
+		// Tags belong to the version just created (issue #41). versionID is the
+		// new version's id, or "" for the null version on a non-versioning bucket.
+		if err := h.storage.PutObjectTagging(r.Context(), bucket, key, versionID, tags); err != nil {
 			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("Failed to set object tags")
 		}
 	}
@@ -237,7 +239,8 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 			log.Warn().Str("bucket", bucket).Str("key", key).Str("acl", cannedACL).Msg("Invalid canned ACL specified, ignoring")
 		} else {
 			acl := storage.CannedACLToACL(storage.CannedACL(cannedACL), storage.DefaultOwnerID, storage.DefaultOwnerDisplay)
-			if err := h.storage.PutObjectACL(r.Context(), bucket, key, acl); err != nil {
+			// ACL belongs to the version just created (issue #41).
+			if err := h.storage.PutObjectACL(r.Context(), bucket, key, versionID, acl); err != nil {
 				log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("Failed to set object ACL")
 			}
 		}

@@ -479,10 +479,12 @@ type Storage interface {
 	ListParts(ctx context.Context, input *ListPartsInput) (*ListPartsOutput, error)
 	ListMultipartUploads(ctx context.Context, input *ListMultipartUploadsInput) (*ListMultipartUploadsOutput, error)
 
-	// Tagging operations
-	PutObjectTagging(ctx context.Context, bucket, key string, tags []Tag) error
-	GetObjectTagging(ctx context.Context, bucket, key string) ([]Tag, error)
-	DeleteObjectTagging(ctx context.Context, bucket, key string) error
+	// Tagging operations.
+	// Object tagging is per-version (issue #41): versionID "" targets the null
+	// version, a non-empty versionID targets that exact version.
+	PutObjectTagging(ctx context.Context, bucket, key, versionID string, tags []Tag) error
+	GetObjectTagging(ctx context.Context, bucket, key, versionID string) ([]Tag, error)
+	DeleteObjectTagging(ctx context.Context, bucket, key, versionID string) error
 	PutBucketTagging(ctx context.Context, bucket string, tags []Tag) error
 	GetBucketTagging(ctx context.Context, bucket string) ([]Tag, error)
 	DeleteBucketTagging(ctx context.Context, bucket string) error
@@ -500,11 +502,13 @@ type Storage interface {
 	DeleteObjectVersioned(ctx context.Context, bucket, key, versionID string, versionTargeted bool) (string, bool, error)
 	ListObjectVersions(ctx context.Context, input *ListObjectVersionsInput) (*ListObjectVersionsOutput, error)
 
-	// ACL operations
+	// ACL operations.
+	// Object ACLs are per-version (issue #41): versionID "" targets the null
+	// version, a non-empty versionID targets that exact version.
 	PutBucketACL(ctx context.Context, bucket string, acl *ACL) error
 	GetBucketACL(ctx context.Context, bucket string) (*ACL, error)
-	PutObjectACL(ctx context.Context, bucket, key string, acl *ACL) error
-	GetObjectACL(ctx context.Context, bucket, key string) (*ACL, error)
+	PutObjectACL(ctx context.Context, bucket, key, versionID string, acl *ACL) error
+	GetObjectACL(ctx context.Context, bucket, key, versionID string) (*ACL, error)
 
 	// Encryption operations
 	PutBucketEncryption(ctx context.Context, bucket string, config *ServerSideEncryptionConfiguration) error
