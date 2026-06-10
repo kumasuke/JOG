@@ -361,30 +361,40 @@ const createLegalHoldV2DDL = `
 // mismatch ROLLBACKs and aborts startup (better to refuse to start than to run
 // with silently-lost lock data). Old tables are renamed to *_legacy_v1 rather
 // than dropped, and a physical backup is taken before migrating.
-func (m *Metadata) migrateObjectLockSchema() error {
-	var userVersion int
-	if err := m.db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
-		return fmt.Errorf("failed to read user_version: %w", err)
-	}
+// lockTableGeneration describes the Object Lock table schema generation.
+type lockTableGeneration int
 
-	// Determine whether the legacy object_retention table (without a
-	// version_id column) is present. We rely on column existence in addition
-	// to user_version because a v1 DB created before this migration shipped
-	// has user_version == 0 but already carries the legacy tables.
-	hasVersionCol, retentionExists, err := m.retentionVersionColumnState()
+const (
+	lockTableAbsent lockTableGeneration = iota
+	lockTableLegacy
+	lockTableV2
+)
+
+func (g lockTableGeneration) String() string {
+	switch g {
+	case lockTableAbsent:
+		return "absent"
+	case lockTableLegacy:
+		return "legacy"
+	case lockTableV2:
+		return "v2"
+	default:
+		return "unknown"
+	}
+}
+
+func (m *Metadata) migrateObjectLockSchema() error {
+	retentionGen, err := m.lockTableGeneration("object_retention")
+	if err != nil {
+		return err
+	}
+	legalHoldGen, err := m.lockTableGeneration("object_legal_hold")
 	if err != nil {
 		return err
 	}
 
-	if userVersion >= objectLockSchemaVersion && hasVersionCol {
-		// Already migrated.
-		return nil
-	}
-
-	if !retentionExists || hasVersionCol {
-		// Fresh DB (no legacy table) or an in-between state where the v2
-		// columns already exist: create the v2 DDL directly and stamp the
-		// schema version. CREATE TABLE IF NOT EXISTS makes this idempotent.
+	switch {
+	case retentionGen == lockTableAbsent && legalHoldGen == lockTableAbsent:
 		if _, err := m.db.Exec(createRetentionV2DDL); err != nil {
 			return fmt.Errorf("failed to create object_retention table: %w", err)
 		}
@@ -395,21 +405,38 @@ func (m *Metadata) migrateObjectLockSchema() error {
 			return fmt.Errorf("failed to set user_version: %w", err)
 		}
 		return nil
+	case retentionGen == lockTableV2 && legalHoldGen == lockTableV2:
+		var userVersion int
+		if err := m.db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
+			return fmt.Errorf("failed to read user_version: %w", err)
+		}
+		if userVersion < objectLockSchemaVersion {
+			if _, err := m.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, objectLockSchemaVersion)); err != nil {
+				return fmt.Errorf("failed to set user_version: %w", err)
+			}
+		}
+		return nil
+	case retentionGen == lockTableLegacy && legalHoldGen == lockTableLegacy:
+		return m.runObjectLockMigration()
+	default:
+		return fmt.Errorf(
+			"object lock schema mismatch: object_retention=%s object_legal_hold=%s (fail-closed)",
+			retentionGen, legalHoldGen,
+		)
 	}
-
-	// Legacy DB: run the CREATE -> backfill -> RENAME migration.
-	return m.runObjectLockMigration()
 }
 
-// retentionVersionColumnState reports whether the object_retention table
-// exists and, if so, whether it already has the version_id column.
-func (m *Metadata) retentionVersionColumnState() (hasVersionCol, tableExists bool, err error) {
-	rows, err := m.db.Query(`PRAGMA table_info('object_retention')`)
+// lockTableGeneration reports whether a lock table is absent, legacy
+// (no version_id column), or v2 (has version_id).
+func (m *Metadata) lockTableGeneration(table string) (lockTableGeneration, error) {
+	rows, err := m.db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
-		return false, false, fmt.Errorf("failed to inspect object_retention columns: %w", err)
+		return lockTableAbsent, fmt.Errorf("failed to inspect %s columns: %w", table, err)
 	}
 	defer rows.Close()
 
+	tableExists := false
+	hasVersionCol := false
 	for rows.Next() {
 		var (
 			cid        int
@@ -420,14 +447,23 @@ func (m *Metadata) retentionVersionColumnState() (hasVersionCol, tableExists boo
 			primaryKey int
 		)
 		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &primaryKey); err != nil {
-			return false, false, fmt.Errorf("failed to scan object_retention column info: %w", err)
+			return lockTableAbsent, fmt.Errorf("failed to scan %s column info: %w", table, err)
 		}
 		tableExists = true
 		if name == "version_id" {
 			hasVersionCol = true
 		}
 	}
-	return hasVersionCol, tableExists, rows.Err()
+	if err := rows.Err(); err != nil {
+		return lockTableAbsent, err
+	}
+	if !tableExists {
+		return lockTableAbsent, nil
+	}
+	if hasVersionCol {
+		return lockTableV2, nil
+	}
+	return lockTableLegacy, nil
 }
 
 // migrateMultipartObjectLockColumns adds the object_lock_* columns to an
@@ -721,6 +757,19 @@ func validateLockMigration(ctx context.Context, tx *sql.Tx) error {
 	}
 	if orphans != 0 {
 		return fmt.Errorf("object lock migration: %d retention rows reference a non-existent version", orphans)
+	}
+
+	var holdOrphans int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM object_legal_hold_v2 n
+		WHERE n.version_id <> ''
+		  AND NOT EXISTS (SELECT 1 FROM object_versions v
+		                   WHERE v.bucket = n.bucket AND v.key = n.key
+		                     AND v.version_id = n.version_id)`).Scan(&holdOrphans); err != nil {
+		return fmt.Errorf("object lock migration: legal hold orphan check failed: %w", err)
+	}
+	if holdOrphans != 0 {
+		return fmt.Errorf("object lock migration: %d legal hold rows reference a non-existent version", holdOrphans)
 	}
 
 	return nil
@@ -1410,6 +1459,32 @@ func (m *Metadata) GetLatestObjectVersion(ctx context.Context, bucket, key strin
 		FROM object_versions WHERE bucket = ? AND key = ?
 		ORDER BY last_modified DESC LIMIT 1
 	`, bucket, key).Scan(&version.Key, &version.VersionID, &version.Size, &version.LastModified, &version.ETag, &version.ContentType, &metadataStr, &version.IsDeleteMarker)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if metadataStr != "" {
+		if err := json.Unmarshal([]byte(metadataStr), &version.Metadata); err != nil {
+			return nil, err
+		}
+	}
+
+	return &version, nil
+}
+
+// GetLatestObjectVersionExcluding returns the newest version row for key,
+// skipping excludeVersionID (used to preview the post-delete latest).
+func (m *Metadata) GetLatestObjectVersionExcluding(ctx context.Context, bucket, key, excludeVersionID string) (*ObjectVersion, error) {
+	var version ObjectVersion
+	var metadataStr string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
+		FROM object_versions WHERE bucket = ? AND key = ? AND version_id != ?
+		ORDER BY last_modified DESC LIMIT 1
+	`, bucket, key, excludeVersionID).Scan(&version.Key, &version.VersionID, &version.Size, &version.LastModified, &version.ETag, &version.ContentType, &metadataStr, &version.IsDeleteMarker)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
