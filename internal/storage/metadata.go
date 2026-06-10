@@ -658,7 +658,7 @@ const aclTagsSchemaVersion = objectLockSchemaVersion + 1
 // DDL for the ACL / tag tables. The foreign key references buckets(name)
 // (NOT objects(bucket, key)) so that INSERT OR REPLACE INTO objects no longer
 // cascade-deletes acl/tag rows on overwrite — that cascade silently reset ACLs
-// and tags of other versions of the same key (issue #41). version_id ” is the
+// and tags of other versions of the same key (issue #41). version_id "" is the
 // null version, matching the #39 lock schema.
 const createObjectACLsV2DDL = `
 	CREATE TABLE IF NOT EXISTS object_acls (
@@ -1099,6 +1099,35 @@ func (m *Metadata) putObject(ctx context.Context, bucket string, obj *Object, gu
 
 	if guard {
 		if err := guardNullVersionLockForOverwrite(ctx, tx, bucket, obj.Key); err != nil {
+			return err
+		}
+
+		// Non-versioning overwrite: reset the null version's tags and ACL.
+		//
+		// The per-version ACL/tag schema (issue #41) repointed the
+		// object_acls / object_tags FK from objects(bucket, key) to
+		// buckets(name), which (correctly) stops a plain overwrite from
+		// cascade-wiping other versions' tags/ACL. But that same cascade was
+		// the only thing that cleared the null version's own tags/ACL on a
+		// plain in-place overwrite. INSERT OR REPLACE INTO objects no longer
+		// fires any delete on object_tags/object_acls, so without this explicit
+		// reset a `PUT k (tags/acl)` followed by a plain `PUT k` would leave the
+		// stale rows visible — whereas real S3 returns an empty tag set and the
+		// default ACL after a plain overwrite. Re-applying any tags/ACL supplied
+		// on the request happens in the handler after this put.
+		//
+		// Scoped to version_id = '' (the null version) and to the guarded
+		// (non-versioning overwrite) path only: versioned writes go through
+		// PutObjectCurrentPointer, which creates a fresh version_id that starts
+		// clean, so they must NOT clear the null version's rows.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM object_tags WHERE bucket = ? AND key = ? AND version_id = ''`,
+			bucket, obj.Key); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM object_acls WHERE bucket = ? AND key = ? AND version_id = ''`,
+			bucket, obj.Key); err != nil {
 			return err
 		}
 	}

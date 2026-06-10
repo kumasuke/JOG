@@ -170,6 +170,76 @@ func hasPublicReadGrant(grants []types.Grant) bool {
 	return false
 }
 
+// TestObjectOverwrite_ResetsTagsAndACL verifies that on a non-versioning bucket
+// a plain PUT overwrite of an existing key clears the null version's previously
+// set tags and ACL, matching real S3 (an empty TagSet and the default ACL after
+// a plain overwrite).
+//
+// Regression for issue #41: the per-version ACL/tag schema repointed the
+// object_acls / object_tags FK to buckets(name), which stopped the cascade that
+// previously cleared the null version's own tags/ACL on overwrite. putObject's
+// guarded (non-versioning) path must explicitly reset those rows.
+func TestObjectOverwrite_ResetsTagsAndACL(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucket := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucket)
+	defer cleanup()
+
+	key := testutil.RandomObjectKey()
+
+	// First PUT carries tags and a public-read canned ACL on the request.
+	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:  aws.String(bucket),
+		Key:     aws.String(key),
+		Body:    strings.NewReader("v1"),
+		Tagging: aws.String("env=prod"),
+		ACL:     types.ObjectCannedACLPublicRead,
+	})
+	require.NoError(t, err)
+
+	// Sanity: the tags and ACL are present after the first PUT.
+	gotTags, err := client.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
+		Bucket: aws.String(bucket), Key: aws.String(key),
+	})
+	require.NoError(t, err)
+	require.Len(t, gotTags.TagSet, 1)
+	assert.Equal(t, "env", aws.ToString(gotTags.TagSet[0].Key))
+	assert.Equal(t, "prod", aws.ToString(gotTags.TagSet[0].Value))
+
+	gotACL, err := client.GetObjectAcl(ctx, &s3.GetObjectAclInput{
+		Bucket: aws.String(bucket), Key: aws.String(key),
+	})
+	require.NoError(t, err)
+	require.True(t, hasPublicReadGrant(gotACL.Grants),
+		"first PUT should carry the public-read grant: %+v", gotACL.Grants)
+
+	// Plain overwrite with no tags and no ACL header.
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket), Key: aws.String(key), Body: strings.NewReader("v2"),
+	})
+	require.NoError(t, err)
+
+	// Tags must now be empty (S3 returns an empty TagSet after a plain overwrite).
+	gotTags, err = client.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
+		Bucket: aws.String(bucket), Key: aws.String(key),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, gotTags.TagSet, "plain overwrite must clear the null version's tags")
+
+	// ACL must be back to the default (no AllUsers public-read grant).
+	gotACL, err = client.GetObjectAcl(ctx, &s3.GetObjectAclInput{
+		Bucket: aws.String(bucket), Key: aws.String(key),
+	})
+	require.NoError(t, err)
+	assert.False(t, hasPublicReadGrant(gotACL.Grants),
+		"plain overwrite must reset the null version's ACL to default: %+v", gotACL.Grants)
+}
+
 // TestObjectTagging_NullVersion verifies the "null" versionId selector targets
 // the null version on a non-versioning bucket (issue #41).
 func TestObjectTagging_NullVersion(t *testing.T) {
