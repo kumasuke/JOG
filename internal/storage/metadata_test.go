@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -219,13 +220,16 @@ func TestObjectLockMigration_LegacyToV2(t *testing.T) {
 		}
 	}
 
-	// user_version must be stamped.
+	// user_version must be stamped at the latest generation. Startup runs the
+	// #39 lock migration followed by the #41 acl/tags migration, so a DB that
+	// began at the legacy generation ends at aclTagsSchemaVersion (the highest
+	// stepwise generation), not merely objectLockSchemaVersion.
 	var uv int
 	if err := m.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&uv); err != nil {
 		t.Fatalf("read user_version: %v", err)
 	}
-	if uv != objectLockSchemaVersion {
-		t.Errorf("user_version = %d, want %d", uv, objectLockSchemaVersion)
+	if uv != aclTagsSchemaVersion {
+		t.Errorf("user_version = %d, want %d", uv, aclTagsSchemaVersion)
 	}
 
 	// A physical backup must have been created.
@@ -297,6 +301,555 @@ func TestPutObject_DoesNotCascadeDeleteLockRows(t *testing.T) {
 	}
 	if mode != "GOVERNANCE" || until == nil {
 		t.Errorf("v-1 retention was lost on overwrite (FK cascade regression): mode=%q until=%v", mode, until)
+	}
+}
+
+// --- issue #41: per-version object_acls / object_tags ---
+
+// sampleACL builds a minimal ACL whose marshalled form differs per call so the
+// migration value-loss check has distinguishable rows.
+func sampleACL(ownerID string) *ACL {
+	return &ACL{
+		OwnerID:      ownerID,
+		OwnerDisplay: ownerID,
+		Grants: []ACLGrant{{
+			Permission:  ACLPermissionFullControl,
+			GranteeType: ACLGranteeTypeCanonicalUser,
+			GranteeID:   ownerID,
+		}},
+	}
+}
+
+// TestObjectTags_PerVersion verifies that tags set on one version are isolated
+// from another version of the same key (issue #41).
+func TestObjectTags_PerVersion(t *testing.T) {
+	ctx := context.Background()
+	m := newTestMetadata(t)
+	now := time.Now()
+
+	if err := m.CreateBucket(ctx, "b", now); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+
+	// Tag the null version and an explicit version separately.
+	if err := m.PutObjectTags(ctx, "b", "k", "", []Tag{{Key: "env", Value: "null"}}); err != nil {
+		t.Fatalf("PutObjectTags(null): %v", err)
+	}
+	if err := m.PutObjectTags(ctx, "b", "k", "v-1", []Tag{{Key: "env", Value: "v1"}, {Key: "team", Value: "core"}}); err != nil {
+		t.Fatalf("PutObjectTags(v-1): %v", err)
+	}
+
+	nullTags, err := m.GetObjectTags(ctx, "b", "k", "")
+	if err != nil {
+		t.Fatalf("GetObjectTags(null): %v", err)
+	}
+	if len(nullTags) != 1 || nullTags[0].Value != "null" {
+		t.Errorf("null-version tags = %v, want single env=null", nullTags)
+	}
+
+	v1Tags, err := m.GetObjectTags(ctx, "b", "k", "v-1")
+	if err != nil {
+		t.Fatalf("GetObjectTags(v-1): %v", err)
+	}
+	if len(v1Tags) != 2 {
+		t.Errorf("v-1 tags = %v, want 2", v1Tags)
+	}
+
+	// Overwriting one version's tags must not touch the other.
+	if err := m.PutObjectTags(ctx, "b", "k", "v-1", []Tag{{Key: "env", Value: "v1b"}}); err != nil {
+		t.Fatalf("PutObjectTags(v-1 overwrite): %v", err)
+	}
+	nullTags, _ = m.GetObjectTags(ctx, "b", "k", "")
+	if len(nullTags) != 1 || nullTags[0].Value != "null" {
+		t.Errorf("null-version tags changed after v-1 overwrite: %v", nullTags)
+	}
+
+	// Deleting one version's tags must not touch the other.
+	if err := m.DeleteObjectTags(ctx, "b", "k", "v-1"); err != nil {
+		t.Fatalf("DeleteObjectTags(v-1): %v", err)
+	}
+	nullTags, _ = m.GetObjectTags(ctx, "b", "k", "")
+	if len(nullTags) != 1 {
+		t.Errorf("null-version tags deleted by v-1 delete: %v", nullTags)
+	}
+}
+
+// TestObjectACL_PerVersion verifies per-version ACL isolation (issue #41).
+func TestObjectACL_PerVersion(t *testing.T) {
+	ctx := context.Background()
+	m := newTestMetadata(t)
+	now := time.Now()
+
+	if err := m.CreateBucket(ctx, "b", now); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+
+	if err := m.PutObjectACL(ctx, "b", "k", "", sampleACL("owner-null")); err != nil {
+		t.Fatalf("PutObjectACL(null): %v", err)
+	}
+	if err := m.PutObjectACL(ctx, "b", "k", "v-1", sampleACL("owner-v1")); err != nil {
+		t.Fatalf("PutObjectACL(v-1): %v", err)
+	}
+
+	nullACL, err := m.GetObjectACL(ctx, "b", "k", "")
+	if err != nil || nullACL == nil {
+		t.Fatalf("GetObjectACL(null): acl=%v err=%v", nullACL, err)
+	}
+	if nullACL.OwnerID != "owner-null" {
+		t.Errorf("null-version ACL owner = %q, want owner-null", nullACL.OwnerID)
+	}
+	v1ACL, err := m.GetObjectACL(ctx, "b", "k", "v-1")
+	if err != nil || v1ACL == nil {
+		t.Fatalf("GetObjectACL(v-1): acl=%v err=%v", v1ACL, err)
+	}
+	if v1ACL.OwnerID != "owner-v1" {
+		t.Errorf("v-1 ACL owner = %q, want owner-v1", v1ACL.OwnerID)
+	}
+
+	// Updating v-1 ACL must not change the null version's ACL.
+	if err := m.PutObjectACL(ctx, "b", "k", "v-1", sampleACL("owner-v1b")); err != nil {
+		t.Fatalf("PutObjectACL(v-1 update): %v", err)
+	}
+	nullACL, _ = m.GetObjectACL(ctx, "b", "k", "")
+	if nullACL.OwnerID != "owner-null" {
+		t.Errorf("null-version ACL changed after v-1 update: owner=%q", nullACL.OwnerID)
+	}
+}
+
+// TestPutObject_DoesNotCascadeDeleteACLTagRows verifies the #41 FK fix: an
+// overwrite PUT on the null version no longer cascade-deletes the acl/tag rows
+// of a different (real) version of the same key.
+func TestPutObject_DoesNotCascadeDeleteACLTagRows(t *testing.T) {
+	ctx := context.Background()
+	m := newTestMetadata(t)
+	now := time.Now()
+
+	if err := m.CreateBucket(ctx, "b", now); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	// Seed a real version row plus its tags and ACL.
+	ver := &ObjectVersion{Key: "k", VersionID: "v-1", Size: 1, LastModified: now, ETag: "e", ContentType: "text/plain"}
+	if err := m.PutObjectVersion(ctx, "b", ver); err != nil {
+		t.Fatalf("PutObjectVersion: %v", err)
+	}
+	if err := m.PutObjectTags(ctx, "b", "k", "v-1", []Tag{{Key: "keep", Value: "me"}}); err != nil {
+		t.Fatalf("PutObjectTags(v-1): %v", err)
+	}
+	if err := m.PutObjectACL(ctx, "b", "k", "v-1", sampleACL("owner-v1")); err != nil {
+		t.Fatalf("PutObjectACL(v-1): %v", err)
+	}
+
+	// Overwrite the null version of the same key (non-versioning path). The
+	// legacy FK-to-objects cascade would wipe the v-1 acl/tag rows.
+	obj := &Object{Key: "k", Size: 2, LastModified: now, ETag: "e2", ContentType: "text/plain"}
+	if err := m.PutObject(ctx, "b", obj); err != nil {
+		t.Fatalf("PutObject overwrite: %v", err)
+	}
+
+	tags, err := m.GetObjectTags(ctx, "b", "k", "v-1")
+	if err != nil {
+		t.Fatalf("GetObjectTags(v-1) after overwrite: %v", err)
+	}
+	if len(tags) != 1 || tags[0].Key != "keep" {
+		t.Errorf("v-1 tags lost on overwrite (FK cascade regression): %v", tags)
+	}
+	acl, err := m.GetObjectACL(ctx, "b", "k", "v-1")
+	if err != nil {
+		t.Fatalf("GetObjectACL(v-1) after overwrite: %v", err)
+	}
+	if acl == nil || acl.OwnerID != "owner-v1" {
+		t.Errorf("v-1 ACL lost on overwrite (FK cascade regression): %v", acl)
+	}
+}
+
+// openLegacyACLTagsDB creates a SQLite DB with BOTH the pre-#39 lock schema and
+// the pre-#41 (bucket, key)[, tag_key]-keyed acl/tag schema, so NewMetadata's
+// startup migrations are exercised end to end. It seeds a bucket, objects (one
+// with a real version), legacy acl rows and legacy tag rows.
+func openLegacyACLTagsDB(t *testing.T, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	defer db.Close()
+
+	stmts := []string{
+		`CREATE TABLE buckets (name TEXT PRIMARY KEY, creation_date DATETIME NOT NULL)`,
+		`CREATE TABLE objects (
+			bucket TEXT NOT NULL, key TEXT NOT NULL, size INTEGER NOT NULL,
+			last_modified DATETIME NOT NULL, etag TEXT NOT NULL, content_type TEXT NOT NULL,
+			metadata TEXT, PRIMARY KEY (bucket, key),
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE)`,
+		`CREATE TABLE object_versions (
+			bucket TEXT NOT NULL, key TEXT NOT NULL, version_id TEXT NOT NULL,
+			size INTEGER NOT NULL, last_modified DATETIME NOT NULL, etag TEXT NOT NULL,
+			content_type TEXT NOT NULL, metadata TEXT, is_delete_marker INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (bucket, key, version_id),
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE)`,
+		// Legacy lock tables so migrateObjectLockSchema runs its legacy path.
+		`CREATE TABLE object_retention (
+			bucket TEXT NOT NULL, key TEXT NOT NULL, mode TEXT NOT NULL,
+			retain_until_date DATETIME NOT NULL, PRIMARY KEY (bucket, key),
+			FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE)`,
+		`CREATE TABLE object_legal_hold (
+			bucket TEXT NOT NULL, key TEXT NOT NULL, status TEXT NOT NULL,
+			PRIMARY KEY (bucket, key),
+			FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE)`,
+		// Legacy acl/tag tables with the dangerous FK to objects (issue #41).
+		`CREATE TABLE object_acls (
+			bucket TEXT NOT NULL, key TEXT NOT NULL, acl_config TEXT NOT NULL,
+			PRIMARY KEY (bucket, key),
+			FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE)`,
+		`CREATE TABLE object_tags (
+			bucket TEXT NOT NULL, key TEXT NOT NULL, tag_key TEXT NOT NULL, tag_value TEXT NOT NULL,
+			PRIMARY KEY (bucket, key, tag_key),
+			FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("legacy DDL %q: %v", s, err)
+		}
+	}
+
+	now := time.Now()
+	if _, err := db.Exec(`INSERT INTO buckets (name, creation_date) VALUES (?, ?)`, "b", now); err != nil {
+		t.Fatalf("seed bucket: %v", err)
+	}
+	for _, k := range []string{"ver-key", "null-key"} {
+		if _, err := db.Exec(`INSERT INTO objects (bucket, key, size, last_modified, etag, content_type, metadata)
+			VALUES (?, ?, 1, ?, 'e', 'text/plain', '')`, "b", k, now); err != nil {
+			t.Fatalf("seed object %q: %v", k, err)
+		}
+	}
+	// ver-key has a real version so backfill binds its acl/tag rows to it;
+	// null-key has no version rows so they backfill to '' (null version).
+	if _, err := db.Exec(`INSERT INTO object_versions (bucket, key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker)
+		VALUES (?, ?, ?, 1, ?, 'e', 'text/plain', '', 0)`, "b", "ver-key", "ver-1", now); err != nil {
+		t.Fatalf("seed version: %v", err)
+	}
+
+	// Legacy acl rows.
+	if _, err := db.Exec(`INSERT INTO object_acls (bucket, key, acl_config) VALUES (?, ?, ?)`, "b", "ver-key", `{"OwnerID":"acl-ver"}`); err != nil {
+		t.Fatalf("seed acl ver-key: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO object_acls (bucket, key, acl_config) VALUES (?, ?, ?)`, "b", "null-key", `{"OwnerID":"acl-null"}`); err != nil {
+		t.Fatalf("seed acl null-key: %v", err)
+	}
+	// Legacy tag rows (two for ver-key, one for null-key).
+	if _, err := db.Exec(`INSERT INTO object_tags (bucket, key, tag_key, tag_value) VALUES (?, ?, ?, ?)`, "b", "ver-key", "env", "prod"); err != nil {
+		t.Fatalf("seed tag ver-key/env: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO object_tags (bucket, key, tag_key, tag_value) VALUES (?, ?, ?, ?)`, "b", "ver-key", "team", "core"); err != nil {
+		t.Fatalf("seed tag ver-key/team: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO object_tags (bucket, key, tag_key, tag_value) VALUES (?, ?, ?, ?)`, "b", "null-key", "env", "dev"); err != nil {
+		t.Fatalf("seed tag null-key/env: %v", err)
+	}
+}
+
+// TestACLTagsMigration_LegacyToV2 verifies the #41 startup migration: legacy
+// (bucket, key)[, tag_key] acl/tag rows are migrated to the per-version schema,
+// version_id is backfilled (current real version, or ” for the null version),
+// values are preserved, and the legacy tables are renamed to *_legacy_v1.
+func TestACLTagsMigration_LegacyToV2(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/metadata.db"
+	openLegacyACLTagsDB(t, dbPath)
+
+	m, err := NewMetadata(dbPath)
+	if err != nil {
+		t.Fatalf("NewMetadata (migration) error = %v", err)
+	}
+	defer m.Close()
+
+	// ver-key acl/tags are bound to the real version ver-1.
+	acl, err := m.GetObjectACL(ctx, "b", "ver-key", "ver-1")
+	if err != nil || acl == nil {
+		t.Fatalf("GetObjectACL(ver-key, ver-1): acl=%v err=%v", acl, err)
+	}
+	if acl.OwnerID != "acl-ver" {
+		t.Errorf("ver-key acl not migrated to ver-1: owner=%q", acl.OwnerID)
+	}
+	verTags, err := m.GetObjectTags(ctx, "b", "ver-key", "ver-1")
+	if err != nil {
+		t.Fatalf("GetObjectTags(ver-key, ver-1): %v", err)
+	}
+	if len(verTags) != 2 {
+		t.Errorf("ver-key tags not migrated to ver-1: %v", verTags)
+	}
+
+	// null-key acl/tags are bound to the null version ''.
+	acl, err = m.GetObjectACL(ctx, "b", "null-key", "")
+	if err != nil || acl == nil {
+		t.Fatalf("GetObjectACL(null-key, ''): acl=%v err=%v", acl, err)
+	}
+	if acl.OwnerID != "acl-null" {
+		t.Errorf("null-key acl not migrated to null version: owner=%q", acl.OwnerID)
+	}
+	nullTags, err := m.GetObjectTags(ctx, "b", "null-key", "")
+	if err != nil {
+		t.Fatalf("GetObjectTags(null-key, ''): %v", err)
+	}
+	if len(nullTags) != 1 || nullTags[0].Value != "dev" {
+		t.Errorf("null-key tags not migrated to null version: %v", nullTags)
+	}
+
+	// Legacy tables must be retained (renamed, not dropped).
+	for _, tbl := range []string{"object_acls_legacy_v1", "object_tags_legacy_v1"} {
+		var name string
+		if err := m.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&name); err != nil {
+			t.Errorf("legacy table %q missing after migration: %v", tbl, err)
+		}
+	}
+
+	// user_version must be stamped at the acl/tags generation.
+	var uv int
+	if err := m.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&uv); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if uv != aclTagsSchemaVersion {
+		t.Errorf("user_version = %d, want %d", uv, aclTagsSchemaVersion)
+	}
+
+	// A physical backup must have been created.
+	if _, err := os.Stat(dbPath + ".pre-acltagsv2.bak"); err != nil {
+		t.Errorf("expected pre-migration backup file: %v", err)
+	}
+
+	// Re-opening the already-migrated DB must be a no-op (idempotent).
+	if err := m.Close(); err != nil {
+		t.Fatalf("close before reopen: %v", err)
+	}
+	m2, err := NewMetadata(dbPath)
+	if err != nil {
+		t.Fatalf("NewMetadata reopen error = %v", err)
+	}
+	defer m2.Close()
+	acl, err = m2.GetObjectACL(ctx, "b", "ver-key", "ver-1")
+	if err != nil || acl == nil || acl.OwnerID != "acl-ver" {
+		t.Errorf("idempotent reopen lost ver-key acl: acl=%v err=%v", acl, err)
+	}
+}
+
+// TestFreshDB_ACLTagsSchemaIsPerVersion verifies a brand-new DB starts directly
+// on the per-version acl/tags schema (version_id column present, FK to buckets).
+func TestFreshDB_ACLTagsSchemaIsPerVersion(t *testing.T) {
+	ctx := context.Background()
+	m := newTestMetadata(t)
+
+	for _, tbl := range []string{"object_acls", "object_tags"} {
+		var hasVersionID bool
+		rows, err := m.db.QueryContext(ctx, `PRAGMA table_info('`+tbl+`')`)
+		if err != nil {
+			t.Fatalf("table_info(%s): %v", tbl, err)
+		}
+		for rows.Next() {
+			var cid, notNull, pk int
+			var name, ctype string
+			var dflt sql.NullString
+			if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+				rows.Close()
+				t.Fatalf("scan column info: %v", err)
+			}
+			if name == "version_id" {
+				hasVersionID = true
+			}
+		}
+		rows.Close()
+		if !hasVersionID {
+			t.Errorf("fresh %s table missing version_id column", tbl)
+		}
+	}
+
+	var uv int
+	if err := m.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&uv); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if uv != aclTagsSchemaVersion {
+		t.Errorf("fresh DB user_version = %d, want %d", uv, aclTagsSchemaVersion)
+	}
+}
+
+const (
+	legacyObjectACLsDDL = `CREATE TABLE object_acls (
+		bucket TEXT NOT NULL, key TEXT NOT NULL, acl_config TEXT NOT NULL,
+		PRIMARY KEY (bucket, key),
+		FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE)`
+	legacyObjectTagsDDL = `CREATE TABLE object_tags (
+		bucket TEXT NOT NULL, key TEXT NOT NULL, tag_key TEXT NOT NULL, tag_value TEXT NOT NULL,
+		PRIMARY KEY (bucket, key, tag_key),
+		FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE)`
+)
+
+type aclTagsSchemaSnapshot struct {
+	userVersion      int
+	aclsExists       bool
+	tagsExists       bool
+	aclsHasVersionID bool
+	tagsHasVersionID bool
+}
+
+func tableExistsInDB(t *testing.T, db *sql.DB, name string) bool {
+	t.Helper()
+	var tbl string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&tbl)
+	return err == nil
+}
+
+func tableHasVersionIDColumn(t *testing.T, db *sql.DB, table string) bool {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA table_info('` + table + `')`)
+	if err != nil {
+		t.Fatalf("table_info(%s): %v", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var colName, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &colName, &ctype, &notNull, &dflt, &pk); err != nil {
+			t.Fatalf("scan table_info(%s): %v", table, err)
+		}
+		if colName == "version_id" {
+			return true
+		}
+	}
+	return false
+}
+
+func snapshotACLTagsSchema(t *testing.T, dbPath string) aclTagsSchemaSnapshot {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db for snapshot: %v", err)
+	}
+	defer db.Close()
+
+	var snap aclTagsSchemaSnapshot
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&snap.userVersion); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	snap.aclsExists = tableExistsInDB(t, db, "object_acls")
+	snap.tagsExists = tableExistsInDB(t, db, "object_tags")
+	if snap.aclsExists {
+		snap.aclsHasVersionID = tableHasVersionIDColumn(t, db, "object_acls")
+	}
+	if snap.tagsExists {
+		snap.tagsHasVersionID = tableHasVersionIDColumn(t, db, "object_tags")
+	}
+	return snap
+}
+
+// openPreACLTagsMigrationDB creates a DB with the lock migration already
+// satisfied (v2 lock tables, user_version == objectLockSchemaVersion). The
+// caller supplies acl/tag DDL; an empty string leaves that table absent.
+func openPreACLTagsMigrationDB(t *testing.T, dbPath string, aclsDDL, tagsDDL string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open pre-acl/tags db: %v", err)
+	}
+	defer db.Close()
+
+	stmts := []string{
+		`CREATE TABLE buckets (name TEXT PRIMARY KEY, creation_date DATETIME NOT NULL)`,
+		`CREATE TABLE objects (
+			bucket TEXT NOT NULL, key TEXT NOT NULL, size INTEGER NOT NULL,
+			last_modified DATETIME NOT NULL, etag TEXT NOT NULL, content_type TEXT NOT NULL,
+			metadata TEXT, PRIMARY KEY (bucket, key),
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE)`,
+		`CREATE TABLE object_versions (
+			bucket TEXT NOT NULL, key TEXT NOT NULL, version_id TEXT NOT NULL,
+			size INTEGER NOT NULL, last_modified DATETIME NOT NULL, etag TEXT NOT NULL,
+			content_type TEXT NOT NULL, metadata TEXT, is_delete_marker INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (bucket, key, version_id),
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE)`,
+		createRetentionV2DDL,
+		createLegalHoldV2DDL,
+	}
+	if aclsDDL != "" {
+		stmts = append(stmts, aclsDDL)
+	}
+	if tagsDDL != "" {
+		stmts = append(stmts, tagsDDL)
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("pre-acl/tags DDL %q: %v", s, err)
+		}
+	}
+
+	now := time.Now()
+	if _, err := db.Exec(`INSERT INTO buckets (name, creation_date) VALUES (?, ?)`, "b", now); err != nil {
+		t.Fatalf("seed bucket: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO objects (bucket, key, size, last_modified, etag, content_type, metadata)
+		VALUES (?, ?, 1, ?, 'e', 'text/plain', '')`, "b", "k", now); err != nil {
+		t.Fatalf("seed object: %v", err)
+	}
+	if aclsDDL == legacyObjectACLsDDL {
+		if _, err := db.Exec(`INSERT INTO object_acls (bucket, key, acl_config) VALUES (?, ?, ?)`, "b", "k", `{"OwnerID":"keep"}`); err != nil {
+			t.Fatalf("seed legacy acl: %v", err)
+		}
+	}
+	if tagsDDL == legacyObjectTagsDDL {
+		if _, err := db.Exec(`INSERT INTO object_tags (bucket, key, tag_key, tag_value) VALUES (?, ?, ?, ?)`, "b", "k", "env", "keep"); err != nil {
+			t.Fatalf("seed legacy tag: %v", err)
+		}
+	}
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, objectLockSchemaVersion)); err != nil {
+		t.Fatalf("set user_version: %v", err)
+	}
+}
+
+// TestACLTagsMigration_FailsOnMixedGeneration verifies migrateACLTagsSchema is
+// fail-closed when object_acls and object_tags are not the same generation.
+func TestACLTagsMigration_FailsOnMixedGeneration(t *testing.T) {
+	cases := []struct {
+		name          string
+		aclsDDL       string
+		tagsDDL       string
+		wantErrSubstr string
+	}{
+		{
+			name:          "legacy_acls_v2_tags",
+			aclsDDL:       legacyObjectACLsDDL,
+			tagsDDL:       createObjectTagsV2DDL,
+			wantErrSubstr: "object_acls=legacy object_tags=v2",
+		},
+		{
+			name:          "absent_acls_legacy_tags",
+			aclsDDL:       "",
+			tagsDDL:       legacyObjectTagsDDL,
+			wantErrSubstr: "object_acls=absent object_tags=legacy",
+		},
+		{
+			name:          "absent_acls_v2_tags",
+			aclsDDL:       "",
+			tagsDDL:       createObjectTagsV2DDL,
+			wantErrSubstr: "object_acls=absent object_tags=v2",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := t.TempDir() + "/metadata.db"
+			openPreACLTagsMigrationDB(t, dbPath, tc.aclsDDL, tc.tagsDDL)
+			before := snapshotACLTagsSchema(t, dbPath)
+
+			_, err := NewMetadata(dbPath)
+			if err == nil {
+				t.Fatal("expected NewMetadata to fail on mixed acl/tags generation")
+			}
+			if !strings.Contains(err.Error(), tc.wantErrSubstr) {
+				t.Errorf("error = %q, want substring %q", err.Error(), tc.wantErrSubstr)
+			}
+
+			after := snapshotACLTagsSchema(t, dbPath)
+			if after != before {
+				t.Errorf("schema changed on failure:\nbefore=%+v\nafter=%+v", before, after)
+			}
+		})
 	}
 }
 

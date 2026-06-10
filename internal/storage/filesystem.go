@@ -1366,8 +1366,11 @@ func randomHex(length int) string {
 	return hex.EncodeToString(b)
 }
 
-// PutObjectTagging stores tags for an object.
-func (fs *FileSystem) PutObjectTagging(ctx context.Context, bucket, key string, tags []Tag) error {
+// PutObjectTagging stores tags for a specific object version (issue #41).
+// versionID "" targets the null version (the current object on a non-versioning
+// bucket). Tags are persisted against (bucket, key, version_id) so other
+// versions of the same key retain their tags.
+func (fs *FileSystem) PutObjectTagging(ctx context.Context, bucket, key, versionID string, tags []Tag) error {
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -1377,20 +1380,21 @@ func (fs *FileSystem) PutObjectTagging(ctx context.Context, bucket, key string, 
 		return ErrBucketNotFound
 	}
 
-	// Check if object exists
-	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	// Check if the targeted version exists.
+	versionExists, err := fs.objectVersionExists(ctx, bucket, key, versionID)
 	if err != nil {
 		return err
 	}
-	if obj == nil {
+	if !versionExists {
 		return ErrObjectNotFound
 	}
 
-	return fs.metadata.PutObjectTags(ctx, bucket, key, tags)
+	return fs.metadata.PutObjectTags(ctx, bucket, key, versionID, tags)
 }
 
-// GetObjectTagging returns tags for an object.
-func (fs *FileSystem) GetObjectTagging(ctx context.Context, bucket, key string) ([]Tag, error) {
+// GetObjectTagging returns tags for a specific object version. versionID ""
+// addresses the null version.
+func (fs *FileSystem) GetObjectTagging(ctx context.Context, bucket, key, versionID string) ([]Tag, error) {
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -1400,20 +1404,21 @@ func (fs *FileSystem) GetObjectTagging(ctx context.Context, bucket, key string) 
 		return nil, ErrBucketNotFound
 	}
 
-	// Check if object exists
-	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	// Check if the targeted version exists.
+	versionExists, err := fs.objectVersionExists(ctx, bucket, key, versionID)
 	if err != nil {
 		return nil, err
 	}
-	if obj == nil {
+	if !versionExists {
 		return nil, ErrObjectNotFound
 	}
 
-	return fs.metadata.GetObjectTags(ctx, bucket, key)
+	return fs.metadata.GetObjectTags(ctx, bucket, key, versionID)
 }
 
-// DeleteObjectTagging deletes all tags for an object.
-func (fs *FileSystem) DeleteObjectTagging(ctx context.Context, bucket, key string) error {
+// DeleteObjectTagging deletes all tags for a specific object version. versionID
+// "" addresses the null version.
+func (fs *FileSystem) DeleteObjectTagging(ctx context.Context, bucket, key, versionID string) error {
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -1423,16 +1428,16 @@ func (fs *FileSystem) DeleteObjectTagging(ctx context.Context, bucket, key strin
 		return ErrBucketNotFound
 	}
 
-	// Check if object exists
-	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	// Check if the targeted version exists.
+	versionExists, err := fs.objectVersionExists(ctx, bucket, key, versionID)
 	if err != nil {
 		return err
 	}
-	if obj == nil {
+	if !versionExists {
 		return ErrObjectNotFound
 	}
 
-	return fs.metadata.DeleteObjectTags(ctx, bucket, key)
+	return fs.metadata.DeleteObjectTags(ctx, bucket, key, versionID)
 }
 
 // PutBucketTagging stores tags for a bucket.
@@ -2094,8 +2099,11 @@ func (fs *FileSystem) GetBucketACL(ctx context.Context, bucket string) (*ACL, er
 	return acl, nil
 }
 
-// PutObjectACL stores the ACL for an object.
-func (fs *FileSystem) PutObjectACL(ctx context.Context, bucket, key string, acl *ACL) error {
+// PutObjectACL stores the ACL for a specific object version (issue #41).
+// versionID "" targets the null version (the current object on a non-versioning
+// bucket). The ACL is persisted against (bucket, key, version_id) so other
+// versions of the same key retain their ACLs.
+func (fs *FileSystem) PutObjectACL(ctx context.Context, bucket, key, versionID string, acl *ACL) error {
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -2105,20 +2113,21 @@ func (fs *FileSystem) PutObjectACL(ctx context.Context, bucket, key string, acl 
 		return ErrBucketNotFound
 	}
 
-	// Check if object exists
-	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	// Check if the targeted version exists.
+	versionExists, err := fs.objectVersionExists(ctx, bucket, key, versionID)
 	if err != nil {
 		return err
 	}
-	if obj == nil {
+	if !versionExists {
 		return ErrObjectNotFound
 	}
 
-	return fs.metadata.PutObjectACL(ctx, bucket, key, acl)
+	return fs.metadata.PutObjectACL(ctx, bucket, key, versionID, acl)
 }
 
-// GetObjectACL returns the ACL for an object.
-func (fs *FileSystem) GetObjectACL(ctx context.Context, bucket, key string) (*ACL, error) {
+// GetObjectACL returns the ACL for a specific object version. versionID ""
+// addresses the null version.
+func (fs *FileSystem) GetObjectACL(ctx context.Context, bucket, key, versionID string) (*ACL, error) {
 	// Check if bucket exists
 	exists, err := fs.metadata.BucketExists(ctx, bucket)
 	if err != nil {
@@ -2128,16 +2137,16 @@ func (fs *FileSystem) GetObjectACL(ctx context.Context, bucket, key string) (*AC
 		return nil, ErrBucketNotFound
 	}
 
-	// Check if object exists
-	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	// Check if the targeted version exists.
+	versionExists, err := fs.objectVersionExists(ctx, bucket, key, versionID)
 	if err != nil {
 		return nil, err
 	}
-	if obj == nil {
+	if !versionExists {
 		return nil, ErrObjectNotFound
 	}
 
-	acl, err := fs.metadata.GetObjectACL(ctx, bucket, key)
+	acl, err := fs.metadata.GetObjectACL(ctx, bucket, key, versionID)
 	if err != nil {
 		return nil, err
 	}

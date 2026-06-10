@@ -134,20 +134,10 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create parts table: %w", err)
 	}
 
-	// Create object_tags table
-	_, err = m.db.Exec(`
-		CREATE TABLE IF NOT EXISTS object_tags (
-			bucket TEXT NOT NULL,
-			key TEXT NOT NULL,
-			tag_key TEXT NOT NULL,
-			tag_value TEXT NOT NULL,
-			PRIMARY KEY (bucket, key, tag_key),
-			FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE
-		)
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to create object_tags table: %w", err)
-	}
+	// object_tags is created/migrated by migrateACLTagsSchema (per-version
+	// schema, issue #41). The legacy (bucket, key, tag_key) DDL is intentionally
+	// NOT created here so that a fresh DB starts directly on the v2 schema and a
+	// legacy DB is migrated exactly once. See migrateACLTagsSchema.
 
 	// Create bucket_tags table
 	_, err = m.db.Exec(`
@@ -227,19 +217,9 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create bucket_acls table: %w", err)
 	}
 
-	// Create object_acls table (stores ACL as JSON)
-	_, err = m.db.Exec(`
-		CREATE TABLE IF NOT EXISTS object_acls (
-			bucket TEXT NOT NULL,
-			key TEXT NOT NULL,
-			acl_config TEXT NOT NULL,
-			PRIMARY KEY (bucket, key),
-			FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE
-		)
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to create object_acls table: %w", err)
-	}
+	// object_acls is created/migrated by migrateACLTagsSchema (per-version
+	// schema, issue #41); see the note above object_tags. The legacy
+	// (bucket, key) DDL is intentionally NOT created here.
 
 	// Create bucket_encryption table (stores encryption config as JSON)
 	_, err = m.db.Exec(`
@@ -282,6 +262,15 @@ func (m *Metadata) initialize() error {
 	// legacy (bucket, key)-keyed rows. See migrateObjectLockSchema for the
 	// fail-closed migration contract. This MUST run before any lock writes.
 	if err := m.migrateObjectLockSchema(); err != nil {
+		return err
+	}
+
+	// Create the per-version object_acls / object_tags tables (v3 schema) and
+	// migrate any legacy (bucket, key)[, tag_key]-keyed rows. Same fail-closed
+	// contract as the lock migration (issue #41). MUST run before any acl/tag
+	// writes and after the lock migration (it shares the PRAGMA user_version
+	// generation counter).
+	if err := m.migrateACLTagsSchema(); err != nil {
 		return err
 	}
 
@@ -775,6 +764,388 @@ func validateLockMigration(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+// aclTagsSchemaVersion is written to PRAGMA user_version once the per-version
+// object_acls / object_tags tables (v3) are in place. It is the next generation
+// after objectLockSchemaVersion (issue #41 follows issue #39 in the same
+// stepwise migration framework).
+const aclTagsSchemaVersion = objectLockSchemaVersion + 1
+
+// createObjectACLsV2DDL / createObjectTagsV2DDL are the canonical per-version
+// DDL for the ACL / tag tables. The foreign key references buckets(name)
+// (NOT objects(bucket, key)) so that INSERT OR REPLACE INTO objects no longer
+// cascade-deletes acl/tag rows on overwrite — that cascade silently reset ACLs
+// and tags of other versions of the same key (issue #41). version_id "" is the
+// null version, matching the #39 lock schema.
+const createObjectACLsV2DDL = `
+	CREATE TABLE IF NOT EXISTS object_acls (
+		bucket     TEXT NOT NULL,
+		key        TEXT NOT NULL,
+		version_id TEXT NOT NULL DEFAULT '',
+		acl_config TEXT NOT NULL,
+		PRIMARY KEY (bucket, key, version_id),
+		FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+	)`
+
+const createObjectTagsV2DDL = `
+	CREATE TABLE IF NOT EXISTS object_tags (
+		bucket     TEXT NOT NULL,
+		key        TEXT NOT NULL,
+		version_id TEXT NOT NULL DEFAULT '',
+		tag_key    TEXT NOT NULL,
+		tag_value  TEXT NOT NULL,
+		PRIMARY KEY (bucket, key, version_id, tag_key),
+		FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+	)`
+
+// aclTagsTableGeneration classifies an active acl/tags table as absent (no
+// table), legacy (no version_id column), or v2 (has version_id). Each table is
+// inspected independently so a mixed-generation DB is rejected fail-closed.
+type aclTagsTableGeneration int
+
+const (
+	aclTagsTableAbsent aclTagsTableGeneration = iota
+	aclTagsTableLegacy
+	aclTagsTableV2
+)
+
+func (g aclTagsTableGeneration) String() string {
+	switch g {
+	case aclTagsTableAbsent:
+		return "absent"
+	case aclTagsTableLegacy:
+		return "legacy"
+	case aclTagsTableV2:
+		return "v2"
+	default:
+		return "unknown"
+	}
+}
+
+// aclTagsTableGeneration reports the schema generation of table (object_acls or
+// object_tags) by inspecting PRAGMA table_info.
+func (m *Metadata) aclTagsTableGeneration(table string) (aclTagsTableGeneration, error) {
+	rows, err := m.db.Query(`PRAGMA table_info('` + table + `')`)
+	if err != nil {
+		return 0, fmt.Errorf("failed to inspect %s columns: %w", table, err)
+	}
+	defer rows.Close()
+
+	var tableExists, hasVersionCol bool
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			ctype      string
+			notNull    int
+			dfltValue  sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &primaryKey); err != nil {
+			return 0, fmt.Errorf("failed to scan %s column info: %w", table, err)
+		}
+		tableExists = true
+		if name == "version_id" {
+			hasVersionCol = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("failed to read %s column info: %w", table, err)
+	}
+	if !tableExists {
+		return aclTagsTableAbsent, nil
+	}
+	if hasVersionCol {
+		return aclTagsTableV2, nil
+	}
+	return aclTagsTableLegacy, nil
+}
+
+// migrateACLTagsSchema brings the object_acls / object_tags tables to the
+// per-version (bucket, key, version_id) schema (issue #41). It mirrors the
+// fail-closed contract of migrateObjectLockSchema: a fresh DB gets the v2 DDL
+// directly, a legacy DB is migrated inside a single transaction with row-count
+// validation, and any mismatch ROLLBACKs and aborts startup. Old tables are
+// renamed to *_legacy_v1 (not dropped) and a physical backup is taken first.
+//
+// Each active table is classified independently (absent / legacy / v2). Only
+// homogeneous pairs are allowed: both absent, both v2, or both legacy.
+func (m *Metadata) migrateACLTagsSchema() error {
+	var userVersion int
+	if err := m.db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
+		return fmt.Errorf("failed to read user_version: %w", err)
+	}
+
+	aclsGen, err := m.aclTagsTableGeneration("object_acls")
+	if err != nil {
+		return err
+	}
+	tagsGen, err := m.aclTagsTableGeneration("object_tags")
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case aclsGen == aclTagsTableAbsent && tagsGen == aclTagsTableAbsent:
+		if _, err := m.db.Exec(createObjectACLsV2DDL); err != nil {
+			return fmt.Errorf("failed to create object_acls table: %w", err)
+		}
+		if _, err := m.db.Exec(createObjectTagsV2DDL); err != nil {
+			return fmt.Errorf("failed to create object_tags table: %w", err)
+		}
+		if _, err := m.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, aclTagsSchemaVersion)); err != nil {
+			return fmt.Errorf("failed to set user_version: %w", err)
+		}
+		return nil
+
+	case aclsGen == aclTagsTableV2 && tagsGen == aclTagsTableV2:
+		if userVersion >= aclTagsSchemaVersion {
+			return nil
+		}
+		if _, err := m.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, aclTagsSchemaVersion)); err != nil {
+			return fmt.Errorf("failed to set user_version: %w", err)
+		}
+		return nil
+
+	case aclsGen == aclTagsTableLegacy && tagsGen == aclTagsTableLegacy:
+		return m.runACLTagsMigration()
+
+	default:
+		return fmt.Errorf(
+			"acl/tags schema mismatch: object_acls=%s object_tags=%s; manual intervention required",
+			aclsGen, tagsGen,
+		)
+	}
+}
+
+// runACLTagsMigration performs the legacy -> v2 migration for object_acls /
+// object_tags. The whole migration runs in a single transaction; a physical
+// VACUUM INTO backup is taken first (outside the transaction).
+func (m *Metadata) runACLTagsMigration() error {
+	// Step 0: physical backup before touching anything.
+	if m.dbPath != "" {
+		backupPath := m.dbPath + ".pre-acltagsv2.bak"
+		_ = os.Remove(backupPath)
+		if _, err := m.db.Exec(`VACUUM INTO ?`, backupPath); err != nil {
+			return fmt.Errorf("acl/tags migration: failed to create backup %q: %w", backupPath, err)
+		}
+	}
+
+	ctx := context.Background()
+
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("acl/tags migration: failed to begin transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Acquire an immediate write lock so any future concurrent opener blocks.
+	if _, err := tx.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		// modernc/sqlite already opened an implicit deferred transaction via
+		// BeginTx; a nested BEGIN may error. Fall through — BeginTx already
+		// provides isolation for our single-process use.
+		_ = err
+	}
+
+	// Step 1: create the v2 tables under temporary names. The backfill binds a
+	// legacy (bucket, key) acl/tag row to the newest non-delete-marker
+	// version_id when one exists, else '' (null version) — same rule the #39
+	// lock migration used. acl_config / tag_key / tag_value are copied verbatim
+	// (zero transformation = zero loss).
+	if _, err := tx.ExecContext(ctx, `
+		CREATE TABLE object_acls_v2 (
+			bucket     TEXT NOT NULL,
+			key        TEXT NOT NULL,
+			version_id TEXT NOT NULL DEFAULT '',
+			acl_config TEXT NOT NULL,
+			PRIMARY KEY (bucket, key, version_id),
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)`); err != nil {
+		return fmt.Errorf("acl/tags migration: failed to create object_acls_v2: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		CREATE TABLE object_tags_v2 (
+			bucket     TEXT NOT NULL,
+			key        TEXT NOT NULL,
+			version_id TEXT NOT NULL DEFAULT '',
+			tag_key    TEXT NOT NULL,
+			tag_value  TEXT NOT NULL,
+			PRIMARY KEY (bucket, key, version_id, tag_key),
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)`); err != nil {
+		return fmt.Errorf("acl/tags migration: failed to create object_tags_v2: %w", err)
+	}
+
+	// Step 2: backfill ACLs.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO object_acls_v2 (bucket, key, version_id, acl_config)
+		SELECT
+			a.bucket,
+			a.key,
+			COALESCE(
+				(SELECT v.version_id
+				   FROM object_versions v
+				  WHERE v.bucket = a.bucket
+				    AND v.key    = a.key
+				    AND v.is_delete_marker = 0
+				  ORDER BY v.last_modified DESC, v.version_id DESC
+				  LIMIT 1),
+				''
+			),
+			a.acl_config
+		FROM object_acls a`); err != nil {
+		return fmt.Errorf("acl/tags migration: failed to backfill object_acls_v2: %w", err)
+	}
+
+	// Step 3: backfill tags.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO object_tags_v2 (bucket, key, version_id, tag_key, tag_value)
+		SELECT
+			t.bucket,
+			t.key,
+			COALESCE(
+				(SELECT v.version_id
+				   FROM object_versions v
+				  WHERE v.bucket = t.bucket
+				    AND v.key    = t.key
+				    AND v.is_delete_marker = 0
+				  ORDER BY v.last_modified DESC, v.version_id DESC
+				  LIMIT 1),
+				''
+			),
+			t.tag_key,
+			t.tag_value
+		FROM object_tags t`); err != nil {
+		return fmt.Errorf("acl/tags migration: failed to backfill object_tags_v2: %w", err)
+	}
+
+	// Step 4: in-transaction validation. Any mismatch aborts the migration.
+	if err := validateACLTagsMigration(ctx, tx); err != nil {
+		return err
+	}
+
+	// Step 5: retire the legacy tables (rename, not drop) and promote v2.
+	for _, stmt := range []string{
+		`ALTER TABLE object_acls    RENAME TO object_acls_legacy_v1`,
+		`ALTER TABLE object_acls_v2 RENAME TO object_acls`,
+		`ALTER TABLE object_tags    RENAME TO object_tags_legacy_v1`,
+		`ALTER TABLE object_tags_v2 RENAME TO object_tags`,
+	} {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("acl/tags migration: rename step failed (%q): %w", stmt, err)
+		}
+	}
+
+	// Step 6: stamp the schema generation (user_version is transactional).
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, aclTagsSchemaVersion)); err != nil {
+		return fmt.Errorf("acl/tags migration: failed to set user_version: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("acl/tags migration: commit failed: %w", err)
+	}
+	committed = true
+
+	// Step 7 (post-commit): the renamed schema must satisfy all FK constraints.
+	var fkViolations int
+	if err := m.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&fkViolations); err != nil {
+		return fmt.Errorf("acl/tags migration: foreign_key_check failed: %w", err)
+	}
+	if fkViolations != 0 {
+		return fmt.Errorf("acl/tags migration: %d foreign key violations after commit", fkViolations)
+	}
+
+	return nil
+}
+
+// validateACLTagsMigration runs row-count / value-loss verification against the
+// in-flight v2 tables. It returns a descriptive error on any discrepancy so
+// startup fails closed.
+func validateACLTagsMigration(ctx context.Context, tx *sql.Tx) error {
+	// (a) row-count parity for ACLs.
+	var oldA, newA int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM object_acls`).Scan(&oldA); err != nil {
+		return fmt.Errorf("acl/tags migration: count old acls: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM object_acls_v2`).Scan(&newA); err != nil {
+		return fmt.Errorf("acl/tags migration: count new acls: %w", err)
+	}
+	if oldA != newA {
+		return fmt.Errorf("acl/tags migration: acl row count mismatch (old=%d new=%d)", oldA, newA)
+	}
+
+	// (b) no value loss / mutation for ACLs.
+	var missingA int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM object_acls a
+		LEFT JOIN object_acls_v2 n
+		  ON n.bucket = a.bucket AND n.key = a.key AND n.acl_config = a.acl_config
+		WHERE n.bucket IS NULL`).Scan(&missingA); err != nil {
+		return fmt.Errorf("acl/tags migration: acl value-loss check failed: %w", err)
+	}
+	if missingA != 0 {
+		return fmt.Errorf("acl/tags migration: %d acl rows lost or altered during backfill", missingA)
+	}
+
+	// (c) row-count parity for tags.
+	var oldT, newT int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM object_tags`).Scan(&oldT); err != nil {
+		return fmt.Errorf("acl/tags migration: count old tags: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM object_tags_v2`).Scan(&newT); err != nil {
+		return fmt.Errorf("acl/tags migration: count new tags: %w", err)
+	}
+	if oldT != newT {
+		return fmt.Errorf("acl/tags migration: tag row count mismatch (old=%d new=%d)", oldT, newT)
+	}
+
+	// (d) no value loss / mutation for tags.
+	var missingT int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM object_tags t
+		LEFT JOIN object_tags_v2 n
+		  ON n.bucket = t.bucket AND n.key = t.key
+		  AND n.tag_key = t.tag_key AND n.tag_value = t.tag_value
+		WHERE n.bucket IS NULL`).Scan(&missingT); err != nil {
+		return fmt.Errorf("acl/tags migration: tag value-loss check failed: %w", err)
+	}
+	if missingT != 0 {
+		return fmt.Errorf("acl/tags migration: %d tag rows lost or altered during backfill", missingT)
+	}
+
+	// (e) orphan check: every non-'' version_id must exist in object_versions.
+	var orphanA int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM object_acls_v2 n
+		WHERE n.version_id <> ''
+		  AND NOT EXISTS (SELECT 1 FROM object_versions v
+		                   WHERE v.bucket = n.bucket AND v.key = n.key
+		                     AND v.version_id = n.version_id)`).Scan(&orphanA); err != nil {
+		return fmt.Errorf("acl/tags migration: acl orphan check failed: %w", err)
+	}
+	if orphanA != 0 {
+		return fmt.Errorf("acl/tags migration: %d acl rows reference a non-existent version", orphanA)
+	}
+	var orphanT int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM object_tags_v2 n
+		WHERE n.version_id <> ''
+		  AND NOT EXISTS (SELECT 1 FROM object_versions v
+		                   WHERE v.bucket = n.bucket AND v.key = n.key
+		                     AND v.version_id = n.version_id)`).Scan(&orphanT); err != nil {
+		return fmt.Errorf("acl/tags migration: tag orphan check failed: %w", err)
+	}
+	if orphanT != 0 {
+		return fmt.Errorf("acl/tags migration: %d tag rows reference a non-existent version", orphanT)
+	}
+
+	return nil
+}
+
 // CreateBucket creates a new bucket.
 func (m *Metadata) CreateBucket(ctx context.Context, name string, creationDate time.Time) error {
 	_, err := m.db.ExecContext(ctx, `
@@ -885,6 +1256,35 @@ func (m *Metadata) putObject(ctx context.Context, bucket string, obj *Object, gu
 
 	if guard {
 		if err := guardNullVersionLockForOverwrite(ctx, tx, bucket, obj.Key); err != nil {
+			return err
+		}
+
+		// Non-versioning overwrite: reset the null version's tags and ACL.
+		//
+		// The per-version ACL/tag schema (issue #41) repointed the
+		// object_acls / object_tags FK from objects(bucket, key) to
+		// buckets(name), which (correctly) stops a plain overwrite from
+		// cascade-wiping other versions' tags/ACL. But that same cascade was
+		// the only thing that cleared the null version's own tags/ACL on a
+		// plain in-place overwrite. INSERT OR REPLACE INTO objects no longer
+		// fires any delete on object_tags/object_acls, so without this explicit
+		// reset a `PUT k (tags/acl)` followed by a plain `PUT k` would leave the
+		// stale rows visible — whereas real S3 returns an empty tag set and the
+		// default ACL after a plain overwrite. Re-applying any tags/ACL supplied
+		// on the request happens in the handler after this put.
+		//
+		// Scoped to version_id = '' (the null version) and to the guarded
+		// (non-versioning overwrite) path only: versioned writes go through
+		// PutObjectCurrentPointer, which creates a fresh version_id that starts
+		// clean, so they must NOT clear the null version's rows.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM object_tags WHERE bucket = ? AND key = ? AND version_id = ''`,
+			bucket, obj.Key); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM object_acls WHERE bucket = ? AND key = ? AND version_id = ''`,
+			bucket, obj.Key); err != nil {
 			return err
 		}
 	}
@@ -1263,16 +1663,18 @@ func (m *Metadata) ListMultipartUploadsByBucket(ctx context.Context, bucket, pre
 	return uploads, isTruncated, nextKeyMarker, nextUploadIDMarker, nil
 }
 
-// PutObjectTags stores tags for an object.
-func (m *Metadata) PutObjectTags(ctx context.Context, bucket, key string, tags []Tag) error {
+// PutObjectTags stores tags for a specific object version. versionID "" targets
+// the null version (issue #41). Tags are scoped to (bucket, key, version_id) so
+// other versions of the same key keep their tags.
+func (m *Metadata) PutObjectTags(ctx context.Context, bucket, key, versionID string, tags []Tag) error {
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	// Delete existing tags
-	_, err = tx.ExecContext(ctx, `DELETE FROM object_tags WHERE bucket = ? AND key = ?`, bucket, key)
+	// Delete existing tags for this version only.
+	_, err = tx.ExecContext(ctx, `DELETE FROM object_tags WHERE bucket = ? AND key = ? AND version_id = ?`, bucket, key, versionID)
 	if err != nil {
 		return err
 	}
@@ -1280,9 +1682,9 @@ func (m *Metadata) PutObjectTags(ctx context.Context, bucket, key string, tags [
 	// Insert new tags
 	for _, tag := range tags {
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO object_tags (bucket, key, tag_key, tag_value)
-			VALUES (?, ?, ?, ?)
-		`, bucket, key, tag.Key, tag.Value)
+			INSERT INTO object_tags (bucket, key, version_id, tag_key, tag_value)
+			VALUES (?, ?, ?, ?, ?)
+		`, bucket, key, versionID, tag.Key, tag.Value)
 		if err != nil {
 			return err
 		}
@@ -1291,13 +1693,14 @@ func (m *Metadata) PutObjectTags(ctx context.Context, bucket, key string, tags [
 	return tx.Commit()
 }
 
-// GetObjectTags returns tags for an object.
-func (m *Metadata) GetObjectTags(ctx context.Context, bucket, key string) ([]Tag, error) {
+// GetObjectTags returns tags for a specific object version. versionID ""
+// addresses the null version.
+func (m *Metadata) GetObjectTags(ctx context.Context, bucket, key, versionID string) ([]Tag, error) {
 	rows, err := m.db.QueryContext(ctx, `
 		SELECT tag_key, tag_value FROM object_tags
-		WHERE bucket = ? AND key = ?
+		WHERE bucket = ? AND key = ? AND version_id = ?
 		ORDER BY tag_key
-	`, bucket, key)
+	`, bucket, key, versionID)
 	if err != nil {
 		return nil, err
 	}
@@ -1314,9 +1717,10 @@ func (m *Metadata) GetObjectTags(ctx context.Context, bucket, key string) ([]Tag
 	return tags, rows.Err()
 }
 
-// DeleteObjectTags deletes all tags for an object.
-func (m *Metadata) DeleteObjectTags(ctx context.Context, bucket, key string) error {
-	_, err := m.db.ExecContext(ctx, `DELETE FROM object_tags WHERE bucket = ? AND key = ?`, bucket, key)
+// DeleteObjectTags deletes all tags for a specific object version. versionID ""
+// addresses the null version.
+func (m *Metadata) DeleteObjectTags(ctx context.Context, bucket, key, versionID string) error {
+	_, err := m.db.ExecContext(ctx, `DELETE FROM object_tags WHERE bucket = ? AND key = ? AND version_id = ?`, bucket, key, versionID)
 	return err
 }
 
@@ -1625,25 +2029,32 @@ func (m *Metadata) GetBucketACL(ctx context.Context, bucket string) (*ACL, error
 	return &acl, nil
 }
 
-// PutObjectACL stores the ACL for an object.
-func (m *Metadata) PutObjectACL(ctx context.Context, bucket, key string, acl *ACL) error {
+// PutObjectACL stores the ACL for a specific object version. versionID ""
+// targets the null version (issue #41). The upsert is scoped to
+// (bucket, key, version_id) via ON CONFLICT — never INSERT OR REPLACE, whose
+// internal DELETE could fire FK cascades.
+func (m *Metadata) PutObjectACL(ctx context.Context, bucket, key, versionID string, acl *ACL) error {
 	aclJSON, err := json.Marshal(acl)
 	if err != nil {
 		return err
 	}
 
 	_, err = m.db.ExecContext(ctx, `
-		INSERT OR REPLACE INTO object_acls (bucket, key, acl_config) VALUES (?, ?, ?)
-	`, bucket, key, string(aclJSON))
+		INSERT INTO object_acls (bucket, key, version_id, acl_config)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(bucket, key, version_id) DO UPDATE SET
+			acl_config = excluded.acl_config
+	`, bucket, key, versionID, string(aclJSON))
 	return err
 }
 
-// GetObjectACL returns the ACL for an object.
-func (m *Metadata) GetObjectACL(ctx context.Context, bucket, key string) (*ACL, error) {
+// GetObjectACL returns the ACL for a specific object version. versionID ""
+// addresses the null version.
+func (m *Metadata) GetObjectACL(ctx context.Context, bucket, key, versionID string) (*ACL, error) {
 	var aclJSON string
 	err := m.db.QueryRowContext(ctx, `
-		SELECT acl_config FROM object_acls WHERE bucket = ? AND key = ?
-	`, bucket, key).Scan(&aclJSON)
+		SELECT acl_config FROM object_acls WHERE bucket = ? AND key = ? AND version_id = ?
+	`, bucket, key, versionID).Scan(&aclJSON)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

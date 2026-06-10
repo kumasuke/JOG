@@ -138,7 +138,16 @@ func (h *Handler) GetObjectAcl(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
 
-	acl, err := h.storage.GetObjectACL(r.Context(), bucket, key)
+	// Resolve the targeted version (issue #41): "null" → "", unspecified →
+	// current version, missing → NoSuchVersion, delete-marker → MethodNotAllowed.
+	rawVersionID := r.URL.Query().Get("versionId")
+	versionID, s3Err := h.resolveLockVersionID(r.Context(), bucket, key, rawVersionID)
+	if s3Err != nil {
+		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+		return
+	}
+
+	acl, err := h.storage.GetObjectACL(r.Context(), bucket, key, versionID)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
@@ -155,6 +164,7 @@ func (h *Handler) GetObjectAcl(w http.ResponseWriter, r *http.Request) {
 	response := storageACLToXML(acl)
 
 	w.Header().Set("Content-Type", "application/xml")
+	setObjectVersionIDHeader(w, rawVersionID, versionID)
 	w.WriteHeader(http.StatusOK)
 	if err := xml.NewEncoder(w).Encode(response); err != nil {
 		log.Error().Err(err).Msg("Failed to encode GetObjectAcl response")
@@ -167,6 +177,15 @@ func (h *Handler) PutObjectAcl(w http.ResponseWriter, r *http.Request) {
 	key := GetKey(r)
 	limitBody(w, r, MaxACLBodySize)
 
+	// Resolve the targeted version (issue #41): "null" → "", unspecified →
+	// current version, missing → NoSuchVersion, delete-marker → MethodNotAllowed.
+	rawVersionID := r.URL.Query().Get("versionId")
+	versionID, s3Err := h.resolveLockVersionID(r.Context(), bucket, key, rawVersionID)
+	if s3Err != nil {
+		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+		return
+	}
+
 	// Check for canned ACL header
 	cannedACL := r.Header.Get("x-amz-acl")
 	if cannedACL != "" {
@@ -175,7 +194,7 @@ func (h *Handler) PutObjectAcl(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		acl := storage.CannedACLToACL(storage.CannedACL(cannedACL), storage.DefaultOwnerID, storage.DefaultOwnerDisplay)
-		if err := h.storage.PutObjectACL(r.Context(), bucket, key, acl); err != nil {
+		if err := h.storage.PutObjectACL(r.Context(), bucket, key, versionID, acl); err != nil {
 			if errors.Is(err, storage.ErrBucketNotFound) {
 				WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
 				return
@@ -187,6 +206,7 @@ func (h *Handler) PutObjectAcl(w http.ResponseWriter, r *http.Request) {
 			WriteErrorWithResource(w, ErrInternalError, "/"+bucket+"/"+key)
 			return
 		}
+		setObjectVersionIDHeader(w, rawVersionID, versionID)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -210,7 +230,7 @@ func (h *Handler) PutObjectAcl(w http.ResponseWriter, r *http.Request) {
 		}
 
 		acl := xmlACLToStorage(&aclPolicy)
-		if err := h.storage.PutObjectACL(r.Context(), bucket, key, acl); err != nil {
+		if err := h.storage.PutObjectACL(r.Context(), bucket, key, versionID, acl); err != nil {
 			if errors.Is(err, storage.ErrBucketNotFound) {
 				WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
 				return
@@ -224,7 +244,23 @@ func (h *Handler) PutObjectAcl(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	setObjectVersionIDHeader(w, rawVersionID, versionID)
 	w.WriteHeader(http.StatusOK)
+}
+
+// setObjectVersionIDHeader sets the x-amz-version-id response header for a
+// per-version sub-resource handler (ACL / tagging, issue #41). S3 echoes the
+// addressed version: the literal "null" when the null version was explicitly
+// requested, the concrete version_id otherwise. When the client did not specify
+// a version and the object has no versions (resolved == ""), the header is
+// omitted, matching S3's behaviour on an unversioned object.
+func setObjectVersionIDHeader(w http.ResponseWriter, rawVersionID, resolvedVersionID string) {
+	switch {
+	case rawVersionID == "null":
+		w.Header().Set("x-amz-version-id", "null")
+	case resolvedVersionID != "":
+		w.Header().Set("x-amz-version-id", resolvedVersionID)
+	}
 }
 
 // storageACLToXML converts a storage ACL to an XML AccessControlPolicy.

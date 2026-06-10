@@ -88,8 +88,17 @@ func (h *Handler) PutObjectTagging(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the targeted version (issue #41): "null" → "", unspecified →
+	// current version, missing → NoSuchVersion, delete-marker → MethodNotAllowed.
+	rawVersionID := r.URL.Query().Get("versionId")
+	versionID, s3Err := h.resolveLockVersionID(r.Context(), bucket, key, rawVersionID)
+	if s3Err != nil {
+		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+		return
+	}
+
 	// Store tags
-	err = h.storage.PutObjectTagging(r.Context(), bucket, key, tags)
+	err = h.storage.PutObjectTagging(r.Context(), bucket, key, versionID, tags)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
@@ -103,6 +112,7 @@ func (h *Handler) PutObjectTagging(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setObjectVersionIDHeader(w, rawVersionID, versionID)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -111,7 +121,16 @@ func (h *Handler) GetObjectTagging(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
 
-	tags, err := h.storage.GetObjectTagging(r.Context(), bucket, key)
+	// Resolve the targeted version (issue #41): "null" → "", unspecified →
+	// current version, missing → NoSuchVersion, delete-marker → MethodNotAllowed.
+	rawVersionID := r.URL.Query().Get("versionId")
+	versionID, s3Err := h.resolveLockVersionID(r.Context(), bucket, key, rawVersionID)
+	if s3Err != nil {
+		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+		return
+	}
+
+	tags, err := h.storage.GetObjectTagging(r.Context(), bucket, key, versionID)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
@@ -137,6 +156,7 @@ func (h *Handler) GetObjectTagging(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/xml")
+	setObjectVersionIDHeader(w, rawVersionID, versionID)
 	w.WriteHeader(http.StatusOK)
 	if err := xml.NewEncoder(w).Encode(response); err != nil {
 		log.Error().Err(err).Msg("Failed to encode GetObjectTagging response")
@@ -148,7 +168,16 @@ func (h *Handler) DeleteObjectTagging(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
 
-	err := h.storage.DeleteObjectTagging(r.Context(), bucket, key)
+	// Resolve the targeted version (issue #41): "null" → "", unspecified →
+	// current version, missing → NoSuchVersion, delete-marker → MethodNotAllowed.
+	rawVersionID := r.URL.Query().Get("versionId")
+	versionID, s3Err := h.resolveLockVersionID(r.Context(), bucket, key, rawVersionID)
+	if s3Err != nil {
+		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+		return
+	}
+
+	err := h.storage.DeleteObjectTagging(r.Context(), bucket, key, versionID)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
@@ -162,6 +191,7 @@ func (h *Handler) DeleteObjectTagging(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setObjectVersionIDHeader(w, rawVersionID, versionID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
