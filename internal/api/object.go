@@ -510,7 +510,9 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if returnedVersionID != "" {
+		if rawVersionID == "null" {
+			w.Header().Set("x-amz-version-id", "null")
+		} else if returnedVersionID != "" {
 			w.Header().Set("x-amz-version-id", returnedVersionID)
 		}
 		if isDeleteMarker {
