@@ -169,7 +169,15 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if versioning is enabled
-	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
+	versioningStatus, err := h.storage.GetBucketVersioning(r.Context(), bucket)
+	if err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		WriteErrorWithResource(w, ErrInternalError, "/"+bucket+"/"+key)
+		return
+	}
 
 	if s3Err := h.validateObjectLockIntentVersioning(r.Context(), bucket, lockIntent); s3Err != nil {
 		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
@@ -494,7 +502,15 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if versioning is enabled
-	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
+	versioningStatus, err := h.storage.GetBucketVersioning(r.Context(), bucket)
+	if err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		WriteError(w, ErrInternalError)
+		return
+	}
 
 	// Object Lock evaluation (issue #39): evaluate the lock on the *targeted*
 	// version. A version-targeted DELETE evaluates that exact version; an
@@ -552,7 +568,7 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Regular delete (no versioning)
-	err := h.storage.DeleteObject(r.Context(), bucket, key)
+	err = h.storage.DeleteObject(r.Context(), bucket, key)
 	if err != nil {
 		if errors.Is(err, storage.ErrInvalidKey) {
 			WriteErrorWithResource(w, ErrInvalidArgument, "/"+bucket+"/"+key)
@@ -595,7 +611,15 @@ func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
+	versioningStatus, err := h.storage.GetBucketVersioning(r.Context(), bucket)
+	if err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
+			return
+		}
+		WriteError(w, ErrInternalError)
+		return
+	}
 	bypassGovernance := parseBypassGovernanceHeader(r.Header.Get("x-amz-bypass-governance-retention"))
 
 	// Per-entry, version-aware delete (issue #39). Each entry may carry a
@@ -783,7 +807,15 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 	// evaluation is skipped there (mirrors the PutObject path). On a
 	// non-versioning destination the copy overwrites the null version in place,
 	// so its retention / legal hold must be honoured.
-	dstVersioning, _ := h.storage.GetBucketVersioning(r.Context(), dstBucket)
+	dstVersioning, err := h.storage.GetBucketVersioning(r.Context(), dstBucket)
+	if err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+dstBucket)
+			return
+		}
+		WriteErrorWithResource(w, ErrInternalError, "/"+dstBucket+"/"+dstKey)
+		return
+	}
 	_, headErr := h.storage.HeadObject(r.Context(), dstBucket, dstKey)
 	switch {
 	case headErr == nil && dstVersioning != storage.VersioningStatusEnabled:
