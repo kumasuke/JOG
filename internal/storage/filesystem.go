@@ -356,7 +356,10 @@ func (fs *FileSystem) DeleteObject(ctx context.Context, bucket, key string) erro
 	}
 
 	// Delete object metadata
-	return fs.metadata.DeleteObject(ctx, bucket, key)
+	if err := fs.metadata.DeleteObject(ctx, bucket, key); err != nil {
+		return err
+	}
+	return fs.metadata.DeleteObjectACLTagRows(ctx, bucket, key, "")
 }
 
 // CopyObject copies an object from source to destination.

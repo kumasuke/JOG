@@ -510,6 +510,35 @@ func TestDeleteObjectVersioned_NullVersionAbsentDeletesACLTagRows(t *testing.T) 
 	}
 }
 
+// TestDeleteObject_NonVersionedDeletesACLTagRows verifies issue #47: deleting an
+// object in a non-versioned bucket removes its object_acls / object_tags rows.
+func TestDeleteObject_NonVersionedDeletesACLTagRows(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+
+	if err := fs.CreateBucket(ctx, "b"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if _, err := fs.PutObject(ctx, "b", "k", strings.NewReader("data"), 4, "text/plain", nil); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+	if err := fs.PutObjectTagging(ctx, "b", "k", "", []Tag{{Key: "env", Value: "prod"}}); err != nil {
+		t.Fatalf("PutObjectTagging: %v", err)
+	}
+	if err := fs.PutObjectACL(ctx, "b", "k", "", sampleACL("owner-null")); err != nil {
+		t.Fatalf("PutObjectACL: %v", err)
+	}
+
+	if err := fs.DeleteObject(ctx, "b", "k"); err != nil {
+		t.Fatalf("DeleteObject: %v", err)
+	}
+
+	aclCount, tagCount := countObjectACLTagRows(t, fs.metadata, ctx, "b", "k", "")
+	if aclCount != 0 || tagCount != 0 {
+		t.Errorf("orphan acl/tag rows after DeleteObject = (%d, %d), want (0, 0)", aclCount, tagCount)
+	}
+}
+
 // TestDeleteObjectVersioned_SpecificVersionDeletesACLTagRows verifies issue #47:
 // deleting one version removes only that version's acl/tag rows.
 func TestDeleteObjectVersioned_SpecificVersionDeletesACLTagRows(t *testing.T) {
