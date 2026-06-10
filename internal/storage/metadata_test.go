@@ -395,6 +395,90 @@ func TestPutObjectCurrentPointer_SkipsNullVersionGuard(t *testing.T) {
 	}
 }
 
+func TestApplyObjectLockOnVersion_Atomic(t *testing.T) {
+	ctx := context.Background()
+	m := newTestMetadata(t)
+	now := time.Now()
+
+	if err := m.CreateBucket(ctx, "b", now); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	ver := &ObjectVersion{Key: "k", VersionID: "v-1", Size: 1, LastModified: now, ETag: "e", ContentType: "text/plain"}
+	if err := m.PutObjectVersion(ctx, "b", ver); err != nil {
+		t.Fatalf("PutObjectVersion: %v", err)
+	}
+
+	retainUntil := now.Add(24 * time.Hour)
+	err := m.ApplyObjectLockOnVersion(ctx, "b", "k", "v-1",
+		&ObjectRetention{Mode: ObjectLockRetentionModeGovernance, RetainUntilDate: &retainUntil},
+		&ObjectLegalHold{Status: ObjectLegalHoldStatusOn},
+	)
+	if err != nil {
+		t.Fatalf("ApplyObjectLockOnVersion: %v", err)
+	}
+
+	mode, until, err := m.GetObjectRetention(ctx, "b", "k", "v-1")
+	if err != nil {
+		t.Fatalf("GetObjectRetention: %v", err)
+	}
+	if mode != "GOVERNANCE" || until == nil {
+		t.Fatalf("retention not applied: mode=%q until=%v", mode, until)
+	}
+	hold, err := m.GetObjectLegalHold(ctx, "b", "k", "v-1")
+	if err != nil {
+		t.Fatalf("GetObjectLegalHold: %v", err)
+	}
+	if hold != "ON" {
+		t.Fatalf("legal hold not applied: status=%q", hold)
+	}
+}
+
+func TestRollbackNewObjectVersion_RestoresPriorCurrent(t *testing.T) {
+	ctx := context.Background()
+	m := newTestMetadata(t)
+	now := time.Now()
+
+	if err := m.CreateBucket(ctx, "b", now); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	v1 := &ObjectVersion{Key: "k", VersionID: "v-1", Size: 1, LastModified: now, ETag: "e1", ContentType: "text/plain"}
+	if err := m.PutObjectVersion(ctx, "b", v1); err != nil {
+		t.Fatalf("PutObjectVersion v-1: %v", err)
+	}
+	obj1 := &Object{Key: "k", Size: 1, LastModified: now, ETag: "e1", ContentType: "text/plain"}
+	if err := m.PutObjectCurrentPointer(ctx, "b", obj1); err != nil {
+		t.Fatalf("PutObjectCurrentPointer v-1: %v", err)
+	}
+
+	v2 := &ObjectVersion{Key: "k", VersionID: "v-2", Size: 2, LastModified: now.Add(time.Second), ETag: "e2", ContentType: "text/plain"}
+	if err := m.PutObjectVersion(ctx, "b", v2); err != nil {
+		t.Fatalf("PutObjectVersion v-2: %v", err)
+	}
+	obj2 := &Object{Key: "k", Size: 2, LastModified: now.Add(time.Second), ETag: "e2", ContentType: "text/plain"}
+	if err := m.PutObjectCurrentPointer(ctx, "b", obj2); err != nil {
+		t.Fatalf("PutObjectCurrentPointer v-2: %v", err)
+	}
+
+	prior, err := m.RollbackNewObjectVersion(ctx, "b", "k", "v-2")
+	if err != nil {
+		t.Fatalf("RollbackNewObjectVersion: %v", err)
+	}
+	if prior == nil || prior.VersionID != "v-1" {
+		t.Fatalf("expected prior v-1, got %+v", prior)
+	}
+
+	got, err := m.GetObject(ctx, "b", "k")
+	if err != nil {
+		t.Fatalf("GetObject after rollback: %v", err)
+	}
+	if got == nil || got.ETag != "e1" {
+		t.Fatalf("current pointer not restored: %+v", got)
+	}
+	if ver, _ := m.GetObjectVersion(ctx, "b", "k", "v-2"); ver != nil {
+		t.Fatal("rolled-back version row must be deleted")
+	}
+}
+
 func TestObjectLockSchema_MismatchFailsStartup(t *testing.T) {
 	tests := []struct {
 		name string
