@@ -3,7 +3,9 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -666,6 +668,188 @@ func TestFreshDB_ACLTagsSchemaIsPerVersion(t *testing.T) {
 	}
 	if uv != aclTagsSchemaVersion {
 		t.Errorf("fresh DB user_version = %d, want %d", uv, aclTagsSchemaVersion)
+	}
+}
+
+const (
+	legacyObjectACLsDDL = `CREATE TABLE object_acls (
+		bucket TEXT NOT NULL, key TEXT NOT NULL, acl_config TEXT NOT NULL,
+		PRIMARY KEY (bucket, key),
+		FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE)`
+	legacyObjectTagsDDL = `CREATE TABLE object_tags (
+		bucket TEXT NOT NULL, key TEXT NOT NULL, tag_key TEXT NOT NULL, tag_value TEXT NOT NULL,
+		PRIMARY KEY (bucket, key, tag_key),
+		FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE)`
+)
+
+type aclTagsSchemaSnapshot struct {
+	userVersion      int
+	aclsExists       bool
+	tagsExists       bool
+	aclsHasVersionID bool
+	tagsHasVersionID bool
+}
+
+func tableExistsInDB(t *testing.T, db *sql.DB, name string) bool {
+	t.Helper()
+	var tbl string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&tbl)
+	return err == nil
+}
+
+func tableHasVersionIDColumn(t *testing.T, db *sql.DB, table string) bool {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA table_info('` + table + `')`)
+	if err != nil {
+		t.Fatalf("table_info(%s): %v", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var colName, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &colName, &ctype, &notNull, &dflt, &pk); err != nil {
+			t.Fatalf("scan table_info(%s): %v", table, err)
+		}
+		if colName == "version_id" {
+			return true
+		}
+	}
+	return false
+}
+
+func snapshotACLTagsSchema(t *testing.T, dbPath string) aclTagsSchemaSnapshot {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db for snapshot: %v", err)
+	}
+	defer db.Close()
+
+	var snap aclTagsSchemaSnapshot
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&snap.userVersion); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	snap.aclsExists = tableExistsInDB(t, db, "object_acls")
+	snap.tagsExists = tableExistsInDB(t, db, "object_tags")
+	if snap.aclsExists {
+		snap.aclsHasVersionID = tableHasVersionIDColumn(t, db, "object_acls")
+	}
+	if snap.tagsExists {
+		snap.tagsHasVersionID = tableHasVersionIDColumn(t, db, "object_tags")
+	}
+	return snap
+}
+
+// openPreACLTagsMigrationDB creates a DB with the lock migration already
+// satisfied (v2 lock tables, user_version == objectLockSchemaVersion). The
+// caller supplies acl/tag DDL; an empty string leaves that table absent.
+func openPreACLTagsMigrationDB(t *testing.T, dbPath string, aclsDDL, tagsDDL string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open pre-acl/tags db: %v", err)
+	}
+	defer db.Close()
+
+	stmts := []string{
+		`CREATE TABLE buckets (name TEXT PRIMARY KEY, creation_date DATETIME NOT NULL)`,
+		`CREATE TABLE objects (
+			bucket TEXT NOT NULL, key TEXT NOT NULL, size INTEGER NOT NULL,
+			last_modified DATETIME NOT NULL, etag TEXT NOT NULL, content_type TEXT NOT NULL,
+			metadata TEXT, PRIMARY KEY (bucket, key),
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE)`,
+		`CREATE TABLE object_versions (
+			bucket TEXT NOT NULL, key TEXT NOT NULL, version_id TEXT NOT NULL,
+			size INTEGER NOT NULL, last_modified DATETIME NOT NULL, etag TEXT NOT NULL,
+			content_type TEXT NOT NULL, metadata TEXT, is_delete_marker INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (bucket, key, version_id),
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE)`,
+		createRetentionV2DDL,
+		createLegalHoldV2DDL,
+	}
+	if aclsDDL != "" {
+		stmts = append(stmts, aclsDDL)
+	}
+	if tagsDDL != "" {
+		stmts = append(stmts, tagsDDL)
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("pre-acl/tags DDL %q: %v", s, err)
+		}
+	}
+
+	now := time.Now()
+	if _, err := db.Exec(`INSERT INTO buckets (name, creation_date) VALUES (?, ?)`, "b", now); err != nil {
+		t.Fatalf("seed bucket: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO objects (bucket, key, size, last_modified, etag, content_type, metadata)
+		VALUES (?, ?, 1, ?, 'e', 'text/plain', '')`, "b", "k", now); err != nil {
+		t.Fatalf("seed object: %v", err)
+	}
+	if aclsDDL == legacyObjectACLsDDL {
+		if _, err := db.Exec(`INSERT INTO object_acls (bucket, key, acl_config) VALUES (?, ?, ?)`, "b", "k", `{"OwnerID":"keep"}`); err != nil {
+			t.Fatalf("seed legacy acl: %v", err)
+		}
+	}
+	if tagsDDL == legacyObjectTagsDDL {
+		if _, err := db.Exec(`INSERT INTO object_tags (bucket, key, tag_key, tag_value) VALUES (?, ?, ?, ?)`, "b", "k", "env", "keep"); err != nil {
+			t.Fatalf("seed legacy tag: %v", err)
+		}
+	}
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, objectLockSchemaVersion)); err != nil {
+		t.Fatalf("set user_version: %v", err)
+	}
+}
+
+// TestACLTagsMigration_FailsOnMixedGeneration verifies migrateACLTagsSchema is
+// fail-closed when object_acls and object_tags are not the same generation.
+func TestACLTagsMigration_FailsOnMixedGeneration(t *testing.T) {
+	cases := []struct {
+		name          string
+		aclsDDL       string
+		tagsDDL       string
+		wantErrSubstr string
+	}{
+		{
+			name:          "legacy_acls_v2_tags",
+			aclsDDL:       legacyObjectACLsDDL,
+			tagsDDL:       createObjectTagsV2DDL,
+			wantErrSubstr: "object_acls=legacy object_tags=v2",
+		},
+		{
+			name:          "absent_acls_legacy_tags",
+			aclsDDL:       "",
+			tagsDDL:       legacyObjectTagsDDL,
+			wantErrSubstr: "object_acls=absent object_tags=legacy",
+		},
+		{
+			name:          "absent_acls_v2_tags",
+			aclsDDL:       "",
+			tagsDDL:       createObjectTagsV2DDL,
+			wantErrSubstr: "object_acls=absent object_tags=v2",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := t.TempDir() + "/metadata.db"
+			openPreACLTagsMigrationDB(t, dbPath, tc.aclsDDL, tc.tagsDDL)
+			before := snapshotACLTagsSchema(t, dbPath)
+
+			_, err := NewMetadata(dbPath)
+			if err == nil {
+				t.Fatal("expected NewMetadata to fail on mixed acl/tags generation")
+			}
+			if !strings.Contains(err.Error(), tc.wantErrSubstr) {
+				t.Errorf("error = %q, want substring %q", err.Error(), tc.wantErrSubstr)
+			}
+
+			after := snapshotACLTagsSchema(t, dbPath)
+			if after != before {
+				t.Errorf("schema changed on failure:\nbefore=%+v\nafter=%+v", before, after)
+			}
+		})
 	}
 }
 

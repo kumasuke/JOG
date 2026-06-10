@@ -681,65 +681,40 @@ const createObjectTagsV2DDL = `
 		FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
 	)`
 
-// migrateACLTagsSchema brings the object_acls / object_tags tables to the
-// per-version (bucket, key, version_id) schema (issue #41). It mirrors the
-// fail-closed contract of migrateObjectLockSchema: a fresh DB gets the v2 DDL
-// directly, a legacy DB is migrated inside a single transaction with row-count
-// validation, and any mismatch ROLLBACKs and aborts startup. Old tables are
-// renamed to *_legacy_v1 (not dropped) and a physical backup is taken first.
-//
-// It runs after migrateObjectLockSchema, so a DB already at the #39 generation
-// (user_version == objectLockSchemaVersion) but with legacy acl/tag tables is
-// detected via column existence and migrated exactly once to aclTagsSchemaVersion.
-func (m *Metadata) migrateACLTagsSchema() error {
-	var userVersion int
-	if err := m.db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
-		return fmt.Errorf("failed to read user_version: %w", err)
-	}
+// aclTagsTableGeneration classifies an active acl/tags table as absent (no
+// table), legacy (no version_id column), or v2 (has version_id). Each table is
+// inspected independently so a mixed-generation DB is rejected fail-closed.
+type aclTagsTableGeneration int
 
-	// Rely on column existence in addition to user_version: a DB created before
-	// this migration shipped carries the legacy acl/tag tables regardless of
-	// what user_version the #39 migration stamped.
-	hasVersionCol, tableExists, err := m.aclVersionColumnState()
-	if err != nil {
-		return err
-	}
+const (
+	aclTagsTableAbsent aclTagsTableGeneration = iota
+	aclTagsTableLegacy
+	aclTagsTableV2
+)
 
-	if userVersion >= aclTagsSchemaVersion && hasVersionCol {
-		// Already migrated.
-		return nil
+func (g aclTagsTableGeneration) String() string {
+	switch g {
+	case aclTagsTableAbsent:
+		return "absent"
+	case aclTagsTableLegacy:
+		return "legacy"
+	case aclTagsTableV2:
+		return "v2"
+	default:
+		return "unknown"
 	}
-
-	if !tableExists || hasVersionCol {
-		// Fresh DB (no legacy table) or an in-between state where the v2
-		// columns already exist: create the v2 DDL directly and stamp the
-		// schema version. CREATE TABLE IF NOT EXISTS makes this idempotent.
-		if _, err := m.db.Exec(createObjectACLsV2DDL); err != nil {
-			return fmt.Errorf("failed to create object_acls table: %w", err)
-		}
-		if _, err := m.db.Exec(createObjectTagsV2DDL); err != nil {
-			return fmt.Errorf("failed to create object_tags table: %w", err)
-		}
-		if _, err := m.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, aclTagsSchemaVersion)); err != nil {
-			return fmt.Errorf("failed to set user_version: %w", err)
-		}
-		return nil
-	}
-
-	// Legacy DB: run the CREATE -> backfill -> RENAME migration.
-	return m.runACLTagsMigration()
 }
 
-// aclVersionColumnState reports whether the object_acls table exists and, if so,
-// whether it already has the version_id column. object_acls and object_tags are
-// created/migrated together, so probing one suffices to detect the generation.
-func (m *Metadata) aclVersionColumnState() (hasVersionCol, tableExists bool, err error) {
-	rows, err := m.db.Query(`PRAGMA table_info('object_acls')`)
+// aclTagsTableGeneration reports the schema generation of table (object_acls or
+// object_tags) by inspecting PRAGMA table_info.
+func (m *Metadata) aclTagsTableGeneration(table string) (aclTagsTableGeneration, error) {
+	rows, err := m.db.Query(`PRAGMA table_info('` + table + `')`)
 	if err != nil {
-		return false, false, fmt.Errorf("failed to inspect object_acls columns: %w", err)
+		return 0, fmt.Errorf("failed to inspect %s columns: %w", table, err)
 	}
 	defer rows.Close()
 
+	var tableExists, hasVersionCol bool
 	for rows.Next() {
 		var (
 			cid        int
@@ -750,14 +725,80 @@ func (m *Metadata) aclVersionColumnState() (hasVersionCol, tableExists bool, err
 			primaryKey int
 		)
 		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &primaryKey); err != nil {
-			return false, false, fmt.Errorf("failed to scan object_acls column info: %w", err)
+			return 0, fmt.Errorf("failed to scan %s column info: %w", table, err)
 		}
 		tableExists = true
 		if name == "version_id" {
 			hasVersionCol = true
 		}
 	}
-	return hasVersionCol, tableExists, rows.Err()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("failed to read %s column info: %w", table, err)
+	}
+	if !tableExists {
+		return aclTagsTableAbsent, nil
+	}
+	if hasVersionCol {
+		return aclTagsTableV2, nil
+	}
+	return aclTagsTableLegacy, nil
+}
+
+// migrateACLTagsSchema brings the object_acls / object_tags tables to the
+// per-version (bucket, key, version_id) schema (issue #41). It mirrors the
+// fail-closed contract of migrateObjectLockSchema: a fresh DB gets the v2 DDL
+// directly, a legacy DB is migrated inside a single transaction with row-count
+// validation, and any mismatch ROLLBACKs and aborts startup. Old tables are
+// renamed to *_legacy_v1 (not dropped) and a physical backup is taken first.
+//
+// Each active table is classified independently (absent / legacy / v2). Only
+// homogeneous pairs are allowed: both absent, both v2, or both legacy.
+func (m *Metadata) migrateACLTagsSchema() error {
+	var userVersion int
+	if err := m.db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
+		return fmt.Errorf("failed to read user_version: %w", err)
+	}
+
+	aclsGen, err := m.aclTagsTableGeneration("object_acls")
+	if err != nil {
+		return err
+	}
+	tagsGen, err := m.aclTagsTableGeneration("object_tags")
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case aclsGen == aclTagsTableAbsent && tagsGen == aclTagsTableAbsent:
+		if _, err := m.db.Exec(createObjectACLsV2DDL); err != nil {
+			return fmt.Errorf("failed to create object_acls table: %w", err)
+		}
+		if _, err := m.db.Exec(createObjectTagsV2DDL); err != nil {
+			return fmt.Errorf("failed to create object_tags table: %w", err)
+		}
+		if _, err := m.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, aclTagsSchemaVersion)); err != nil {
+			return fmt.Errorf("failed to set user_version: %w", err)
+		}
+		return nil
+
+	case aclsGen == aclTagsTableV2 && tagsGen == aclTagsTableV2:
+		if userVersion >= aclTagsSchemaVersion {
+			return nil
+		}
+		if _, err := m.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, aclTagsSchemaVersion)); err != nil {
+			return fmt.Errorf("failed to set user_version: %w", err)
+		}
+		return nil
+
+	case aclsGen == aclTagsTableLegacy && tagsGen == aclTagsTableLegacy:
+		return m.runACLTagsMigration()
+
+	default:
+		return fmt.Errorf(
+			"acl/tags schema mismatch: object_acls=%s object_tags=%s; manual intervention required",
+			aclsGen, tagsGen,
+		)
+	}
 }
 
 // runACLTagsMigration performs the legacy -> v2 migration for object_acls /
