@@ -1884,6 +1884,9 @@ func (fs *FileSystem) DeleteObjectVersioned(ctx context.Context, bucket, key, ve
 			if err := fs.metadata.DeleteObjectLockRows(ctx, bucket, key, ""); err != nil {
 				return "", false, err
 			}
+			if err := fs.metadata.DeleteObjectACLTagRows(ctx, bucket, key, ""); err != nil {
+				return "", false, err
+			}
 			return "", false, nil
 		}
 
@@ -1910,6 +1913,9 @@ func (fs *FileSystem) DeleteObjectVersioned(ctx context.Context, bucket, key, ve
 		}
 
 		if err := fs.metadata.DeleteObjectLockRows(ctx, bucket, key, versionID); err != nil {
+			return "", false, err
+		}
+		if err := fs.metadata.DeleteObjectACLTagRows(ctx, bucket, key, versionID); err != nil {
 			return "", false, err
 		}
 

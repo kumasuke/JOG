@@ -473,6 +473,90 @@ func TestDeleteObjectVersioned_NullVersionAbsentNoOpWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestDeleteObjectVersioned_NullVersionAbsentDeletesACLTagRows verifies issue
+// #47: deleting the pre-versioning current object (null version) removes its
+// object_acls / object_tags rows.
+func TestDeleteObjectVersioned_NullVersionAbsentDeletesACLTagRows(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+
+	if err := fs.CreateBucket(ctx, "b"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := fs.PutBucketVersioning(ctx, "b", VersioningStatusEnabled); err != nil {
+		t.Fatalf("PutBucketVersioning: %v", err)
+	}
+	if _, err := fs.PutObject(ctx, "b", "k", strings.NewReader("pre"), 3, "text/plain", nil); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+	if err := fs.PutObjectTagging(ctx, "b", "k", "", []Tag{{Key: "env", Value: "null"}}); err != nil {
+		t.Fatalf("PutObjectTagging: %v", err)
+	}
+	if err := fs.PutObjectACL(ctx, "b", "k", "", sampleACL("owner-null")); err != nil {
+		t.Fatalf("PutObjectACL: %v", err)
+	}
+
+	returnedID, isDeleteMarker, err := fs.DeleteObjectVersioned(ctx, "b", "k", "", true)
+	if err != nil {
+		t.Fatalf("DeleteObjectVersioned(null): %v", err)
+	}
+	if returnedID != "" || isDeleteMarker {
+		t.Fatalf("DeleteObjectVersioned(null) = (%q, %v), want (\"\", false)", returnedID, isDeleteMarker)
+	}
+
+	aclCount, tagCount := countObjectACLTagRows(t, fs.metadata, ctx, "b", "k", "")
+	if aclCount != 0 || tagCount != 0 {
+		t.Errorf("orphan acl/tag rows after null delete = (%d, %d), want (0, 0)", aclCount, tagCount)
+	}
+}
+
+// TestDeleteObjectVersioned_SpecificVersionDeletesACLTagRows verifies issue #47:
+// deleting one version removes only that version's acl/tag rows.
+func TestDeleteObjectVersioned_SpecificVersionDeletesACLTagRows(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+
+	if err := fs.CreateBucket(ctx, "b"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := fs.PutBucketVersioning(ctx, "b", VersioningStatusEnabled); err != nil {
+		t.Fatalf("PutBucketVersioning: %v", err)
+	}
+	_, v1, err := fs.PutObjectVersioned(ctx, "b", "k", strings.NewReader("v1"), 2, "text/plain", nil)
+	if err != nil {
+		t.Fatalf("PutObjectVersioned v1: %v", err)
+	}
+	_, v2, err := fs.PutObjectVersioned(ctx, "b", "k", strings.NewReader("v2"), 2, "text/plain", nil)
+	if err != nil {
+		t.Fatalf("PutObjectVersioned v2: %v", err)
+	}
+	if err := fs.PutObjectTagging(ctx, "b", "k", v1, []Tag{{Key: "ver", Value: "v1"}}); err != nil {
+		t.Fatalf("PutObjectTagging(v1): %v", err)
+	}
+	if err := fs.PutObjectACL(ctx, "b", "k", v1, sampleACL("owner-v1")); err != nil {
+		t.Fatalf("PutObjectACL(v1): %v", err)
+	}
+	if err := fs.PutObjectTagging(ctx, "b", "k", v2, []Tag{{Key: "ver", Value: "v2"}}); err != nil {
+		t.Fatalf("PutObjectTagging(v2): %v", err)
+	}
+	if err := fs.PutObjectACL(ctx, "b", "k", v2, sampleACL("owner-v2")); err != nil {
+		t.Fatalf("PutObjectACL(v2): %v", err)
+	}
+
+	if _, _, err := fs.DeleteObjectVersioned(ctx, "b", "k", v2, true); err != nil {
+		t.Fatalf("DeleteObjectVersioned(v2): %v", err)
+	}
+
+	v2ACL, v2Tags := countObjectACLTagRows(t, fs.metadata, ctx, "b", "k", v2)
+	if v2ACL != 0 || v2Tags != 0 {
+		t.Errorf("v2 orphan acl/tag rows = (%d, %d), want (0, 0)", v2ACL, v2Tags)
+	}
+	v1ACL, v1Tags := countObjectACLTagRows(t, fs.metadata, ctx, "b", "k", v1)
+	if v1ACL != 1 || v1Tags != 1 {
+		t.Errorf("v1 acl/tag rows after v2 delete = (%d, %d), want (1, 1)", v1ACL, v1Tags)
+	}
+}
+
 func TestDeleteObjectVersioned_NullVersionAbsentDeletesPreVersioningCurrent(t *testing.T) {
 	ctx := context.Background()
 	fs := newTestFileSystem(t)

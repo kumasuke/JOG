@@ -2390,6 +2390,23 @@ func (m *Metadata) DeleteObjectLockRows(ctx context.Context, bucket, key, versio
 	return nil
 }
 
+// DeleteObjectACLTagRows removes the ACL and tag rows for a specific object
+// version. Always fully scoped to (bucket, key, version_id); used after a
+// version's data is physically deleted to avoid orphan acl/tag rows.
+func (m *Metadata) DeleteObjectACLTagRows(ctx context.Context, bucket, key, versionID string) error {
+	if _, err := m.db.ExecContext(ctx,
+		`DELETE FROM object_acls WHERE bucket = ? AND key = ? AND version_id = ?`,
+		bucket, key, versionID); err != nil {
+		return err
+	}
+	if _, err := m.db.ExecContext(ctx,
+		`DELETE FROM object_tags WHERE bucket = ? AND key = ? AND version_id = ?`,
+		bucket, key, versionID); err != nil {
+		return err
+	}
+	return nil
+}
+
 // PutBucketPolicy stores the policy for a bucket.
 func (m *Metadata) PutBucketPolicy(ctx context.Context, bucket string, policy string) error {
 	_, err := m.db.ExecContext(ctx, `

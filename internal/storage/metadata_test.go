@@ -416,6 +416,67 @@ func TestObjectACL_PerVersion(t *testing.T) {
 	}
 }
 
+// countObjectACLTagRows returns row counts in object_acls / object_tags for a
+// specific (bucket, key, version_id) triple.
+func countObjectACLTagRows(t *testing.T, m *Metadata, ctx context.Context, bucket, key, versionID string) (aclCount, tagCount int) {
+	t.Helper()
+	if err := m.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM object_acls WHERE bucket = ? AND key = ? AND version_id = ?`,
+		bucket, key, versionID).Scan(&aclCount); err != nil {
+		t.Fatalf("COUNT object_acls: %v", err)
+	}
+	if err := m.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM object_tags WHERE bucket = ? AND key = ? AND version_id = ?`,
+		bucket, key, versionID).Scan(&tagCount); err != nil {
+		t.Fatalf("COUNT object_tags: %v", err)
+	}
+	return aclCount, tagCount
+}
+
+// TestDeleteObjectACLTagRows_RemovesRows verifies issue #47: ACL and tag rows
+// for a specific version are removed without touching other versions.
+func TestDeleteObjectACLTagRows_RemovesRows(t *testing.T) {
+	ctx := context.Background()
+	m := newTestMetadata(t)
+	now := time.Now()
+
+	if err := m.CreateBucket(ctx, "b", now); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := m.PutObjectTags(ctx, "b", "k", "", []Tag{{Key: "env", Value: "null"}}); err != nil {
+		t.Fatalf("PutObjectTags(null): %v", err)
+	}
+	if err := m.PutObjectACL(ctx, "b", "k", "", sampleACL("owner-null")); err != nil {
+		t.Fatalf("PutObjectACL(null): %v", err)
+	}
+	if err := m.PutObjectTags(ctx, "b", "k", "v-1", []Tag{{Key: "env", Value: "v1"}}); err != nil {
+		t.Fatalf("PutObjectTags(v-1): %v", err)
+	}
+	if err := m.PutObjectACL(ctx, "b", "k", "v-1", sampleACL("owner-v1")); err != nil {
+		t.Fatalf("PutObjectACL(v-1): %v", err)
+	}
+
+	if err := m.DeleteObjectACLTagRows(ctx, "b", "k", "v-1"); err != nil {
+		t.Fatalf("DeleteObjectACLTagRows(v-1): %v", err)
+	}
+	v1ACL, v1Tags := countObjectACLTagRows(t, m, ctx, "b", "k", "v-1")
+	if v1ACL != 0 || v1Tags != 0 {
+		t.Errorf("v-1 acl/tag rows after delete = (%d, %d), want (0, 0)", v1ACL, v1Tags)
+	}
+	nullACL, nullTags := countObjectACLTagRows(t, m, ctx, "b", "k", "")
+	if nullACL != 1 || nullTags != 1 {
+		t.Errorf("null-version acl/tag rows = (%d, %d), want (1, 1)", nullACL, nullTags)
+	}
+
+	if err := m.DeleteObjectACLTagRows(ctx, "b", "k", ""); err != nil {
+		t.Fatalf("DeleteObjectACLTagRows(null): %v", err)
+	}
+	nullACL, nullTags = countObjectACLTagRows(t, m, ctx, "b", "k", "")
+	if nullACL != 0 || nullTags != 0 {
+		t.Errorf("null-version acl/tag rows after delete = (%d, %d), want (0, 0)", nullACL, nullTags)
+	}
+}
+
 // TestPutObject_DoesNotCascadeDeleteACLTagRows verifies the #41 FK fix: an
 // overwrite PUT on the null version no longer cascade-deletes the acl/tag rows
 // of a different (real) version of the same key.
