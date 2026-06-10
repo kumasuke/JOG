@@ -356,7 +356,10 @@ func (fs *FileSystem) DeleteObject(ctx context.Context, bucket, key string) erro
 	}
 
 	// Delete object metadata
-	return fs.metadata.DeleteObject(ctx, bucket, key)
+	if err := fs.metadata.DeleteObject(ctx, bucket, key); err != nil {
+		return err
+	}
+	return fs.metadata.DeleteObjectACLTagRows(ctx, bucket, key, "")
 }
 
 // CopyObject copies an object from source to destination.
@@ -1884,6 +1887,9 @@ func (fs *FileSystem) DeleteObjectVersioned(ctx context.Context, bucket, key, ve
 			if err := fs.metadata.DeleteObjectLockRows(ctx, bucket, key, ""); err != nil {
 				return "", false, err
 			}
+			if err := fs.metadata.DeleteObjectACLTagRows(ctx, bucket, key, ""); err != nil {
+				return "", false, err
+			}
 			return "", false, nil
 		}
 
@@ -1910,6 +1916,9 @@ func (fs *FileSystem) DeleteObjectVersioned(ctx context.Context, bucket, key, ve
 		}
 
 		if err := fs.metadata.DeleteObjectLockRows(ctx, bucket, key, versionID); err != nil {
+			return "", false, err
+		}
+		if err := fs.metadata.DeleteObjectACLTagRows(ctx, bucket, key, versionID); err != nil {
 			return "", false, err
 		}
 
