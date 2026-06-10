@@ -2,11 +2,13 @@ package s3compat
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/kumasuke/jog/test/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -277,4 +279,63 @@ func TestGetBucketLocationNotFound(t *testing.T) {
 		Bucket: aws.String("non-existent-bucket"),
 	})
 	require.Error(t, err)
+}
+
+// TestDeleteBucketNotEmptyWithVersions is a regression test for issue #42.
+// When versioning is enabled and a delete marker exists (current key removed from
+// objects table), CountObjects returns 0 but object_versions still has rows.
+// DeleteBucket must return BucketNotEmpty in this case.
+func TestDeleteBucketNotEmptyWithVersions(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+
+	// Create bucket
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String(bucketName),
+	})
+	require.NoError(t, err)
+
+	// Enable versioning
+	_, err = client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+		Bucket: aws.String(bucketName),
+		VersioningConfiguration: &types.VersioningConfiguration{
+			Status: types.BucketVersioningStatusEnabled,
+		},
+	})
+	require.NoError(t, err)
+
+	// Put an object (creates a version in object_versions)
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String("test-key"),
+		Body:   strings.NewReader("hello"),
+	})
+	require.NoError(t, err)
+
+	// Delete the object WITHOUT a versionId: creates a delete marker,
+	// which removes the current row from objects table but leaves the
+	// original version in object_versions.
+	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String("test-key"),
+	})
+	require.NoError(t, err)
+
+	// DeleteBucket MUST fail with BucketNotEmpty because object_versions still
+	// has the original version row (and a delete-marker row).
+	_, err = client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+		Bucket: aws.String(bucketName),
+	})
+	require.Error(t, err, "DeleteBucket should fail when versioned objects still exist")
+
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "BucketNotEmpty", apiErr.ErrorCode(),
+			"expected BucketNotEmpty error code")
+	}
 }

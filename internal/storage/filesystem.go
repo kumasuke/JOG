@@ -74,12 +74,12 @@ func (fs *FileSystem) DeleteBucket(ctx context.Context, name string) error {
 		return ErrBucketNotFound
 	}
 
-	// Check if bucket is empty
-	count, err := fs.metadata.CountObjects(ctx, name)
+	// Check if bucket is empty (objects, object_versions, and multipart_uploads).
+	empty, err := fs.metadata.IsBucketEmpty(ctx, name)
 	if err != nil {
 		return err
 	}
-	if count > 0 {
+	if !empty {
 		return ErrBucketNotEmpty
 	}
 

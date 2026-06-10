@@ -446,6 +446,25 @@ func (m *Metadata) CountObjects(ctx context.Context, bucket string) (int, error)
 	return count, err
 }
 
+// IsBucketEmpty reports whether a bucket has no objects, no object versions,
+// and no in-progress multipart uploads.  A versioning-enabled bucket that only
+// has delete markers still has rows in object_versions, so it is NOT empty.
+func (m *Metadata) IsBucketEmpty(ctx context.Context, bucket string) (bool, error) {
+	var total int
+	err := m.db.QueryRowContext(ctx, `
+		SELECT (
+			SELECT COUNT(*) FROM objects          WHERE bucket = ?
+		) + (
+			SELECT COUNT(*) FROM object_versions  WHERE bucket = ?
+		) + (
+			SELECT COUNT(*) FROM multipart_uploads WHERE bucket = ?
+		)`, bucket, bucket, bucket).Scan(&total)
+	if err != nil {
+		return false, err
+	}
+	return total == 0, nil
+}
+
 // ListObjects returns objects matching a prefix with pagination support.
 // startAfter specifies the key to start after (exclusive).
 // maxKeys limits the number of results (0 means default 1000).
