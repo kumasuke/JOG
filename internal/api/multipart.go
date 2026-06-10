@@ -116,7 +116,27 @@ func (h *Handler) CreateMultipartUpload(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	upload, err := h.storage.CreateMultipartUpload(r.Context(), bucket, key, contentType, metadata)
+	// Object Lock headers / bucket DefaultRetention (issue #40): validate now
+	// and capture the intent on the upload record so it can be applied to the
+	// version finalized at CompleteMultipartUpload. Validation here gives the
+	// client immediate feedback rather than failing at completion time.
+	lockIntent, lockErr := h.resolveObjectLockOnWrite(r.Context(), bucket, r)
+	if lockErr != nil {
+		WriteErrorWithResource(w, lockErr, "/"+bucket+"/"+key)
+		return
+	}
+	var lockMode storage.ObjectLockRetentionMode
+	var lockRetainUntil *time.Time
+	var lockLegalHold storage.ObjectLegalHoldStatus
+	if lockIntent.retention != nil {
+		lockMode = lockIntent.retention.Mode
+		lockRetainUntil = lockIntent.retention.RetainUntilDate
+	}
+	if lockIntent.legalHold != nil {
+		lockLegalHold = lockIntent.legalHold.Status
+	}
+
+	upload, err := h.storage.CreateMultipartUpload(r.Context(), bucket, key, contentType, metadata, lockMode, lockRetainUntil, lockLegalHold)
 	if err != nil {
 		if errors.Is(err, storage.ErrInvalidKey) {
 			WriteErrorWithResource(w, ErrInvalidArgument, "/"+bucket+"/"+key)
@@ -451,6 +471,11 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Object Lock (issue #40): recover the lock intent captured at
+	// CreateMultipartUpload BEFORE completing, because completion deletes the
+	// upload record. The intent is applied to the finalized version below.
+	lockIntent := h.multipartLockIntent(r.Context(), uploadID)
+
 	var obj *storage.Object
 	var versionID string
 	var err error
@@ -482,6 +507,17 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 		log.Error().Err(err).Msg("Failed to complete multipart upload")
 		WriteError(w, ErrInternalError)
 		return
+	}
+
+	// Object Lock (issue #40): apply the captured retention / legal hold to the
+	// version this completion finalized. versionID is "" for the null version
+	// on a non-versioning bucket.
+	if !lockIntent.isEmpty() {
+		if err := h.applyObjectLockOnWrite(r.Context(), bucket, key, versionID, lockIntent); err != nil {
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Str("versionId", versionID).Msg("Failed to apply object lock on CompleteMultipartUpload")
+			WriteError(w, ErrInternalError)
+			return
+		}
 	}
 
 	result := CompleteMultipartUploadResult{

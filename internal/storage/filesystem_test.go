@@ -231,7 +231,7 @@ func TestVersionedWrites_NotBlockedByNullVersionLock(t *testing.T) {
 	t.Run("CompleteMultipartUploadVersioned", func(t *testing.T) {
 		ctx := context.Background()
 		fs := seed(t)
-		upload, err := fs.CreateMultipartUpload(ctx, "b", "k", "text/plain", nil)
+		upload, err := fs.CreateMultipartUpload(ctx, "b", "k", "text/plain", nil, "", nil, "")
 		if err != nil {
 			t.Fatalf("CreateMultipartUpload: %v", err)
 		}

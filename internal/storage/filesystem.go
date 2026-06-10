@@ -711,7 +711,7 @@ func (fs *FileSystem) ListObjectsV2(ctx context.Context, input *ListObjectsInput
 }
 
 // CreateMultipartUpload initiates a multipart upload.
-func (fs *FileSystem) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string, metadata map[string]string) (*MultipartUpload, error) {
+func (fs *FileSystem) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string, metadata map[string]string, lockMode ObjectLockRetentionMode, lockRetainUntilDate *time.Time, lockLegalHold ObjectLegalHoldStatus) (*MultipartUpload, error) {
 	// Validate object key to prevent path traversal
 	if _, err := fs.validateObjectKey(bucket, key); err != nil {
 		return nil, err
@@ -735,12 +735,15 @@ func (fs *FileSystem) CreateMultipartUpload(ctx context.Context, bucket, key, co
 	}
 
 	upload := &MultipartUpload{
-		UploadID:    uploadID,
-		Bucket:      bucket,
-		Key:         key,
-		ContentType: contentType,
-		Metadata:    metadata,
-		Initiated:   time.Now(),
+		UploadID:                  uploadID,
+		Bucket:                    bucket,
+		Key:                       key,
+		ContentType:               contentType,
+		Metadata:                  metadata,
+		Initiated:                 time.Now(),
+		ObjectLockMode:            lockMode,
+		ObjectLockRetainUntilDate: lockRetainUntilDate,
+		ObjectLockLegalHold:       lockLegalHold,
 	}
 
 	// Create directory for parts
@@ -950,6 +953,13 @@ func (fs *FileSystem) UploadPartCopy(ctx context.Context, bucket, key, uploadID 
 	}
 
 	return part, nil
+}
+
+// GetMultipartUpload returns the in-progress upload record for uploadID, or
+// nil if no such upload exists. Used by the API layer to recover the Object
+// Lock intent captured at CreateMultipartUpload (issue #40).
+func (fs *FileSystem) GetMultipartUpload(ctx context.Context, uploadID string) (*MultipartUpload, error) {
+	return fs.metadata.GetMultipartUpload(ctx, uploadID)
 }
 
 // CompleteMultipartUpload completes a multipart upload.

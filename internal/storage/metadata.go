@@ -88,7 +88,9 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create index: %w", err)
 	}
 
-	// Create multipart_uploads table
+	// Create multipart_uploads table. The object_lock_* columns (issue #40)
+	// capture the x-amz-object-lock-* headers supplied to CreateMultipartUpload
+	// so they can be applied to the version finalized at CompleteMultipartUpload.
 	_, err = m.db.Exec(`
 		CREATE TABLE IF NOT EXISTS multipart_uploads (
 			upload_id TEXT PRIMARY KEY,
@@ -97,11 +99,21 @@ func (m *Metadata) initialize() error {
 			content_type TEXT NOT NULL,
 			metadata TEXT,
 			initiated DATETIME NOT NULL,
+			object_lock_mode TEXT NOT NULL DEFAULT '',
+			object_lock_retain_until_date DATETIME,
+			object_lock_legal_hold TEXT NOT NULL DEFAULT '',
 			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
 		)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to create multipart_uploads table: %w", err)
+	}
+
+	// Migrate pre-#40 multipart_uploads tables that lack the object_lock_*
+	// columns. ALTER TABLE ADD COLUMN is idempotent here because we add a
+	// column only when PRAGMA table_info reports it missing.
+	if err := m.migrateMultipartObjectLockColumns(); err != nil {
+		return err
 	}
 
 	// Create parts table
@@ -414,6 +426,57 @@ func (m *Metadata) retentionVersionColumnState() (hasVersionCol, tableExists boo
 		}
 	}
 	return hasVersionCol, tableExists, rows.Err()
+}
+
+// migrateMultipartObjectLockColumns adds the object_lock_* columns to an
+// existing multipart_uploads table created before issue #40. It is a no-op for
+// fresh databases (where the columns are part of the CREATE TABLE) and for
+// already-migrated databases. Each column is added only when PRAGMA table_info
+// reports it missing, so the migration is idempotent.
+func (m *Metadata) migrateMultipartObjectLockColumns() error {
+	existing := map[string]bool{}
+	rows, err := m.db.Query(`PRAGMA table_info('multipart_uploads')`)
+	if err != nil {
+		return fmt.Errorf("failed to inspect multipart_uploads columns: %w", err)
+	}
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			ctype      string
+			notNull    int
+			dfltValue  sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &primaryKey); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to scan multipart_uploads column info: %w", err)
+		}
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("failed to read multipart_uploads column info: %w", err)
+	}
+	rows.Close()
+
+	additions := []struct {
+		name string
+		ddl  string
+	}{
+		{"object_lock_mode", `ALTER TABLE multipart_uploads ADD COLUMN object_lock_mode TEXT NOT NULL DEFAULT ''`},
+		{"object_lock_retain_until_date", `ALTER TABLE multipart_uploads ADD COLUMN object_lock_retain_until_date DATETIME`},
+		{"object_lock_legal_hold", `ALTER TABLE multipart_uploads ADD COLUMN object_lock_legal_hold TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, add := range additions {
+		if existing[add.name] {
+			continue
+		}
+		if _, err := m.db.Exec(add.ddl); err != nil {
+			return fmt.Errorf("failed to add multipart_uploads.%s column: %w", add.name, err)
+		}
+	}
+	return nil
 }
 
 // runObjectLockMigration performs the legacy -> v2 migration described in the
@@ -917,9 +980,13 @@ func (m *Metadata) CreateMultipartUpload(ctx context.Context, upload *MultipartU
 	}
 
 	_, err = m.db.ExecContext(ctx, `
-		INSERT INTO multipart_uploads (upload_id, bucket, key, content_type, metadata, initiated)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, upload.UploadID, upload.Bucket, upload.Key, upload.ContentType, string(metadata), upload.Initiated)
+		INSERT INTO multipart_uploads (
+			upload_id, bucket, key, content_type, metadata, initiated,
+			object_lock_mode, object_lock_retain_until_date, object_lock_legal_hold
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, upload.UploadID, upload.Bucket, upload.Key, upload.ContentType, string(metadata), upload.Initiated,
+		string(upload.ObjectLockMode), upload.ObjectLockRetainUntilDate, string(upload.ObjectLockLegalHold))
 	return err
 }
 
@@ -927,10 +994,17 @@ func (m *Metadata) CreateMultipartUpload(ctx context.Context, upload *MultipartU
 func (m *Metadata) GetMultipartUpload(ctx context.Context, uploadID string) (*MultipartUpload, error) {
 	var upload MultipartUpload
 	var metadataStr string
+	var lockMode string
+	var lockRetainUntil sql.NullTime
+	var lockLegalHold string
 	err := m.db.QueryRowContext(ctx, `
-		SELECT upload_id, bucket, key, content_type, metadata, initiated
+		SELECT upload_id, bucket, key, content_type, metadata, initiated,
+			object_lock_mode, object_lock_retain_until_date, object_lock_legal_hold
 		FROM multipart_uploads WHERE upload_id = ?
-	`, uploadID).Scan(&upload.UploadID, &upload.Bucket, &upload.Key, &upload.ContentType, &metadataStr, &upload.Initiated)
+	`, uploadID).Scan(
+		&upload.UploadID, &upload.Bucket, &upload.Key, &upload.ContentType, &metadataStr, &upload.Initiated,
+		&lockMode, &lockRetainUntil, &lockLegalHold,
+	)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -943,6 +1017,13 @@ func (m *Metadata) GetMultipartUpload(ctx context.Context, uploadID string) (*Mu
 			return nil, err
 		}
 	}
+
+	upload.ObjectLockMode = ObjectLockRetentionMode(lockMode)
+	if lockRetainUntil.Valid {
+		t := lockRetainUntil.Time
+		upload.ObjectLockRetainUntilDate = &t
+	}
+	upload.ObjectLockLegalHold = ObjectLegalHoldStatus(lockLegalHold)
 
 	return &upload, nil
 }

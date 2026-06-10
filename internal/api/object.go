@@ -158,6 +158,16 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Object Lock headers / bucket DefaultRetention (issue #40): resolve and
+	// validate BEFORE reading the body so a malformed lock request fails fast
+	// without consuming the payload. The resolved intent is applied to the
+	// exact version_id produced below.
+	lockIntent, lockErr := h.resolveObjectLockOnWrite(r.Context(), bucket, r)
+	if lockErr != nil {
+		WriteErrorWithResource(w, lockErr, "/"+bucket+"/"+key)
+		return
+	}
+
 	// Check if versioning is enabled
 	versioningStatus, _ := h.storage.GetBucketVersioning(r.Context(), bucket)
 
@@ -240,6 +250,18 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 			if err := h.storage.PutObjectACL(r.Context(), bucket, key, acl); err != nil {
 				log.Error().Err(err).Str("bucket", bucket).Str("key", key).Msg("Failed to set object ACL")
 			}
+		}
+	}
+
+	// Object Lock (issue #40): apply the resolved retention / legal hold to the
+	// exact version_id this PUT produced (versionID is "" for the null version
+	// on a non-versioning bucket). The bucket is already known to be
+	// Object-Lock-enabled when the intent is non-empty.
+	if !lockIntent.isEmpty() {
+		if err := h.applyObjectLockOnWrite(r.Context(), bucket, key, versionID, lockIntent); err != nil {
+			log.Error().Err(err).Str("bucket", bucket).Str("key", key).Str("versionId", versionID).Msg("Failed to apply object lock on PutObject")
+			WriteError(w, ErrInternalError)
+			return
 		}
 	}
 
@@ -780,6 +802,16 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Object Lock headers / bucket DefaultRetention (issue #40): a CopyObject
+	// does NOT inherit the source version's retention / legal hold — only the
+	// request headers and the destination bucket's DefaultRetention apply.
+	// Resolve and validate against the destination bucket before the copy.
+	lockIntent, lockErr := h.resolveObjectLockOnWrite(r.Context(), dstBucket, r)
+	if lockErr != nil {
+		WriteErrorWithResource(w, lockErr, "/"+dstBucket+"/"+dstKey)
+		return
+	}
+
 	var metadata map[string]string
 	if metadataDirective == "REPLACE" {
 		// Use new metadata from request headers
@@ -831,6 +863,17 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 		}
 		WriteError(w, ErrInternalError)
 		return
+	}
+
+	// Object Lock (issue #40): apply the resolved retention / legal hold to the
+	// version_id this copy produced. dstVersionID is "" for the null version on
+	// a non-versioning destination bucket.
+	if !lockIntent.isEmpty() {
+		if err := h.applyObjectLockOnWrite(r.Context(), dstBucket, dstKey, dstVersionID, lockIntent); err != nil {
+			log.Error().Err(err).Str("bucket", dstBucket).Str("key", dstKey).Str("versionId", dstVersionID).Msg("Failed to apply object lock on CopyObject")
+			WriteError(w, ErrInternalError)
+			return
+		}
 	}
 
 	result := CopyObjectResult{
