@@ -469,3 +469,72 @@ func TestMultipartUploadWithRetentionHeaders(t *testing.T) {
 	require.NotNil(t, gotHold.LegalHold)
 	assert.Equal(t, types.ObjectLockLegalHoldStatusOn, gotHold.LegalHold.Status)
 }
+
+// TestMultipartDefaultRetentionAtCompleteTime verifies bucket DefaultRetention
+// for multipart uploads is anchored at CompleteMultipartUpload (not
+// CreateMultipartUpload).
+func TestMultipartDefaultRetentionAtCompleteTime(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName, cleanup := createObjectLockBucket(t, client, ctx)
+	defer cleanup()
+
+	_, err := client.PutObjectLockConfiguration(ctx, &s3.PutObjectLockConfigurationInput{
+		Bucket: aws.String(bucketName),
+		ObjectLockConfiguration: &types.ObjectLockConfiguration{
+			ObjectLockEnabled: types.ObjectLockEnabledEnabled,
+			Rule: &types.ObjectLockRule{
+				DefaultRetention: &types.DefaultRetention{
+					Mode: types.ObjectLockRetentionModeGovernance,
+					Days: aws.Int32(7),
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	key := testutil.RandomObjectKey()
+	createResult, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+	})
+	require.NoError(t, err)
+
+	time.Sleep(2 * time.Second)
+	beforeComplete := time.Now().UTC()
+
+	partContent := bytes.Repeat([]byte("d"), 5*1024*1024)
+	partResult, err := client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(key),
+		UploadId:   createResult.UploadId,
+		PartNumber: aws.Int32(1),
+		Body:       bytes.NewReader(partContent),
+	})
+	require.NoError(t, err)
+
+	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(key),
+		UploadId: createResult.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: []types.CompletedPart{
+				{PartNumber: aws.Int32(1), ETag: partResult.ETag},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	got, err := client.GetObjectRetention(ctx, &s3.GetObjectRetentionInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, got.Retention)
+	assert.Equal(t, types.ObjectLockRetentionModeGovernance, got.Retention.Mode)
+	expected := beforeComplete.AddDate(0, 0, 7)
+	assert.WithinDuration(t, expected, *got.Retention.RetainUntilDate, 10*time.Second)
+}

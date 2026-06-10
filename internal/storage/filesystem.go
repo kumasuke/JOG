@@ -711,7 +711,7 @@ func (fs *FileSystem) ListObjectsV2(ctx context.Context, input *ListObjectsInput
 }
 
 // CreateMultipartUpload initiates a multipart upload.
-func (fs *FileSystem) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string, metadata map[string]string, lockMode ObjectLockRetentionMode, lockRetainUntilDate *time.Time, lockLegalHold ObjectLegalHoldStatus) (*MultipartUpload, error) {
+func (fs *FileSystem) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string, metadata map[string]string, lockMode ObjectLockRetentionMode, lockRetainUntilDate *time.Time, lockDefaultDays, lockDefaultYears *int32, lockLegalHold ObjectLegalHoldStatus) (*MultipartUpload, error) {
 	// Validate object key to prevent path traversal
 	if _, err := fs.validateObjectKey(bucket, key); err != nil {
 		return nil, err
@@ -743,6 +743,8 @@ func (fs *FileSystem) CreateMultipartUpload(ctx context.Context, bucket, key, co
 		Initiated:                 time.Now(),
 		ObjectLockMode:            lockMode,
 		ObjectLockRetainUntilDate: lockRetainUntilDate,
+		ObjectLockDefaultDays:     lockDefaultDays,
+		ObjectLockDefaultYears:    lockDefaultYears,
 		ObjectLockLegalHold:       lockLegalHold,
 	}
 
@@ -2334,10 +2336,23 @@ func (fs *FileSystem) PutObjectLockConfiguration(ctx context.Context, bucket str
 		return ErrMalformedXML
 	}
 
-	// Validate default retention mode if rule exists
+	// Validate default retention mode/duration if rule exists
 	if config.Rule != nil && config.Rule.DefaultRetention != nil {
-		mode := string(config.Rule.DefaultRetention.Mode)
+		dr := config.Rule.DefaultRetention
+		mode := string(dr.Mode)
 		if mode != "GOVERNANCE" && mode != "COMPLIANCE" {
+			return ErrMalformedXML
+		}
+		daysSet := dr.Days != nil
+		yearsSet := dr.Years != nil
+		if daysSet == yearsSet {
+			return ErrMalformedXML
+		}
+		if daysSet {
+			if *dr.Days <= 0 {
+				return ErrMalformedXML
+			}
+		} else if *dr.Years <= 0 {
 			return ErrMalformedXML
 		}
 	}
@@ -2601,6 +2616,96 @@ func (fs *FileSystem) PutObjectLegalHold(ctx context.Context, bucket, key, versi
 	}
 
 	return fs.metadata.PutObjectLegalHold(ctx, bucket, key, versionID, status)
+}
+
+// ApplyObjectLockOnVersion atomically persists retention and legal hold for a
+// single object version.
+func (fs *FileSystem) ApplyObjectLockOnVersion(ctx context.Context, bucket, key, versionID string, retention *ObjectRetention, legalHold *ObjectLegalHold) error {
+	if retention == nil && legalHold == nil {
+		return nil
+	}
+	if retention != nil {
+		if retention.RetainUntilDate == nil {
+			return ErrMalformedXML
+		}
+		mode := string(retention.Mode)
+		if mode != "GOVERNANCE" && mode != "COMPLIANCE" {
+			return ErrMalformedXML
+		}
+	}
+	if legalHold != nil {
+		status := string(legalHold.Status)
+		if status != "ON" && status != "OFF" {
+			return ErrMalformedXML
+		}
+	}
+
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	enabled, err := fs.metadata.GetBucketObjectLockEnabled(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return ErrInvalidRequestObjectLock
+	}
+
+	versionExists, err := fs.objectVersionExists(ctx, bucket, key, versionID)
+	if err != nil {
+		return err
+	}
+	if !versionExists {
+		return ErrObjectNotFound
+	}
+
+	return fs.metadata.ApplyObjectLockOnVersion(ctx, bucket, key, versionID, retention, legalHold)
+}
+
+// RollbackNewObjectVersion removes a newly created version and restores the
+// prior current pointer when lock application fails after a versioned write.
+func (fs *FileSystem) RollbackNewObjectVersion(ctx context.Context, bucket, key, versionID string) error {
+	if versionID == "" {
+		return fmt.Errorf("rollback requires a concrete version ID")
+	}
+
+	prior, err := fs.metadata.GetPriorObjectVersion(ctx, bucket, key, versionID)
+	if err != nil {
+		return err
+	}
+	if prior != nil && !prior.IsDeleteMarker {
+		priorPath := fs.versionFilePath(bucket, key, prior.VersionID)
+		f, openErr := os.Open(priorPath)
+		if openErr != nil {
+			return fmt.Errorf("prior version file missing or unreadable: %w", openErr)
+		}
+		_ = f.Close()
+	}
+
+	prior, err = fs.metadata.RollbackNewObjectVersion(ctx, bucket, key, versionID)
+	if err != nil {
+		return err
+	}
+
+	versionPath := fs.versionFilePath(bucket, key, versionID)
+	_ = os.Remove(versionPath)
+
+	currentPath := filepath.Join(fs.dataDir, bucket, key)
+	if prior != nil && !prior.IsDeleteMarker {
+		priorPath := fs.versionFilePath(bucket, key, prior.VersionID)
+		if err := copyFile(priorPath, currentPath); err != nil {
+			return fmt.Errorf("failed to restore current object after rollback: %w", err)
+		}
+		return nil
+	}
+
+	_ = os.Remove(currentPath)
+	return nil
 }
 
 // GetObjectLegalHold returns the legal hold status for a specific object

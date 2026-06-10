@@ -101,6 +101,8 @@ func (m *Metadata) initialize() error {
 			initiated DATETIME NOT NULL,
 			object_lock_mode TEXT NOT NULL DEFAULT '',
 			object_lock_retain_until_date DATETIME,
+			object_lock_default_days INTEGER,
+			object_lock_default_years INTEGER,
 			object_lock_legal_hold TEXT NOT NULL DEFAULT '',
 			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
 		)
@@ -466,6 +468,8 @@ func (m *Metadata) migrateMultipartObjectLockColumns() error {
 	}{
 		{"object_lock_mode", `ALTER TABLE multipart_uploads ADD COLUMN object_lock_mode TEXT NOT NULL DEFAULT ''`},
 		{"object_lock_retain_until_date", `ALTER TABLE multipart_uploads ADD COLUMN object_lock_retain_until_date DATETIME`},
+		{"object_lock_default_days", `ALTER TABLE multipart_uploads ADD COLUMN object_lock_default_days INTEGER`},
+		{"object_lock_default_years", `ALTER TABLE multipart_uploads ADD COLUMN object_lock_default_years INTEGER`},
 		{"object_lock_legal_hold", `ALTER TABLE multipart_uploads ADD COLUMN object_lock_legal_hold TEXT NOT NULL DEFAULT ''`},
 	}
 	for _, add := range additions {
@@ -982,11 +986,15 @@ func (m *Metadata) CreateMultipartUpload(ctx context.Context, upload *MultipartU
 	_, err = m.db.ExecContext(ctx, `
 		INSERT INTO multipart_uploads (
 			upload_id, bucket, key, content_type, metadata, initiated,
-			object_lock_mode, object_lock_retain_until_date, object_lock_legal_hold
+			object_lock_mode, object_lock_retain_until_date,
+			object_lock_default_days, object_lock_default_years,
+			object_lock_legal_hold
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, upload.UploadID, upload.Bucket, upload.Key, upload.ContentType, string(metadata), upload.Initiated,
-		string(upload.ObjectLockMode), upload.ObjectLockRetainUntilDate, string(upload.ObjectLockLegalHold))
+		string(upload.ObjectLockMode), upload.ObjectLockRetainUntilDate,
+		upload.ObjectLockDefaultDays, upload.ObjectLockDefaultYears,
+		string(upload.ObjectLockLegalHold))
 	return err
 }
 
@@ -996,14 +1004,17 @@ func (m *Metadata) GetMultipartUpload(ctx context.Context, uploadID string) (*Mu
 	var metadataStr string
 	var lockMode string
 	var lockRetainUntil sql.NullTime
+	var lockDefaultDays, lockDefaultYears sql.NullInt32
 	var lockLegalHold string
 	err := m.db.QueryRowContext(ctx, `
 		SELECT upload_id, bucket, key, content_type, metadata, initiated,
-			object_lock_mode, object_lock_retain_until_date, object_lock_legal_hold
+			object_lock_mode, object_lock_retain_until_date,
+			object_lock_default_days, object_lock_default_years,
+			object_lock_legal_hold
 		FROM multipart_uploads WHERE upload_id = ?
 	`, uploadID).Scan(
 		&upload.UploadID, &upload.Bucket, &upload.Key, &upload.ContentType, &metadataStr, &upload.Initiated,
-		&lockMode, &lockRetainUntil, &lockLegalHold,
+		&lockMode, &lockRetainUntil, &lockDefaultDays, &lockDefaultYears, &lockLegalHold,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1022,6 +1033,14 @@ func (m *Metadata) GetMultipartUpload(ctx context.Context, uploadID string) (*Mu
 	if lockRetainUntil.Valid {
 		t := lockRetainUntil.Time
 		upload.ObjectLockRetainUntilDate = &t
+	}
+	if lockDefaultDays.Valid {
+		d := lockDefaultDays.Int32
+		upload.ObjectLockDefaultDays = &d
+	}
+	if lockDefaultYears.Valid {
+		y := lockDefaultYears.Int32
+		upload.ObjectLockDefaultYears = &y
 	}
 	upload.ObjectLockLegalHold = ObjectLegalHoldStatus(lockLegalHold)
 
@@ -1660,6 +1679,135 @@ func (m *Metadata) GetBucketObjectLockConfig(ctx context.Context, bucket string)
 		return "", nil
 	}
 	return config.String, nil
+}
+
+// ApplyObjectLockOnVersion atomically persists retention and legal hold for a
+// single object version. Either field may be nil (skip). Both are written in
+// one transaction so partial application cannot occur.
+func (m *Metadata) ApplyObjectLockOnVersion(ctx context.Context, bucket, key, versionID string, retention *ObjectRetention, legalHold *ObjectLegalHold) error {
+	if retention == nil && legalHold == nil {
+		return nil
+	}
+
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if retention != nil && retention.RetainUntilDate != nil {
+		mode := string(retention.Mode)
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO object_retention (bucket, key, version_id, mode, retain_until_date)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(bucket, key, version_id) DO UPDATE SET
+				mode = excluded.mode,
+				retain_until_date = excluded.retain_until_date
+		`, bucket, key, versionID, mode, *retention.RetainUntilDate); err != nil {
+			return err
+		}
+	}
+	if legalHold != nil {
+		status := string(legalHold.Status)
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO object_legal_hold (bucket, key, version_id, status)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(bucket, key, version_id) DO UPDATE SET
+				status = excluded.status
+		`, bucket, key, versionID, status); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetPriorObjectVersion returns the most recent object version for key excluding
+// excludeVersionID. Nil when no prior version exists.
+func (m *Metadata) GetPriorObjectVersion(ctx context.Context, bucket, key, excludeVersionID string) (*ObjectVersion, error) {
+	var version ObjectVersion
+	var metadataStr string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
+		FROM object_versions
+		WHERE bucket = ? AND key = ? AND version_id != ?
+		ORDER BY last_modified DESC, version_id DESC
+		LIMIT 1
+	`, bucket, key, excludeVersionID).Scan(
+		&version.Key, &version.VersionID, &version.Size, &version.LastModified,
+		&version.ETag, &version.ContentType, &metadataStr, &version.IsDeleteMarker,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if metadataStr != "" {
+		if err := json.Unmarshal([]byte(metadataStr), &version.Metadata); err != nil {
+			return nil, err
+		}
+	}
+	return &version, nil
+}
+
+// RollbackNewObjectVersion removes a failed new version and restores the prior
+// current pointer. Returns the prior version metadata for filesystem restoration.
+func (m *Metadata) RollbackNewObjectVersion(ctx context.Context, bucket, key, versionID string) (*ObjectVersion, error) {
+	if versionID == "" {
+		return nil, fmt.Errorf("rollback requires a concrete version ID")
+	}
+
+	prior, err := m.GetPriorObjectVersion(ctx, bucket, key, versionID)
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM object_retention WHERE bucket = ? AND key = ? AND version_id = ?`,
+		bucket, key, versionID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM object_legal_hold WHERE bucket = ? AND key = ? AND version_id = ?`,
+		bucket, key, versionID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM object_versions WHERE bucket = ? AND key = ? AND version_id = ?`,
+		bucket, key, versionID); err != nil {
+		return nil, err
+	}
+
+	if prior != nil && !prior.IsDeleteMarker {
+		metadataJSON, err := json.Marshal(prior.Metadata)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR REPLACE INTO objects (bucket, key, size, last_modified, etag, content_type, metadata)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, bucket, key, prior.Size, prior.LastModified, prior.ETag, prior.ContentType, string(metadataJSON)); err != nil {
+			return nil, err
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM objects WHERE bucket = ? AND key = ?`,
+			bucket, key); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return prior, nil
 }
 
 // PutObjectRetention stores the retention configuration for a specific object

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -231,7 +232,7 @@ func TestVersionedWrites_NotBlockedByNullVersionLock(t *testing.T) {
 	t.Run("CompleteMultipartUploadVersioned", func(t *testing.T) {
 		ctx := context.Background()
 		fs := seed(t)
-		upload, err := fs.CreateMultipartUpload(ctx, "b", "k", "text/plain", nil, "", nil, "")
+		upload, err := fs.CreateMultipartUpload(ctx, "b", "k", "text/plain", nil, "", nil, nil, nil, "")
 		if err != nil {
 			t.Fatalf("CreateMultipartUpload: %v", err)
 		}
@@ -249,3 +250,163 @@ func TestVersionedWrites_NotBlockedByNullVersionLock(t *testing.T) {
 		assertNullLockIntact(t, fs)
 	})
 }
+
+func TestPutObjectLockConfiguration_InvalidDefaultRetention(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	if err := fs.CreateBucket(ctx, "b"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := fs.SetBucketObjectLockEnabled(ctx, "b", true); err != nil {
+		t.Fatalf("SetBucketObjectLockEnabled: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		dr   *DefaultRetention
+	}{
+		{
+			name: "both days and years",
+			dr: &DefaultRetention{
+				Mode:  ObjectLockRetentionModeGovernance,
+				Days:  testInt32Ptr(7),
+				Years: testInt32Ptr(1),
+			},
+		},
+		{
+			name: "neither days nor years",
+			dr: &DefaultRetention{
+				Mode: ObjectLockRetentionModeGovernance,
+			},
+		},
+		{
+			name: "zero days",
+			dr: &DefaultRetention{
+				Mode: ObjectLockRetentionModeGovernance,
+				Days: testInt32Ptr(0),
+			},
+		},
+		{
+			name: "zero years",
+			dr: &DefaultRetention{
+				Mode:  ObjectLockRetentionModeGovernance,
+				Years: testInt32Ptr(0),
+			},
+		},
+		{
+			name: "negative days",
+			dr: &DefaultRetention{
+				Mode: ObjectLockRetentionModeGovernance,
+				Days: testInt32Ptr(-1),
+			},
+		},
+		{
+			name: "negative years",
+			dr: &DefaultRetention{
+				Mode:  ObjectLockRetentionModeGovernance,
+				Years: testInt32Ptr(-1),
+			},
+		},
+		{
+			name: "days with zero years",
+			dr: &DefaultRetention{
+				Mode:  ObjectLockRetentionModeGovernance,
+				Days:  testInt32Ptr(7),
+				Years: testInt32Ptr(0),
+			},
+		},
+		{
+			name: "days with negative years",
+			dr: &DefaultRetention{
+				Mode:  ObjectLockRetentionModeGovernance,
+				Days:  testInt32Ptr(7),
+				Years: testInt32Ptr(-1),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := fs.PutObjectLockConfiguration(ctx, "b", &ObjectLockConfiguration{
+				ObjectLockEnabled: true,
+				Rule: &ObjectLockRule{
+					DefaultRetention: tt.dr,
+				},
+			})
+			if !errors.Is(err, ErrMalformedXML) {
+				t.Fatalf("PutObjectLockConfiguration() error = %v, want %v", err, ErrMalformedXML)
+			}
+		})
+	}
+}
+
+func TestRollbackNewObjectVersion_PriorFileMissingPreservesState(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	if err := fs.CreateBucket(ctx, "b"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := fs.PutBucketVersioning(ctx, "b", VersioningStatusEnabled); err != nil {
+		t.Fatalf("PutBucketVersioning: %v", err)
+	}
+
+	_, v1, err := fs.PutObjectVersioned(ctx, "b", "k", strings.NewReader("v1"), 2, "text/plain", nil)
+	if err != nil {
+		t.Fatalf("PutObjectVersioned v1: %v", err)
+	}
+	v2Obj, v2, err := fs.PutObjectVersioned(ctx, "b", "k", strings.NewReader("v2"), 2, "text/plain", nil)
+	if err != nil {
+		t.Fatalf("PutObjectVersioned v2: %v", err)
+	}
+	currentBefore, err := fs.metadata.GetObject(ctx, "b", "k")
+	if err != nil {
+		t.Fatalf("GetObject before failed rollback: %v", err)
+	}
+	v2Ver, err := fs.metadata.GetObjectVersion(ctx, "b", "k", v2)
+	if err != nil {
+		t.Fatalf("GetObjectVersion v2 before failed rollback: %v", err)
+	}
+	if v2Ver == nil {
+		t.Fatal("v2 version row missing before failed rollback")
+	}
+
+	priorPath := fs.versionFilePath("b", "k", v1)
+	if err := os.Remove(priorPath); err != nil {
+		t.Fatalf("Remove prior version file: %v", err)
+	}
+
+	err = fs.RollbackNewObjectVersion(ctx, "b", "k", v2)
+	if err == nil {
+		t.Fatal("RollbackNewObjectVersion() expected error when prior file is missing")
+	}
+
+	current, err := fs.metadata.GetObject(ctx, "b", "k")
+	if err != nil {
+		t.Fatalf("GetObject after failed rollback: %v", err)
+	}
+	if current == nil {
+		t.Fatal("current pointer must remain after failed rollback")
+	}
+	if current.ETag != v2Obj.ETag || current.Size != v2Obj.Size || current.ContentType != v2Obj.ContentType {
+		t.Fatalf("current pointer changed after failed rollback: got ETag=%q Size=%d ContentType=%q, want ETag=%q Size=%d ContentType=%q",
+			current.ETag, current.Size, current.ContentType, v2Obj.ETag, v2Obj.Size, v2Obj.ContentType)
+	}
+	if currentBefore == nil ||
+		current.ETag != currentBefore.ETag ||
+		current.Size != currentBefore.Size ||
+		current.ContentType != currentBefore.ContentType {
+		t.Fatalf("current pointer differs from pre-rollback state: before=%+v after=%+v", currentBefore, current)
+	}
+	if v2Ver.ETag != v2Obj.ETag || v2Ver.Size != v2Obj.Size || v2Ver.ContentType != v2Obj.ContentType {
+		t.Fatalf("v2 version metadata mismatch: got ETag=%q Size=%d ContentType=%q, want ETag=%q Size=%d ContentType=%q",
+			v2Ver.ETag, v2Ver.Size, v2Ver.ContentType, v2Obj.ETag, v2Obj.Size, v2Obj.ContentType)
+	}
+	if ver, _ := fs.metadata.GetObjectVersion(ctx, "b", "k", v2); ver == nil {
+		t.Fatal("new version row must remain after failed rollback")
+	}
+	if _, statErr := os.Stat(fs.versionFilePath("b", "k", v2)); statErr != nil {
+		t.Fatalf("new version file must remain after failed rollback: %v", statErr)
+	}
+}
+
+func testInt32Ptr(v int32) *int32 { return &v }

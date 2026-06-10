@@ -120,23 +120,33 @@ func (h *Handler) CreateMultipartUpload(w http.ResponseWriter, r *http.Request) 
 	// and capture the intent on the upload record so it can be applied to the
 	// version finalized at CompleteMultipartUpload. Validation here gives the
 	// client immediate feedback rather than failing at completion time.
-	lockIntent, lockErr := h.resolveObjectLockOnWrite(r.Context(), bucket, r)
+	lockIntent, lockErr := h.resolveObjectLockOnWrite(r.Context(), bucket, r, true)
 	if lockErr != nil {
 		WriteErrorWithResource(w, lockErr, "/"+bucket+"/"+key)
 		return
 	}
+	if s3Err := h.validateObjectLockIntentVersioning(r.Context(), bucket, lockIntent); s3Err != nil {
+		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+		return
+	}
 	var lockMode storage.ObjectLockRetentionMode
 	var lockRetainUntil *time.Time
+	var lockDefaultDays, lockDefaultYears *int32
 	var lockLegalHold storage.ObjectLegalHoldStatus
 	if lockIntent.retention != nil {
 		lockMode = lockIntent.retention.Mode
 		lockRetainUntil = lockIntent.retention.RetainUntilDate
 	}
+	if lockIntent.pendingDefaultRetention != nil {
+		lockMode = lockIntent.pendingDefaultRetention.Mode
+		lockDefaultDays = lockIntent.pendingDefaultRetention.Days
+		lockDefaultYears = lockIntent.pendingDefaultRetention.Years
+	}
 	if lockIntent.legalHold != nil {
 		lockLegalHold = lockIntent.legalHold.Status
 	}
 
-	upload, err := h.storage.CreateMultipartUpload(r.Context(), bucket, key, contentType, metadata, lockMode, lockRetainUntil, lockLegalHold)
+	upload, err := h.storage.CreateMultipartUpload(r.Context(), bucket, key, contentType, metadata, lockMode, lockRetainUntil, lockDefaultDays, lockDefaultYears, lockLegalHold)
 	if err != nil {
 		if errors.Is(err, storage.ErrInvalidKey) {
 			WriteErrorWithResource(w, ErrInvalidArgument, "/"+bucket+"/"+key)
@@ -473,8 +483,23 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 
 	// Object Lock (issue #40): recover the lock intent captured at
 	// CreateMultipartUpload BEFORE completing, because completion deletes the
-	// upload record. The intent is applied to the finalized version below.
-	lockIntent := h.multipartLockIntent(r.Context(), uploadID)
+	// upload record. DefaultRetention dates are materialized here from
+	// time.Now(). A read failure must not proceed to completion.
+	lockIntent, lockIntentErr := h.multipartLockIntent(r.Context(), uploadID)
+	if lockIntentErr != nil {
+		if errors.Is(lockIntentErr, storage.ErrUploadNotFound) {
+			WriteErrorWithResource(w, ErrNoSuchUpload, "/"+bucket+"/"+key)
+			return
+		}
+		log.Error().Err(lockIntentErr).Str("bucket", bucket).Str("key", key).Str("uploadId", uploadID).
+			Msg("Failed to read multipart object lock intent during CompleteMultipartUpload")
+		WriteErrorWithResource(w, ErrInternalError, "/"+bucket+"/"+key)
+		return
+	}
+	if s3Err := h.validateObjectLockIntentVersioning(r.Context(), bucket, lockIntent); s3Err != nil {
+		WriteErrorWithResource(w, s3Err, "/"+bucket+"/"+key)
+		return
+	}
 
 	var obj *storage.Object
 	var versionID string
