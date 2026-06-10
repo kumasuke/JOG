@@ -195,6 +195,13 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
 			return
 		}
+		// The storage layer's null-version Object Lock guard refuses an
+		// in-place overwrite of a retained/legal-held object. Surface it as
+		// the canonical S3 AccessDenied (403) rather than a 500.
+		if errors.Is(err, storage.ErrObjectLocked) {
+			WriteError(w, ErrAccessDenied)
+			return
+		}
 		// CR-2/CR-3: a body-reader error from the auth middleware
 		// wrapper means the client's payload did not match the signed
 		// hash / chunk-signature chain. Map it back to the canonical
@@ -813,6 +820,13 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, storage.ErrObjectNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchKey, "/"+srcBucket+"/"+srcKey)
+			return
+		}
+		// The storage layer's null-version Object Lock guard refuses an
+		// in-place overwrite of a retained/legal-held destination object.
+		// Surface it as the canonical S3 AccessDenied (403) rather than a 500.
+		if errors.Is(err, storage.ErrObjectLocked) {
+			WriteError(w, ErrAccessDenied)
 			return
 		}
 		WriteError(w, ErrInternalError)

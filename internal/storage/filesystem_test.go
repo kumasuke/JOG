@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestFileSystem(t *testing.T) *FileSystem {
@@ -147,5 +148,104 @@ func TestFileSystemRejectsInvalidObjectKeys(t *testing.T) {
 		if !errors.Is(err, ErrInvalidKey) {
 			t.Fatalf("PutObject() error = %v, want %v", err, ErrInvalidKey)
 		}
+	})
+}
+
+// TestVersionedWrites_NotBlockedByNullVersionLock reproduces the #39 fix-round-1
+// regression: when a key's null version (”) carries an active retention/legal
+// hold (reachable via the migration backfill that binds legacy locks to ”, or
+// via a retention/legal-hold set on a pre-versioning object), a subsequent
+// versioned write MUST create a new version and always succeed, leaving the
+// locked prior version intact. Exercises all three versioned write paths:
+// PutObjectVersioned, CopyObjectVersioned and CompleteMultipartUploadVersioned.
+func TestVersionedWrites_NotBlockedByNullVersionLock(t *testing.T) {
+	now := time.Now()
+
+	// seed creates a non-versioning object on key "k", binds an active
+	// GOVERNANCE retention to its null version (''), then flips the bucket to
+	// versioning Enabled — mirroring the migration/null-version-resolution path.
+	seed := func(t *testing.T) *FileSystem {
+		t.Helper()
+		ctx := context.Background()
+		fs := newTestFileSystem(t)
+		if err := fs.CreateBucket(ctx, "b"); err != nil {
+			t.Fatalf("CreateBucket: %v", err)
+		}
+		if _, err := fs.PutObject(ctx, "b", "k", strings.NewReader("v0"), 2, "text/plain", nil); err != nil {
+			t.Fatalf("PutObject seed: %v", err)
+		}
+		// Bind an active retention to the null version directly via metadata
+		// (the migration backfill / pre-versioning PutObjectRetention result).
+		if err := fs.metadata.PutObjectRetention(ctx, "b", "k", "", "GOVERNANCE", now.Add(time.Hour)); err != nil {
+			t.Fatalf("seed null-version retention: %v", err)
+		}
+		if err := fs.PutBucketVersioning(ctx, "b", VersioningStatusEnabled); err != nil {
+			t.Fatalf("PutBucketVersioning: %v", err)
+		}
+		return fs
+	}
+
+	// assertNullLockIntact confirms the locked null-version row survived the
+	// versioned write (the prior version must remain protected).
+	assertNullLockIntact := func(t *testing.T, fs *FileSystem) {
+		t.Helper()
+		mode, until, err := fs.metadata.GetObjectRetention(context.Background(), "b", "k", "")
+		if err != nil {
+			t.Fatalf("GetObjectRetention(null): %v", err)
+		}
+		if mode != "GOVERNANCE" || until == nil {
+			t.Errorf("null-version retention must survive versioned write: mode=%q until=%v", mode, until)
+		}
+	}
+
+	t.Run("PutObjectVersioned", func(t *testing.T) {
+		ctx := context.Background()
+		fs := seed(t)
+		_, versionID, err := fs.PutObjectVersioned(ctx, "b", "k", strings.NewReader("v1"), 2, "text/plain", nil)
+		if err != nil {
+			t.Fatalf("PutObjectVersioned blocked by null-version guard: %v", err)
+		}
+		if versionID == "" {
+			t.Fatalf("PutObjectVersioned must return a new version id")
+		}
+		assertNullLockIntact(t, fs)
+	})
+
+	t.Run("CopyObjectVersioned", func(t *testing.T) {
+		ctx := context.Background()
+		fs := seed(t)
+		// Source object on a different key.
+		if _, err := fs.PutObject(ctx, "b", "src", strings.NewReader("source"), 6, "text/plain", nil); err != nil {
+			t.Fatalf("PutObject src: %v", err)
+		}
+		_, versionID, err := fs.CopyObjectVersioned(ctx, "b", "src", "", "b", "k", nil)
+		if err != nil {
+			t.Fatalf("CopyObjectVersioned blocked by null-version guard: %v", err)
+		}
+		if versionID == "" {
+			t.Fatalf("CopyObjectVersioned must return a new version id")
+		}
+		assertNullLockIntact(t, fs)
+	})
+
+	t.Run("CompleteMultipartUploadVersioned", func(t *testing.T) {
+		ctx := context.Background()
+		fs := seed(t)
+		upload, err := fs.CreateMultipartUpload(ctx, "b", "k", "text/plain", nil)
+		if err != nil {
+			t.Fatalf("CreateMultipartUpload: %v", err)
+		}
+		part, err := fs.UploadPart(ctx, "b", "k", upload.UploadID, 1, strings.NewReader("multipartdata"), 13)
+		if err != nil {
+			t.Fatalf("UploadPart: %v", err)
+		}
+		_, versionID, err := fs.CompleteMultipartUploadVersioned(ctx, "b", "k", upload.UploadID, []Part{{PartNumber: 1, ETag: part.ETag, Size: 13}})
+		if err != nil {
+			t.Fatalf("CompleteMultipartUploadVersioned blocked by null-version guard: %v", err)
+		}
+		if versionID == "" {
+			t.Fatalf("CompleteMultipartUploadVersioned must return a new version id")
+		}
+		assertNullLockIntact(t, fs)
 	})
 }

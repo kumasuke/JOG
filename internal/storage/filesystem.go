@@ -608,7 +608,10 @@ func (fs *FileSystem) CopyObjectVersioned(ctx context.Context, srcBucket, srcKey
 		ContentType:  srcContentType,
 		Metadata:     finalMetadata,
 	}
-	if err := fs.metadata.PutObject(ctx, dstBucket, obj); err != nil {
+	// Versioned write: update the current pointer WITHOUT the null-version lock
+	// guard. A new version must always be allowed even when a prior version
+	// (including the ” null version) is under retention/legal hold.
+	if err := fs.metadata.PutObjectCurrentPointer(ctx, dstBucket, obj); err != nil {
 		return nil, "", err
 	}
 
@@ -1177,7 +1180,10 @@ func (fs *FileSystem) CompleteMultipartUploadVersioned(ctx context.Context, buck
 		ContentType:  upload.ContentType,
 		Metadata:     upload.Metadata,
 	}
-	if err := fs.metadata.PutObject(ctx, bucket, obj); err != nil {
+	// Versioned write: update the current pointer WITHOUT the null-version lock
+	// guard. A new version must always be allowed even when a prior version
+	// (including the ” null version) is under retention/legal hold.
+	if err := fs.metadata.PutObjectCurrentPointer(ctx, bucket, obj); err != nil {
 		return nil, "", err
 	}
 
@@ -1714,7 +1720,10 @@ func (fs *FileSystem) PutObjectVersioned(ctx context.Context, bucket, key string
 		return nil, "", err
 	}
 
-	// Also update the regular objects table for compatibility
+	// Also update the regular objects table for compatibility.
+	// Versioned write: update the current pointer WITHOUT the null-version lock
+	// guard. A new version must always be allowed even when a prior version
+	// (including the ” null version) is under retention/legal hold.
 	obj := &Object{
 		Key:          key,
 		Size:         written,
@@ -1724,7 +1733,7 @@ func (fs *FileSystem) PutObjectVersioned(ctx context.Context, bucket, key string
 		Metadata:     userMetadata,
 	}
 
-	if err := fs.metadata.PutObject(ctx, bucket, obj); err != nil {
+	if err := fs.metadata.PutObjectCurrentPointer(ctx, bucket, obj); err != nil {
 		return nil, "", err
 	}
 

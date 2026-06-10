@@ -472,6 +472,13 @@ func (h *Handler) CompleteMultipartUpload(w http.ResponseWriter, r *http.Request
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
 			return
 		}
+		// The storage layer's null-version Object Lock guard refuses an
+		// in-place overwrite of a retained/legal-held object. Surface it as
+		// the canonical S3 AccessDenied (403) rather than a 500.
+		if errors.Is(err, storage.ErrObjectLocked) {
+			WriteError(w, ErrAccessDenied)
+			return
+		}
 		log.Error().Err(err).Msg("Failed to complete multipart upload")
 		WriteError(w, ErrInternalError)
 		return

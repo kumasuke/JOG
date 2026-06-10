@@ -719,7 +719,7 @@ func (m *Metadata) ListBuckets(ctx context.Context) ([]Bucket, error) {
 	return buckets, rows.Err()
 }
 
-// PutObject stores object metadata.
+// PutObject stores object metadata for a non-versioning in-place overwrite.
 //
 // With the per-version Object Lock schema (issue #39), lock rows are no longer
 // cascade-deleted by an overwrite: the FK now references buckets(name) and the
@@ -729,7 +729,33 @@ func (m *Metadata) ListBuckets(ctx context.Context) ([]Bucket, error) {
 // refused (ErrObjectLocked); only an expired retention has its ” row pruned so
 // the object can be replaced. This is a second防壁 behind the handler's
 // evaluateObjectLock check.
+//
+// IMPORTANT: this guard is scoped to the genuine non-versioning overwrite path
+// (FileSystem.PutObject / CopyObject / CompleteMultipartUpload). Versioned write
+// paths must instead use PutObjectCurrentPointer, which updates the live objects
+// row WITHOUT the guard: creating a NEW version must always be allowed and must
+// leave the locked prior version intact (core S3 semantic restored by #39).
 func (m *Metadata) PutObject(ctx context.Context, bucket string, obj *Object) error {
+	return m.putObject(ctx, bucket, obj, true)
+}
+
+// PutObjectCurrentPointer updates the live objects row (the "current version"
+// pointer) without running the null-version Object Lock guard.
+//
+// Versioned write paths (CopyObjectVersioned, CompleteMultipartUploadVersioned,
+// PutObjectVersioned) call this after persisting the new version row: the new
+// write creates a brand-new version and must always succeed regardless of any
+// retention or legal hold on a prior version (including the ” null version).
+// Applying the overwrite guard here would wrongly reject new-version creation
+// whenever the key's null version is locked.
+func (m *Metadata) PutObjectCurrentPointer(ctx context.Context, bucket string, obj *Object) error {
+	return m.putObject(ctx, bucket, obj, false)
+}
+
+// putObject upserts the live objects row. When guard is true it first enforces
+// the null-version Object Lock guard (non-versioning overwrite path); when false
+// it skips the guard (versioned current-pointer update).
+func (m *Metadata) putObject(ctx context.Context, bucket string, obj *Object, guard bool) error {
 	metadata, err := json.Marshal(obj.Metadata)
 	if err != nil {
 		return err
@@ -741,8 +767,10 @@ func (m *Metadata) PutObject(ctx context.Context, bucket string, obj *Object) er
 	}
 	defer tx.Rollback()
 
-	if err := guardNullVersionLockForOverwrite(ctx, tx, bucket, obj.Key); err != nil {
-		return err
+	if guard {
+		if err := guardNullVersionLockForOverwrite(ctx, tx, bucket, obj.Key); err != nil {
+			return err
+		}
 	}
 
 	_, err = tx.ExecContext(ctx, `

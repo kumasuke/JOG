@@ -230,6 +230,87 @@ func TestPutObjectRetention(t *testing.T) {
 	assert.WithinDuration(t, retainUntil, *result.Retention.RetainUntilDate, time.Second)
 }
 
+// TestPutObjectOnLockedKeyCreatesNewVersion is the #39 fix-round-1 E2E
+// regression. An Object-Lock-enabled bucket auto-enables versioning, so a PUT
+// onto a key whose existing version is under GOVERNANCE retention must create a
+// brand-new version and succeed (S3 semantic: new-version creation is always
+// allowed regardless of locks on prior versions). Before the fix the storage
+// guard rejected this versioned write with ErrObjectLocked, surfacing as 500.
+func TestPutObjectOnLockedKeyCreatesNewVersion(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket:                     aws.String(bucketName),
+		ObjectLockEnabledForBucket: aws.Bool(true),
+	})
+	require.NoError(t, err)
+	defer func() {
+		listOutput, _ := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(bucketName)})
+		if listOutput != nil {
+			for _, v := range listOutput.Versions {
+				client.DeleteObject(ctx, &s3.DeleteObjectInput{
+					Bucket:                    aws.String(bucketName),
+					Key:                       v.Key,
+					VersionId:                 v.VersionId,
+					BypassGovernanceRetention: aws.Bool(true),
+				})
+			}
+		}
+		client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)})
+	}()
+
+	objectKey := testutil.RandomObjectKey()
+
+	// First PUT creates the initial version.
+	putOut, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(objectKey),
+		Body:   strings.NewReader("v0"),
+	})
+	require.NoError(t, err)
+	firstVersionID := aws.ToString(putOut.VersionId)
+	require.NotEmpty(t, firstVersionID, "Object Lock bucket must auto-enable versioning")
+
+	// Lock that first version under GOVERNANCE retention.
+	retainUntil := time.Now().Add(24 * time.Hour).UTC()
+	_, err = client.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(objectKey),
+		VersionId: aws.String(firstVersionID),
+		Retention: &types.ObjectLockRetention{
+			Mode:            types.ObjectLockRetentionModeGovernance,
+			RetainUntilDate: aws.Time(retainUntil),
+		},
+	})
+	require.NoError(t, err)
+
+	// A second PUT must create a NEW version and succeed (must NOT 500 / be
+	// blocked by the null-version guard on the locked prior version).
+	put2, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(objectKey),
+		Body:   strings.NewReader("v1-overwrite"),
+	})
+	require.NoError(t, err, "new-version PUT must not be blocked by lock on prior version")
+	secondVersionID := aws.ToString(put2.VersionId)
+	require.NotEmpty(t, secondVersionID)
+	require.NotEqual(t, firstVersionID, secondVersionID, "PUT must create a new version")
+
+	// The locked first version must remain retrievable with its retention.
+	ret, err := client.GetObjectRetention(ctx, &s3.GetObjectRetentionInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(objectKey),
+		VersionId: aws.String(firstVersionID),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, types.ObjectLockRetentionModeGovernance, ret.Retention.Mode)
+}
+
 // TestPutObjectRetentionComplianceMode tests setting object retention with compliance mode.
 func TestPutObjectRetentionComplianceMode(t *testing.T) {
 	ts := testutil.NewTestServer(t)

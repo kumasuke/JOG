@@ -340,3 +340,56 @@ func TestPutObject_NullVersionGuardBlocksLockedOverwrite(t *testing.T) {
 		t.Errorf("expired null-version retention row should be pruned, still present: mode=%q", mode)
 	}
 }
+
+// TestPutObjectCurrentPointer_SkipsNullVersionGuard verifies the versioned write
+// path (#39 fix round 1): PutObjectCurrentPointer updates the live objects row
+// WITHOUT the null-version Object Lock guard, so creating a new version always
+// succeeds even when the null version carries an active retention or legal hold.
+// The locked null-version rows must remain intact.
+func TestPutObjectCurrentPointer_SkipsNullVersionGuard(t *testing.T) {
+	ctx := context.Background()
+	m := newTestMetadata(t)
+	now := time.Now()
+
+	if err := m.CreateBucket(ctx, "b", now); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	obj := &Object{Key: "k", Size: 1, LastModified: now, ETag: "e", ContentType: "text/plain"}
+	if err := m.PutObject(ctx, "b", obj); err != nil {
+		t.Fatalf("PutObject seed: %v", err)
+	}
+	// Active retention AND legal hold on the null version.
+	if err := m.PutObjectRetention(ctx, "b", "k", "", "GOVERNANCE", now.Add(time.Hour)); err != nil {
+		t.Fatalf("PutObjectRetention: %v", err)
+	}
+	if err := m.PutObjectLegalHold(ctx, "b", "k", "", "ON"); err != nil {
+		t.Fatalf("PutObjectLegalHold: %v", err)
+	}
+
+	// The guarded path is rejected (sanity check the guard is still active).
+	obj2 := &Object{Key: "k", Size: 2, LastModified: now, ETag: "e2", ContentType: "text/plain"}
+	if err := m.PutObject(ctx, "b", obj2); err != ErrObjectLocked {
+		t.Fatalf("expected guarded PutObject to be refused, got %v", err)
+	}
+
+	// The versioned current-pointer update must succeed regardless of the lock.
+	if err := m.PutObjectCurrentPointer(ctx, "b", obj2); err != nil {
+		t.Fatalf("PutObjectCurrentPointer must not be blocked by null-version lock, got %v", err)
+	}
+
+	// The locked null-version rows must remain intact.
+	mode, until, err := m.GetObjectRetention(ctx, "b", "k", "")
+	if err != nil {
+		t.Fatalf("GetObjectRetention after current-pointer update: %v", err)
+	}
+	if mode != "GOVERNANCE" || until == nil {
+		t.Errorf("null-version retention must survive versioned write: mode=%q until=%v", mode, until)
+	}
+	hold, err := m.GetObjectLegalHold(ctx, "b", "k", "")
+	if err != nil {
+		t.Fatalf("GetObjectLegalHold after current-pointer update: %v", err)
+	}
+	if hold != "ON" {
+		t.Errorf("null-version legal hold must survive versioned write: status=%q", hold)
+	}
+}
