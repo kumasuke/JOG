@@ -711,7 +711,7 @@ func (fs *FileSystem) ListObjectsV2(ctx context.Context, input *ListObjectsInput
 }
 
 // CreateMultipartUpload initiates a multipart upload.
-func (fs *FileSystem) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string, metadata map[string]string) (*MultipartUpload, error) {
+func (fs *FileSystem) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string, metadata map[string]string, lockMode ObjectLockRetentionMode, lockRetainUntilDate *time.Time, lockDefaultDays, lockDefaultYears *int32, lockLegalHold ObjectLegalHoldStatus) (*MultipartUpload, error) {
 	// Validate object key to prevent path traversal
 	if _, err := fs.validateObjectKey(bucket, key); err != nil {
 		return nil, err
@@ -735,12 +735,17 @@ func (fs *FileSystem) CreateMultipartUpload(ctx context.Context, bucket, key, co
 	}
 
 	upload := &MultipartUpload{
-		UploadID:    uploadID,
-		Bucket:      bucket,
-		Key:         key,
-		ContentType: contentType,
-		Metadata:    metadata,
-		Initiated:   time.Now(),
+		UploadID:                  uploadID,
+		Bucket:                    bucket,
+		Key:                       key,
+		ContentType:               contentType,
+		Metadata:                  metadata,
+		Initiated:                 time.Now(),
+		ObjectLockMode:            lockMode,
+		ObjectLockRetainUntilDate: lockRetainUntilDate,
+		ObjectLockDefaultDays:     lockDefaultDays,
+		ObjectLockDefaultYears:    lockDefaultYears,
+		ObjectLockLegalHold:       lockLegalHold,
 	}
 
 	// Create directory for parts
@@ -950,6 +955,13 @@ func (fs *FileSystem) UploadPartCopy(ctx context.Context, bucket, key, uploadID 
 	}
 
 	return part, nil
+}
+
+// GetMultipartUpload returns the in-progress upload record for uploadID, or
+// nil if no such upload exists. Used by the API layer to recover the Object
+// Lock intent captured at CreateMultipartUpload (issue #40).
+func (fs *FileSystem) GetMultipartUpload(ctx context.Context, uploadID string) (*MultipartUpload, error) {
+	return fs.metadata.GetMultipartUpload(ctx, uploadID)
 }
 
 // CompleteMultipartUpload completes a multipart upload.
@@ -1833,47 +1845,78 @@ func (fs *FileSystem) DeleteObjectVersioned(ctx context.Context, bucket, key, ve
 
 	// Version-targeted permanent delete (incl. the null version).
 	if versionTargeted {
-		// Get version to check if it's a delete marker.
 		version, err := fs.metadata.GetObjectVersion(ctx, bucket, key, versionID)
 		if err != nil {
 			return "", false, err
 		}
-
-		isDeleteMarker := false
-		if version != nil {
-			isDeleteMarker = version.IsDeleteMarker
-		} else if versionID != "" {
-			// A non-null version that does not exist.
-			return "", false, ErrObjectNotFound
+		if version == nil {
+			if versionID != "" {
+				return "", false, ErrObjectNotFound
+			}
+			// Explicit null-version delete with no null-version row.
+			latest, err := fs.metadata.GetLatestObjectVersion(ctx, bucket, key)
+			if err != nil {
+				return "", false, err
+			}
+			if latest != nil {
+				// Other versions exist — S3 idempotent no-op; keep current.
+				return "", false, nil
+			}
+			obj, err := fs.metadata.GetObject(ctx, bucket, key)
+			if err != nil {
+				return "", false, err
+			}
+			if obj == nil {
+				return "", false, nil
+			}
+			// Pre-versioning current object only — delete the null version.
+			currentPath := filepath.Join(fs.dataDir, bucket, key)
+			if err := os.Remove(currentPath); err != nil && !os.IsNotExist(err) {
+				return "", false, fmt.Errorf("failed to delete current object file: %w", err)
+			}
+			nullVersionPath := fs.versionFilePath(bucket, key, "")
+			if err := os.Remove(nullVersionPath); err != nil && !os.IsNotExist(err) {
+				return "", false, fmt.Errorf("failed to delete null version file: %w", err)
+			}
+			if err := fs.metadata.DeleteObject(ctx, bucket, key); err != nil {
+				return "", false, err
+			}
+			if err := fs.metadata.DeleteObjectLockRows(ctx, bucket, key, ""); err != nil {
+				return "", false, err
+			}
+			return "", false, nil
 		}
-		// versionID == "" with no explicit version row: a pre-versioning
-		// null version — fall through and remove the current object below.
 
-		// Delete version file (null version maps to the sentinel path).
+		latest, err := fs.metadata.GetLatestObjectVersion(ctx, bucket, key)
+		if err != nil {
+			return "", false, err
+		}
+		wasLatest := latest != nil && latest.VersionID == versionID
+		isDeleteMarker := version.IsDeleteMarker
+
+		if wasLatest {
+			if err := fs.validateRebuildAfterVersionDelete(ctx, bucket, key, versionID); err != nil {
+				return "", false, err
+			}
+		}
+
 		objectPath := fs.versionFilePath(bucket, key, versionID)
 		if err := os.Remove(objectPath); err != nil && !os.IsNotExist(err) {
 			return "", false, fmt.Errorf("failed to delete version file: %w", err)
 		}
 
-		// Delete version metadata (no-op if the row is absent).
 		if err := fs.metadata.DeleteObjectVersion(ctx, bucket, key, versionID); err != nil {
 			return "", false, err
 		}
 
-		// When deleting the null version, also clear the live objects row and
-		// the current file so the key no longer resolves to the deleted bytes.
-		if versionID == "" {
-			if err := fs.metadata.DeleteObject(ctx, bucket, key); err != nil {
-				return "", false, err
-			}
-			os.Remove(filepath.Join(fs.dataDir, bucket, key))
-		}
-
-		// Clean up any retention / legal hold rows for this version so they
-		// don't orphan after the data is gone. The lock evaluation was already
-		// performed by the handler before this call (issue #39).
 		if err := fs.metadata.DeleteObjectLockRows(ctx, bucket, key, versionID); err != nil {
 			return "", false, err
+		}
+
+		if wasLatest {
+			if err := fs.rebuildCurrentAfterVersionDelete(ctx, bucket, key); err != nil {
+				return "", false, err
+			}
 		}
 
 		return versionID, isDeleteMarker, nil
@@ -2333,10 +2376,23 @@ func (fs *FileSystem) PutObjectLockConfiguration(ctx context.Context, bucket str
 		return ErrMalformedXML
 	}
 
-	// Validate default retention mode if rule exists
+	// Validate default retention mode/duration if rule exists
 	if config.Rule != nil && config.Rule.DefaultRetention != nil {
-		mode := string(config.Rule.DefaultRetention.Mode)
+		dr := config.Rule.DefaultRetention
+		mode := string(dr.Mode)
 		if mode != "GOVERNANCE" && mode != "COMPLIANCE" {
+			return ErrMalformedXML
+		}
+		daysSet := dr.Days != nil
+		yearsSet := dr.Years != nil
+		if daysSet == yearsSet {
+			return ErrMalformedXML
+		}
+		if daysSet {
+			if *dr.Days <= 0 {
+				return ErrMalformedXML
+			}
+		} else if *dr.Years <= 0 {
 			return ErrMalformedXML
 		}
 	}
@@ -2455,11 +2511,10 @@ func (fs *FileSystem) ResolveObjectVersion(ctx context.Context, bucket, key, req
 }
 
 // objectVersionExists reports whether a (bucket, key, versionID) version row
-// exists. The empty version_id ("") addresses the null version, whose presence
-// is tracked by the regular objects table.
+// exists. The empty version_id ("") addresses the null version: an explicit
+// null-version row in object_versions, or — when no version rows exist at all
+// — a pre-versioning current object in objects.
 func (fs *FileSystem) objectVersionExists(ctx context.Context, bucket, key, versionID string) (bool, error) {
-	// A version row (including an explicit '' null-version row created by a
-	// snapshot) takes precedence.
 	version, err := fs.metadata.GetObjectVersion(ctx, bucket, key, versionID)
 	if err != nil {
 		return false, err
@@ -2467,16 +2522,90 @@ func (fs *FileSystem) objectVersionExists(ctx context.Context, bucket, key, vers
 	if version != nil {
 		return true, nil
 	}
-	// For the null version, also accept a pre-versioning current object that
-	// has no explicit version row yet.
-	if versionID == "" {
-		obj, err := fs.metadata.GetObject(ctx, bucket, key)
-		if err != nil {
-			return false, err
-		}
-		return obj != nil, nil
+	if versionID != "" {
+		return false, nil
 	}
-	return false, nil
+	// Null version without an explicit row: only valid for pre-versioning
+	// objects. Any other version row means the null version does not exist.
+	latest, err := fs.metadata.GetLatestObjectVersion(ctx, bucket, key)
+	if err != nil {
+		return false, err
+	}
+	if latest != nil {
+		return false, nil
+	}
+	obj, err := fs.metadata.GetObject(ctx, bucket, key)
+	if err != nil {
+		return false, err
+	}
+	return obj != nil, nil
+}
+
+// validateRebuildAfterVersionDelete ensures the remaining newest version can
+// be promoted to current before the latest version row is removed.
+func (fs *FileSystem) validateRebuildAfterVersionDelete(ctx context.Context, bucket, key, deletingVersionID string) error {
+	next, err := fs.metadata.GetLatestObjectVersionExcluding(ctx, bucket, key, deletingVersionID)
+	if err != nil {
+		return err
+	}
+	if next == nil || next.IsDeleteMarker {
+		return nil
+	}
+	versionPath := fs.versionFilePath(bucket, key, next.VersionID)
+	if _, err := os.Stat(versionPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("failed to rebuild current: version file missing: %w", err)
+		}
+		return fmt.Errorf("failed to rebuild current: stat version file: %w", err)
+	}
+	return nil
+}
+
+// rebuildCurrentAfterVersionDelete syncs the live objects row and current file
+// to the remaining newest version after a version-targeted delete removed the
+// latest version row.
+func (fs *FileSystem) rebuildCurrentAfterVersionDelete(ctx context.Context, bucket, key string) error {
+	latest, err := fs.metadata.GetLatestObjectVersion(ctx, bucket, key)
+	if err != nil {
+		return err
+	}
+
+	currentPath := filepath.Join(fs.dataDir, bucket, key)
+	if latest == nil || latest.IsDeleteMarker {
+		if err := fs.metadata.DeleteObject(ctx, bucket, key); err != nil {
+			return err
+		}
+		os.Remove(currentPath)
+		return nil
+	}
+
+	versionPath := fs.versionFilePath(bucket, key, latest.VersionID)
+	if _, err := os.Stat(versionPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("failed to rebuild current: version file missing: %w", err)
+		}
+		return fmt.Errorf("failed to rebuild current: stat version file: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(currentPath), 0755); err != nil {
+		return fmt.Errorf("failed to create current object directory: %w", err)
+	}
+	if err := copyFile(versionPath, currentPath); err != nil {
+		return fmt.Errorf("failed to copy version to current: %w", err)
+	}
+
+	obj := &Object{
+		Key:          key,
+		Size:         latest.Size,
+		LastModified: latest.LastModified,
+		ETag:         latest.ETag,
+		ContentType:  latest.ContentType,
+		Metadata:     latest.Metadata,
+	}
+	if err := fs.metadata.PutObjectCurrentPointer(ctx, bucket, obj); err != nil {
+		return fmt.Errorf("failed to update current pointer: %w", err)
+	}
+	return nil
 }
 
 // PutObjectRetention stores the retention settings for a specific object
@@ -2600,6 +2729,96 @@ func (fs *FileSystem) PutObjectLegalHold(ctx context.Context, bucket, key, versi
 	}
 
 	return fs.metadata.PutObjectLegalHold(ctx, bucket, key, versionID, status)
+}
+
+// ApplyObjectLockOnVersion atomically persists retention and legal hold for a
+// single object version.
+func (fs *FileSystem) ApplyObjectLockOnVersion(ctx context.Context, bucket, key, versionID string, retention *ObjectRetention, legalHold *ObjectLegalHold) error {
+	if retention == nil && legalHold == nil {
+		return nil
+	}
+	if retention != nil {
+		if retention.RetainUntilDate == nil {
+			return ErrMalformedXML
+		}
+		mode := string(retention.Mode)
+		if mode != "GOVERNANCE" && mode != "COMPLIANCE" {
+			return ErrMalformedXML
+		}
+	}
+	if legalHold != nil {
+		status := string(legalHold.Status)
+		if status != "ON" && status != "OFF" {
+			return ErrMalformedXML
+		}
+	}
+
+	exists, err := fs.metadata.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrBucketNotFound
+	}
+
+	enabled, err := fs.metadata.GetBucketObjectLockEnabled(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return ErrInvalidRequestObjectLock
+	}
+
+	versionExists, err := fs.objectVersionExists(ctx, bucket, key, versionID)
+	if err != nil {
+		return err
+	}
+	if !versionExists {
+		return ErrObjectNotFound
+	}
+
+	return fs.metadata.ApplyObjectLockOnVersion(ctx, bucket, key, versionID, retention, legalHold)
+}
+
+// RollbackNewObjectVersion removes a newly created version and restores the
+// prior current pointer when lock application fails after a versioned write.
+func (fs *FileSystem) RollbackNewObjectVersion(ctx context.Context, bucket, key, versionID string) error {
+	if versionID == "" {
+		return fmt.Errorf("rollback requires a concrete version ID")
+	}
+
+	prior, err := fs.metadata.GetPriorObjectVersion(ctx, bucket, key, versionID)
+	if err != nil {
+		return err
+	}
+	if prior != nil && !prior.IsDeleteMarker {
+		priorPath := fs.versionFilePath(bucket, key, prior.VersionID)
+		f, openErr := os.Open(priorPath)
+		if openErr != nil {
+			return fmt.Errorf("prior version file missing or unreadable: %w", openErr)
+		}
+		_ = f.Close()
+	}
+
+	prior, err = fs.metadata.RollbackNewObjectVersion(ctx, bucket, key, versionID)
+	if err != nil {
+		return err
+	}
+
+	versionPath := fs.versionFilePath(bucket, key, versionID)
+	_ = os.Remove(versionPath)
+
+	currentPath := filepath.Join(fs.dataDir, bucket, key)
+	if prior != nil && !prior.IsDeleteMarker {
+		priorPath := fs.versionFilePath(bucket, key, prior.VersionID)
+		if err := copyFile(priorPath, currentPath); err != nil {
+			return fmt.Errorf("failed to restore current object after rollback: %w", err)
+		}
+		return nil
+	}
+
+	_ = os.Remove(currentPath)
+	return nil
 }
 
 // GetObjectLegalHold returns the legal hold status for a specific object

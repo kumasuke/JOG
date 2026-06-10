@@ -2419,3 +2419,61 @@ func TestGetObjectRetention_NonExistentVersionReturnsNoSuchVersion(t *testing.T)
 		assert.Equal(t, "NoSuchVersion", apiErr.ErrorCode())
 	}
 }
+
+func TestObjectLockNullVersionOnVersionOnlyKeyReturnsNoSuchKey(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket:                     aws.String(bucketName),
+		ObjectLockEnabledForBucket: aws.Bool(true),
+	})
+	require.NoError(t, err)
+	defer func() { _, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)}) }()
+
+	_, err = client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+		Bucket: aws.String(bucketName),
+		VersioningConfiguration: &types.VersioningConfiguration{
+			Status: types.BucketVersioningStatusEnabled,
+		},
+	})
+	require.NoError(t, err)
+
+	key := testutil.RandomObjectKey()
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+		Body:   strings.NewReader("v1"),
+	})
+	require.NoError(t, err)
+
+	retainUntil := time.Now().Add(24 * time.Hour)
+	_, err = client.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(key),
+		VersionId: aws.String("null"),
+		Retention: &types.ObjectLockRetention{
+			Mode:            types.ObjectLockRetentionModeGovernance,
+			RetainUntilDate: aws.Time(retainUntil),
+		},
+	})
+	require.Error(t, err)
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "NoSuchKey", apiErr.ErrorCode())
+	}
+
+	_, err = client.GetObjectLegalHold(ctx, &s3.GetObjectLegalHoldInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(key),
+		VersionId: aws.String("null"),
+	})
+	require.Error(t, err)
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "NoSuchKey", apiErr.ErrorCode())
+	}
+}

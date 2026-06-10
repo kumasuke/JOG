@@ -88,7 +88,9 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create index: %w", err)
 	}
 
-	// Create multipart_uploads table
+	// Create multipart_uploads table. The object_lock_* columns (issue #40)
+	// capture the x-amz-object-lock-* headers supplied to CreateMultipartUpload
+	// so they can be applied to the version finalized at CompleteMultipartUpload.
 	_, err = m.db.Exec(`
 		CREATE TABLE IF NOT EXISTS multipart_uploads (
 			upload_id TEXT PRIMARY KEY,
@@ -97,11 +99,23 @@ func (m *Metadata) initialize() error {
 			content_type TEXT NOT NULL,
 			metadata TEXT,
 			initiated DATETIME NOT NULL,
+			object_lock_mode TEXT NOT NULL DEFAULT '',
+			object_lock_retain_until_date DATETIME,
+			object_lock_default_days INTEGER,
+			object_lock_default_years INTEGER,
+			object_lock_legal_hold TEXT NOT NULL DEFAULT '',
 			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
 		)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to create multipart_uploads table: %w", err)
+	}
+
+	// Migrate pre-#40 multipart_uploads tables that lack the object_lock_*
+	// columns. ALTER TABLE ADD COLUMN is idempotent here because we add a
+	// column only when PRAGMA table_info reports it missing.
+	if err := m.migrateMultipartObjectLockColumns(); err != nil {
+		return err
 	}
 
 	// Create parts table
@@ -336,30 +350,40 @@ const createLegalHoldV2DDL = `
 // mismatch ROLLBACKs and aborts startup (better to refuse to start than to run
 // with silently-lost lock data). Old tables are renamed to *_legacy_v1 rather
 // than dropped, and a physical backup is taken before migrating.
-func (m *Metadata) migrateObjectLockSchema() error {
-	var userVersion int
-	if err := m.db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
-		return fmt.Errorf("failed to read user_version: %w", err)
-	}
+// lockTableGeneration describes the Object Lock table schema generation.
+type lockTableGeneration int
 
-	// Determine whether the legacy object_retention table (without a
-	// version_id column) is present. We rely on column existence in addition
-	// to user_version because a v1 DB created before this migration shipped
-	// has user_version == 0 but already carries the legacy tables.
-	hasVersionCol, retentionExists, err := m.retentionVersionColumnState()
+const (
+	lockTableAbsent lockTableGeneration = iota
+	lockTableLegacy
+	lockTableV2
+)
+
+func (g lockTableGeneration) String() string {
+	switch g {
+	case lockTableAbsent:
+		return "absent"
+	case lockTableLegacy:
+		return "legacy"
+	case lockTableV2:
+		return "v2"
+	default:
+		return "unknown"
+	}
+}
+
+func (m *Metadata) migrateObjectLockSchema() error {
+	retentionGen, err := m.lockTableGeneration("object_retention")
+	if err != nil {
+		return err
+	}
+	legalHoldGen, err := m.lockTableGeneration("object_legal_hold")
 	if err != nil {
 		return err
 	}
 
-	if userVersion >= objectLockSchemaVersion && hasVersionCol {
-		// Already migrated.
-		return nil
-	}
-
-	if !retentionExists || hasVersionCol {
-		// Fresh DB (no legacy table) or an in-between state where the v2
-		// columns already exist: create the v2 DDL directly and stamp the
-		// schema version. CREATE TABLE IF NOT EXISTS makes this idempotent.
+	switch {
+	case retentionGen == lockTableAbsent && legalHoldGen == lockTableAbsent:
 		if _, err := m.db.Exec(createRetentionV2DDL); err != nil {
 			return fmt.Errorf("failed to create object_retention table: %w", err)
 		}
@@ -370,21 +394,38 @@ func (m *Metadata) migrateObjectLockSchema() error {
 			return fmt.Errorf("failed to set user_version: %w", err)
 		}
 		return nil
+	case retentionGen == lockTableV2 && legalHoldGen == lockTableV2:
+		var userVersion int
+		if err := m.db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
+			return fmt.Errorf("failed to read user_version: %w", err)
+		}
+		if userVersion < objectLockSchemaVersion {
+			if _, err := m.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, objectLockSchemaVersion)); err != nil {
+				return fmt.Errorf("failed to set user_version: %w", err)
+			}
+		}
+		return nil
+	case retentionGen == lockTableLegacy && legalHoldGen == lockTableLegacy:
+		return m.runObjectLockMigration()
+	default:
+		return fmt.Errorf(
+			"object lock schema mismatch: object_retention=%s object_legal_hold=%s (fail-closed)",
+			retentionGen, legalHoldGen,
+		)
 	}
-
-	// Legacy DB: run the CREATE -> backfill -> RENAME migration.
-	return m.runObjectLockMigration()
 }
 
-// retentionVersionColumnState reports whether the object_retention table
-// exists and, if so, whether it already has the version_id column.
-func (m *Metadata) retentionVersionColumnState() (hasVersionCol, tableExists bool, err error) {
-	rows, err := m.db.Query(`PRAGMA table_info('object_retention')`)
+// lockTableGeneration reports whether a lock table is absent, legacy
+// (no version_id column), or v2 (has version_id).
+func (m *Metadata) lockTableGeneration(table string) (lockTableGeneration, error) {
+	rows, err := m.db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
-		return false, false, fmt.Errorf("failed to inspect object_retention columns: %w", err)
+		return lockTableAbsent, fmt.Errorf("failed to inspect %s columns: %w", table, err)
 	}
 	defer rows.Close()
 
+	tableExists := false
+	hasVersionCol := false
 	for rows.Next() {
 		var (
 			cid        int
@@ -395,14 +436,76 @@ func (m *Metadata) retentionVersionColumnState() (hasVersionCol, tableExists boo
 			primaryKey int
 		)
 		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &primaryKey); err != nil {
-			return false, false, fmt.Errorf("failed to scan object_retention column info: %w", err)
+			return lockTableAbsent, fmt.Errorf("failed to scan %s column info: %w", table, err)
 		}
 		tableExists = true
 		if name == "version_id" {
 			hasVersionCol = true
 		}
 	}
-	return hasVersionCol, tableExists, rows.Err()
+	if err := rows.Err(); err != nil {
+		return lockTableAbsent, err
+	}
+	if !tableExists {
+		return lockTableAbsent, nil
+	}
+	if hasVersionCol {
+		return lockTableV2, nil
+	}
+	return lockTableLegacy, nil
+}
+
+// migrateMultipartObjectLockColumns adds the object_lock_* columns to an
+// existing multipart_uploads table created before issue #40. It is a no-op for
+// fresh databases (where the columns are part of the CREATE TABLE) and for
+// already-migrated databases. Each column is added only when PRAGMA table_info
+// reports it missing, so the migration is idempotent.
+func (m *Metadata) migrateMultipartObjectLockColumns() error {
+	existing := map[string]bool{}
+	rows, err := m.db.Query(`PRAGMA table_info('multipart_uploads')`)
+	if err != nil {
+		return fmt.Errorf("failed to inspect multipart_uploads columns: %w", err)
+	}
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			ctype      string
+			notNull    int
+			dfltValue  sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &primaryKey); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to scan multipart_uploads column info: %w", err)
+		}
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("failed to read multipart_uploads column info: %w", err)
+	}
+	rows.Close()
+
+	additions := []struct {
+		name string
+		ddl  string
+	}{
+		{"object_lock_mode", `ALTER TABLE multipart_uploads ADD COLUMN object_lock_mode TEXT NOT NULL DEFAULT ''`},
+		{"object_lock_retain_until_date", `ALTER TABLE multipart_uploads ADD COLUMN object_lock_retain_until_date DATETIME`},
+		{"object_lock_default_days", `ALTER TABLE multipart_uploads ADD COLUMN object_lock_default_days INTEGER`},
+		{"object_lock_default_years", `ALTER TABLE multipart_uploads ADD COLUMN object_lock_default_years INTEGER`},
+		{"object_lock_legal_hold", `ALTER TABLE multipart_uploads ADD COLUMN object_lock_legal_hold TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, add := range additions {
+		if existing[add.name] {
+			continue
+		}
+		if _, err := m.db.Exec(add.ddl); err != nil {
+			return fmt.Errorf("failed to add multipart_uploads.%s column: %w", add.name, err)
+		}
+	}
+	return nil
 }
 
 // runObjectLockMigration performs the legacy -> v2 migration described in the
@@ -643,6 +746,19 @@ func validateLockMigration(ctx context.Context, tx *sql.Tx) error {
 	}
 	if orphans != 0 {
 		return fmt.Errorf("object lock migration: %d retention rows reference a non-existent version", orphans)
+	}
+
+	var holdOrphans int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM object_legal_hold_v2 n
+		WHERE n.version_id <> ''
+		  AND NOT EXISTS (SELECT 1 FROM object_versions v
+		                   WHERE v.bucket = n.bucket AND v.key = n.key
+		                     AND v.version_id = n.version_id)`).Scan(&holdOrphans); err != nil {
+		return fmt.Errorf("object lock migration: legal hold orphan check failed: %w", err)
+	}
+	if holdOrphans != 0 {
+		return fmt.Errorf("object lock migration: %d legal hold rows reference a non-existent version", holdOrphans)
 	}
 
 	return nil
@@ -1317,9 +1433,17 @@ func (m *Metadata) CreateMultipartUpload(ctx context.Context, upload *MultipartU
 	}
 
 	_, err = m.db.ExecContext(ctx, `
-		INSERT INTO multipart_uploads (upload_id, bucket, key, content_type, metadata, initiated)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, upload.UploadID, upload.Bucket, upload.Key, upload.ContentType, string(metadata), upload.Initiated)
+		INSERT INTO multipart_uploads (
+			upload_id, bucket, key, content_type, metadata, initiated,
+			object_lock_mode, object_lock_retain_until_date,
+			object_lock_default_days, object_lock_default_years,
+			object_lock_legal_hold
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, upload.UploadID, upload.Bucket, upload.Key, upload.ContentType, string(metadata), upload.Initiated,
+		string(upload.ObjectLockMode), upload.ObjectLockRetainUntilDate,
+		upload.ObjectLockDefaultDays, upload.ObjectLockDefaultYears,
+		string(upload.ObjectLockLegalHold))
 	return err
 }
 
@@ -1327,10 +1451,20 @@ func (m *Metadata) CreateMultipartUpload(ctx context.Context, upload *MultipartU
 func (m *Metadata) GetMultipartUpload(ctx context.Context, uploadID string) (*MultipartUpload, error) {
 	var upload MultipartUpload
 	var metadataStr string
+	var lockMode string
+	var lockRetainUntil sql.NullTime
+	var lockDefaultDays, lockDefaultYears sql.NullInt32
+	var lockLegalHold string
 	err := m.db.QueryRowContext(ctx, `
-		SELECT upload_id, bucket, key, content_type, metadata, initiated
+		SELECT upload_id, bucket, key, content_type, metadata, initiated,
+			object_lock_mode, object_lock_retain_until_date,
+			object_lock_default_days, object_lock_default_years,
+			object_lock_legal_hold
 		FROM multipart_uploads WHERE upload_id = ?
-	`, uploadID).Scan(&upload.UploadID, &upload.Bucket, &upload.Key, &upload.ContentType, &metadataStr, &upload.Initiated)
+	`, uploadID).Scan(
+		&upload.UploadID, &upload.Bucket, &upload.Key, &upload.ContentType, &metadataStr, &upload.Initiated,
+		&lockMode, &lockRetainUntil, &lockDefaultDays, &lockDefaultYears, &lockLegalHold,
+	)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1343,6 +1477,21 @@ func (m *Metadata) GetMultipartUpload(ctx context.Context, uploadID string) (*Mu
 			return nil, err
 		}
 	}
+
+	upload.ObjectLockMode = ObjectLockRetentionMode(lockMode)
+	if lockRetainUntil.Valid {
+		t := lockRetainUntil.Time
+		upload.ObjectLockRetainUntilDate = &t
+	}
+	if lockDefaultDays.Valid {
+		d := lockDefaultDays.Int32
+		upload.ObjectLockDefaultDays = &d
+	}
+	if lockDefaultYears.Valid {
+		y := lockDefaultYears.Int32
+		upload.ObjectLockDefaultYears = &y
+	}
+	upload.ObjectLockLegalHold = ObjectLegalHoldStatus(lockLegalHold)
 
 	return &upload, nil
 }
@@ -1730,6 +1879,32 @@ func (m *Metadata) GetLatestObjectVersion(ctx context.Context, bucket, key strin
 	return &version, nil
 }
 
+// GetLatestObjectVersionExcluding returns the newest version row for key,
+// skipping excludeVersionID (used to preview the post-delete latest).
+func (m *Metadata) GetLatestObjectVersionExcluding(ctx context.Context, bucket, key, excludeVersionID string) (*ObjectVersion, error) {
+	var version ObjectVersion
+	var metadataStr string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
+		FROM object_versions WHERE bucket = ? AND key = ? AND version_id != ?
+		ORDER BY last_modified DESC LIMIT 1
+	`, bucket, key, excludeVersionID).Scan(&version.Key, &version.VersionID, &version.Size, &version.LastModified, &version.ETag, &version.ContentType, &metadataStr, &version.IsDeleteMarker)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if metadataStr != "" {
+		if err := json.Unmarshal([]byte(metadataStr), &version.Metadata); err != nil {
+			return nil, err
+		}
+	}
+
+	return &version, nil
+}
+
 // DeleteObjectVersion deletes a specific version of an object.
 func (m *Metadata) DeleteObjectVersion(ctx context.Context, bucket, key, versionID string) error {
 	_, err := m.db.ExecContext(ctx, `DELETE FROM object_versions WHERE bucket = ? AND key = ? AND version_id = ?`, bucket, key, versionID)
@@ -1990,6 +2165,135 @@ func (m *Metadata) GetBucketObjectLockConfig(ctx context.Context, bucket string)
 		return "", nil
 	}
 	return config.String, nil
+}
+
+// ApplyObjectLockOnVersion atomically persists retention and legal hold for a
+// single object version. Either field may be nil (skip). Both are written in
+// one transaction so partial application cannot occur.
+func (m *Metadata) ApplyObjectLockOnVersion(ctx context.Context, bucket, key, versionID string, retention *ObjectRetention, legalHold *ObjectLegalHold) error {
+	if retention == nil && legalHold == nil {
+		return nil
+	}
+
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if retention != nil && retention.RetainUntilDate != nil {
+		mode := string(retention.Mode)
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO object_retention (bucket, key, version_id, mode, retain_until_date)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(bucket, key, version_id) DO UPDATE SET
+				mode = excluded.mode,
+				retain_until_date = excluded.retain_until_date
+		`, bucket, key, versionID, mode, *retention.RetainUntilDate); err != nil {
+			return err
+		}
+	}
+	if legalHold != nil {
+		status := string(legalHold.Status)
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO object_legal_hold (bucket, key, version_id, status)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(bucket, key, version_id) DO UPDATE SET
+				status = excluded.status
+		`, bucket, key, versionID, status); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetPriorObjectVersion returns the most recent object version for key excluding
+// excludeVersionID. Nil when no prior version exists.
+func (m *Metadata) GetPriorObjectVersion(ctx context.Context, bucket, key, excludeVersionID string) (*ObjectVersion, error) {
+	var version ObjectVersion
+	var metadataStr string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
+		FROM object_versions
+		WHERE bucket = ? AND key = ? AND version_id != ?
+		ORDER BY last_modified DESC, version_id DESC
+		LIMIT 1
+	`, bucket, key, excludeVersionID).Scan(
+		&version.Key, &version.VersionID, &version.Size, &version.LastModified,
+		&version.ETag, &version.ContentType, &metadataStr, &version.IsDeleteMarker,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if metadataStr != "" {
+		if err := json.Unmarshal([]byte(metadataStr), &version.Metadata); err != nil {
+			return nil, err
+		}
+	}
+	return &version, nil
+}
+
+// RollbackNewObjectVersion removes a failed new version and restores the prior
+// current pointer. Returns the prior version metadata for filesystem restoration.
+func (m *Metadata) RollbackNewObjectVersion(ctx context.Context, bucket, key, versionID string) (*ObjectVersion, error) {
+	if versionID == "" {
+		return nil, fmt.Errorf("rollback requires a concrete version ID")
+	}
+
+	prior, err := m.GetPriorObjectVersion(ctx, bucket, key, versionID)
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM object_retention WHERE bucket = ? AND key = ? AND version_id = ?`,
+		bucket, key, versionID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM object_legal_hold WHERE bucket = ? AND key = ? AND version_id = ?`,
+		bucket, key, versionID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM object_versions WHERE bucket = ? AND key = ? AND version_id = ?`,
+		bucket, key, versionID); err != nil {
+		return nil, err
+	}
+
+	if prior != nil && !prior.IsDeleteMarker {
+		metadataJSON, err := json.Marshal(prior.Metadata)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR REPLACE INTO objects (bucket, key, size, last_modified, etag, content_type, metadata)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, bucket, key, prior.Size, prior.LastModified, prior.ETag, prior.ContentType, string(metadataJSON)); err != nil {
+			return nil, err
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM objects WHERE bucket = ? AND key = ?`,
+			bucket, key); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return prior, nil
 }
 
 // PutObjectRetention stores the retention configuration for a specific object

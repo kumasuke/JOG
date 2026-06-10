@@ -947,3 +947,204 @@ func TestPutObjectCurrentPointer_SkipsNullVersionGuard(t *testing.T) {
 		t.Errorf("null-version legal hold must survive versioned write: status=%q", hold)
 	}
 }
+
+func TestApplyObjectLockOnVersion_Atomic(t *testing.T) {
+	ctx := context.Background()
+	m := newTestMetadata(t)
+	now := time.Now()
+
+	if err := m.CreateBucket(ctx, "b", now); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	ver := &ObjectVersion{Key: "k", VersionID: "v-1", Size: 1, LastModified: now, ETag: "e", ContentType: "text/plain"}
+	if err := m.PutObjectVersion(ctx, "b", ver); err != nil {
+		t.Fatalf("PutObjectVersion: %v", err)
+	}
+
+	retainUntil := now.Add(24 * time.Hour)
+	err := m.ApplyObjectLockOnVersion(ctx, "b", "k", "v-1",
+		&ObjectRetention{Mode: ObjectLockRetentionModeGovernance, RetainUntilDate: &retainUntil},
+		&ObjectLegalHold{Status: ObjectLegalHoldStatusOn},
+	)
+	if err != nil {
+		t.Fatalf("ApplyObjectLockOnVersion: %v", err)
+	}
+
+	mode, until, err := m.GetObjectRetention(ctx, "b", "k", "v-1")
+	if err != nil {
+		t.Fatalf("GetObjectRetention: %v", err)
+	}
+	if mode != "GOVERNANCE" || until == nil {
+		t.Fatalf("retention not applied: mode=%q until=%v", mode, until)
+	}
+	hold, err := m.GetObjectLegalHold(ctx, "b", "k", "v-1")
+	if err != nil {
+		t.Fatalf("GetObjectLegalHold: %v", err)
+	}
+	if hold != "ON" {
+		t.Fatalf("legal hold not applied: status=%q", hold)
+	}
+}
+
+func TestRollbackNewObjectVersion_RestoresPriorCurrent(t *testing.T) {
+	ctx := context.Background()
+	m := newTestMetadata(t)
+	now := time.Now()
+
+	if err := m.CreateBucket(ctx, "b", now); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	v1 := &ObjectVersion{Key: "k", VersionID: "v-1", Size: 1, LastModified: now, ETag: "e1", ContentType: "text/plain"}
+	if err := m.PutObjectVersion(ctx, "b", v1); err != nil {
+		t.Fatalf("PutObjectVersion v-1: %v", err)
+	}
+	obj1 := &Object{Key: "k", Size: 1, LastModified: now, ETag: "e1", ContentType: "text/plain"}
+	if err := m.PutObjectCurrentPointer(ctx, "b", obj1); err != nil {
+		t.Fatalf("PutObjectCurrentPointer v-1: %v", err)
+	}
+
+	v2 := &ObjectVersion{Key: "k", VersionID: "v-2", Size: 2, LastModified: now.Add(time.Second), ETag: "e2", ContentType: "text/plain"}
+	if err := m.PutObjectVersion(ctx, "b", v2); err != nil {
+		t.Fatalf("PutObjectVersion v-2: %v", err)
+	}
+	obj2 := &Object{Key: "k", Size: 2, LastModified: now.Add(time.Second), ETag: "e2", ContentType: "text/plain"}
+	if err := m.PutObjectCurrentPointer(ctx, "b", obj2); err != nil {
+		t.Fatalf("PutObjectCurrentPointer v-2: %v", err)
+	}
+
+	prior, err := m.RollbackNewObjectVersion(ctx, "b", "k", "v-2")
+	if err != nil {
+		t.Fatalf("RollbackNewObjectVersion: %v", err)
+	}
+	if prior == nil || prior.VersionID != "v-1" {
+		t.Fatalf("expected prior v-1, got %+v", prior)
+	}
+
+	got, err := m.GetObject(ctx, "b", "k")
+	if err != nil {
+		t.Fatalf("GetObject after rollback: %v", err)
+	}
+	if got == nil || got.ETag != "e1" {
+		t.Fatalf("current pointer not restored: %+v", got)
+	}
+	if ver, _ := m.GetObjectVersion(ctx, "b", "k", "v-2"); ver != nil {
+		t.Fatal("rolled-back version row must be deleted")
+	}
+}
+
+func TestObjectLockSchema_MismatchFailsStartup(t *testing.T) {
+	tests := []struct {
+		name string
+		seed func(t *testing.T, db *sql.DB)
+	}{
+		{
+			name: "retention_v2_legal_hold_legacy",
+			seed: func(t *testing.T, db *sql.DB) {
+				execDDL(t, db, createRetentionV2DDL)
+				execDDL(t, db, `CREATE TABLE object_legal_hold (
+					bucket TEXT NOT NULL, key TEXT NOT NULL, status TEXT NOT NULL,
+					PRIMARY KEY (bucket, key),
+					FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE)`)
+			},
+		},
+		{
+			name: "retention_legacy_legal_hold_v2",
+			seed: func(t *testing.T, db *sql.DB) {
+				execDDL(t, db, `CREATE TABLE object_retention (
+					bucket TEXT NOT NULL, key TEXT NOT NULL, mode TEXT NOT NULL,
+					retain_until_date DATETIME NOT NULL, PRIMARY KEY (bucket, key),
+					FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE)`)
+				execDDL(t, db, createLegalHoldV2DDL)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbPath := t.TempDir() + "/metadata.db"
+			db, err := sql.Open("sqlite", dbPath+"?_pragma=foreign_keys(1)")
+			if err != nil {
+				t.Fatalf("open db: %v", err)
+			}
+			if _, err := db.Exec(`CREATE TABLE buckets (name TEXT PRIMARY KEY, creation_date DATETIME NOT NULL)`); err != nil {
+				t.Fatalf("create buckets: %v", err)
+			}
+			tt.seed(t, db)
+			db.Close()
+
+			m, err := NewMetadata(dbPath)
+			if err == nil {
+				m.Close()
+				t.Fatal("expected NewMetadata to fail on schema mismatch, got nil error")
+			}
+			if !strings.Contains(err.Error(), "schema mismatch") {
+				t.Fatalf("error = %v, want schema mismatch", err)
+			}
+		})
+	}
+}
+
+func execDDL(t *testing.T, db *sql.DB, ddl string) {
+	t.Helper()
+	if _, err := db.Exec(ddl); err != nil {
+		t.Fatalf("exec DDL: %v", err)
+	}
+}
+
+func TestValidateLockMigration_LegalHoldOrphanFails(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/metadata.db"
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	execDDL(t, db, `CREATE TABLE buckets (name TEXT PRIMARY KEY, creation_date DATETIME NOT NULL)`)
+	execDDL(t, db, `CREATE TABLE object_versions (
+		bucket TEXT NOT NULL, key TEXT NOT NULL, version_id TEXT NOT NULL,
+		size INTEGER NOT NULL, last_modified DATETIME NOT NULL, etag TEXT NOT NULL,
+		content_type TEXT NOT NULL, metadata TEXT, is_delete_marker INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (bucket, key, version_id),
+		FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE)`)
+	execDDL(t, db, `CREATE TABLE object_retention (
+		bucket TEXT NOT NULL, key TEXT NOT NULL, mode TEXT NOT NULL,
+		retain_until_date DATETIME NOT NULL, PRIMARY KEY (bucket, key))`)
+	execDDL(t, db, `CREATE TABLE object_legal_hold (
+		bucket TEXT NOT NULL, key TEXT NOT NULL, status TEXT NOT NULL,
+		PRIMARY KEY (bucket, key))`)
+	execDDL(t, db, `CREATE TABLE object_retention_v2 (
+		bucket TEXT NOT NULL, key TEXT NOT NULL, version_id TEXT NOT NULL DEFAULT '',
+		mode TEXT NOT NULL, retain_until_date DATETIME NOT NULL,
+		PRIMARY KEY (bucket, key, version_id))`)
+	execDDL(t, db, `CREATE TABLE object_legal_hold_v2 (
+		bucket TEXT NOT NULL, key TEXT NOT NULL, version_id TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL, PRIMARY KEY (bucket, key, version_id))`)
+
+	now := time.Now()
+	if _, err := db.Exec(`INSERT INTO buckets (name, creation_date) VALUES (?, ?)`, "b", now); err != nil {
+		t.Fatalf("insert bucket: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO object_legal_hold (bucket, key, status) VALUES (?, ?, 'ON')`, "b", "k"); err != nil {
+		t.Fatalf("insert legacy legal hold: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO object_legal_hold_v2 (bucket, key, version_id, status)
+		VALUES (?, ?, ?, 'ON')`, "b", "k", "missing-version"); err != nil {
+		t.Fatalf("insert orphan legal hold: %v", err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer tx.Rollback()
+
+	err = validateLockMigration(ctx, tx)
+	if err == nil {
+		t.Fatal("expected validateLockMigration to fail on legal hold orphan, got nil")
+	}
+	if !strings.Contains(err.Error(), "legal hold rows reference a non-existent version") {
+		t.Fatalf("error = %v, want legal hold orphan message", err)
+	}
+}

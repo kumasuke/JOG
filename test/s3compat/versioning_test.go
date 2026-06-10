@@ -339,3 +339,117 @@ func TestListObjectVersions(t *testing.T) {
 		assert.NotEmpty(t, *v.VersionId)
 	}
 }
+
+func TestDeleteObjectVersionIdNullPreservesCurrent(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	_, err := client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+		Bucket: aws.String(bucketName),
+		VersioningConfiguration: &types.VersioningConfiguration{
+			Status: types.BucketVersioningStatusEnabled,
+		},
+	})
+	require.NoError(t, err)
+
+	key := testutil.RandomObjectKey()
+	putResult, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+		Body:   strings.NewReader("latest"),
+	})
+	require.NoError(t, err)
+	version := *putResult.VersionId
+
+	deleteResult, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(key),
+		VersionId: aws.String("null"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, deleteResult.VersionId)
+	assert.Equal(t, "null", *deleteResult.VersionId)
+
+	getResult, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+	})
+	require.NoError(t, err)
+	defer getResult.Body.Close()
+	body, _ := io.ReadAll(getResult.Body)
+	assert.Equal(t, "latest", string(body))
+
+	_, err = client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(key),
+		VersionId: aws.String(version),
+	})
+	require.NoError(t, err)
+}
+
+func TestDeleteObjectLatestRestoresPrevious(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	_, err := client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+		Bucket: aws.String(bucketName),
+		VersioningConfiguration: &types.VersioningConfiguration{
+			Status: types.BucketVersioningStatusEnabled,
+		},
+	})
+	require.NoError(t, err)
+
+	key := testutil.RandomObjectKey()
+	put1, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+		Body:   strings.NewReader("v1"),
+	})
+	require.NoError(t, err)
+	v1 := *put1.VersionId
+
+	put2, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+		Body:   strings.NewReader("v2"),
+	})
+	require.NoError(t, err)
+	v2 := *put2.VersionId
+
+	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(key),
+		VersionId: aws.String(v2),
+	})
+	require.NoError(t, err)
+
+	getResult, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+	})
+	require.NoError(t, err)
+	defer getResult.Body.Close()
+	body, _ := io.ReadAll(getResult.Body)
+	assert.Equal(t, "v1", string(body))
+
+	_, err = client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(key),
+		VersionId: aws.String(v1),
+	})
+	require.NoError(t, err)
+}

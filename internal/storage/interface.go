@@ -56,6 +56,16 @@ type MultipartUpload struct {
 	ContentType string
 	Metadata    map[string]string
 	Initiated   time.Time
+
+	// Object Lock intent captured from the x-amz-object-lock-* headers at
+	// CreateMultipartUpload (issue #40). These are applied to the version
+	// finalized at CompleteMultipartUpload, not to the in-progress upload.
+	// Empty / nil fields mean "no lock from headers".
+	ObjectLockMode            ObjectLockRetentionMode
+	ObjectLockRetainUntilDate *time.Time // explicit x-amz-object-lock-retain-until-date (absolute)
+	ObjectLockDefaultDays     *int32     // bucket DefaultRetention: materialized at complete
+	ObjectLockDefaultYears    *int32     // bucket DefaultRetention: materialized at complete
+	ObjectLockLegalHold       ObjectLegalHoldStatus
 }
 
 // Part represents an uploaded part.
@@ -469,10 +479,20 @@ type Storage interface {
 	CopyObjectVersioned(ctx context.Context, srcBucket, srcKey, srcVersionID, dstBucket, dstKey string, metadata map[string]string) (*Object, string, error)
 	ListObjectsV2(ctx context.Context, input *ListObjectsInput) (*ListObjectsOutput, error)
 
-	// Multipart upload operations
-	CreateMultipartUpload(ctx context.Context, bucket, key, contentType string, metadata map[string]string) (*MultipartUpload, error)
+	// Multipart upload operations.
+	//
+	// CreateMultipartUpload captures the optional Object Lock intent
+	// (lockMode/lockRetainUntilDate/lockDefaultDays/lockDefaultYears/lockLegalHold,
+	// issue #40) parsed from the x-amz-object-lock-* headers or bucket
+	// DefaultRetention so it can be applied to the version finalized at
+	// CompleteMultipartUpload. Pass zero values for "no lock".
+	CreateMultipartUpload(ctx context.Context, bucket, key, contentType string, metadata map[string]string, lockMode ObjectLockRetentionMode, lockRetainUntilDate *time.Time, lockDefaultDays, lockDefaultYears *int32, lockLegalHold ObjectLegalHoldStatus) (*MultipartUpload, error)
 	UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int32, body io.Reader, size int64) (*Part, error)
 	UploadPartCopy(ctx context.Context, bucket, key, uploadID string, partNumber int32, srcBucket, srcKey string, startByte, endByte *int64) (*Part, error)
+	// GetMultipartUpload returns the in-progress upload record (including the
+	// Object Lock intent captured at creation, issue #40), or nil if no such
+	// upload exists.
+	GetMultipartUpload(ctx context.Context, uploadID string) (*MultipartUpload, error)
 	CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error)
 	CompleteMultipartUploadVersioned(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, string, error)
 	AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error
@@ -529,6 +549,12 @@ type Storage interface {
 	GetObjectRetention(ctx context.Context, bucket, key, versionID string) (*ObjectRetention, error)
 	PutObjectLegalHold(ctx context.Context, bucket, key, versionID string, legalHold *ObjectLegalHold) error
 	GetObjectLegalHold(ctx context.Context, bucket, key, versionID string) (*ObjectLegalHold, error)
+	// ApplyObjectLockOnVersion atomically persists retention and legal hold for
+	// a single object version in one metadata transaction.
+	ApplyObjectLockOnVersion(ctx context.Context, bucket, key, versionID string, retention *ObjectRetention, legalHold *ObjectLegalHold) error
+	// RollbackNewObjectVersion removes a newly created version and restores the
+	// prior current pointer when lock application fails after a versioned write.
+	RollbackNewObjectVersion(ctx context.Context, bucket, key, versionID string) error
 	// ResolveObjectVersion maps a client-supplied versionId selector to a
 	// concrete version. requestedVersionID "" means "current version". The
 	// returned resolvedVersionID is "" for the null version. isDeleteMarker
