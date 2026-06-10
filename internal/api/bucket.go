@@ -93,6 +93,18 @@ func (h *Handler) CreateBucket(w http.ResponseWriter, r *http.Request) {
 			WriteErrorWithResource(w, ErrInternalError, "/"+bucket)
 			return
 		}
+
+		// S3 requires Object Lock buckets to have versioning Enabled. Enable it
+		// automatically so per-version retention / legal hold work out of the
+		// box (issue #39). On failure, roll the bucket back like above.
+		if err := h.storage.PutBucketVersioning(r.Context(), bucket, storage.VersioningStatusEnabled); err != nil {
+			log.Error().Err(err).Msg("Failed to auto-enable versioning for object lock bucket")
+			if delErr := h.storage.DeleteBucket(r.Context(), bucket); delErr != nil {
+				log.Error().Err(delErr).Str("bucket", bucket).Msg("Failed to rollback bucket creation")
+			}
+			WriteErrorWithResource(w, ErrInternalError, "/"+bucket)
+			return
+		}
 	}
 
 	w.Header().Set("Location", "/"+bucket)

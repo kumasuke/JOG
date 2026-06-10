@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestFileSystem(t *testing.T) *FileSystem {
@@ -148,4 +151,387 @@ func TestFileSystemRejectsInvalidObjectKeys(t *testing.T) {
 			t.Fatalf("PutObject() error = %v, want %v", err, ErrInvalidKey)
 		}
 	})
+}
+
+// TestVersionedWrites_NotBlockedByNullVersionLock reproduces the #39 fix-round-1
+// regression: when a key's null version (”) carries an active retention/legal
+// hold (reachable via the migration backfill that binds legacy locks to ”, or
+// via a retention/legal-hold set on a pre-versioning object), a subsequent
+// versioned write MUST create a new version and always succeed, leaving the
+// locked prior version intact. Exercises all three versioned write paths:
+// PutObjectVersioned, CopyObjectVersioned and CompleteMultipartUploadVersioned.
+func TestVersionedWrites_NotBlockedByNullVersionLock(t *testing.T) {
+	now := time.Now()
+
+	// seed creates a non-versioning object on key "k", binds an active
+	// GOVERNANCE retention to its null version (''), then flips the bucket to
+	// versioning Enabled — mirroring the migration/null-version-resolution path.
+	seed := func(t *testing.T) *FileSystem {
+		t.Helper()
+		ctx := context.Background()
+		fs := newTestFileSystem(t)
+		if err := fs.CreateBucket(ctx, "b"); err != nil {
+			t.Fatalf("CreateBucket: %v", err)
+		}
+		if _, err := fs.PutObject(ctx, "b", "k", strings.NewReader("v0"), 2, "text/plain", nil); err != nil {
+			t.Fatalf("PutObject seed: %v", err)
+		}
+		// Bind an active retention to the null version directly via metadata
+		// (the migration backfill / pre-versioning PutObjectRetention result).
+		if err := fs.metadata.PutObjectRetention(ctx, "b", "k", "", "GOVERNANCE", now.Add(time.Hour)); err != nil {
+			t.Fatalf("seed null-version retention: %v", err)
+		}
+		if err := fs.PutBucketVersioning(ctx, "b", VersioningStatusEnabled); err != nil {
+			t.Fatalf("PutBucketVersioning: %v", err)
+		}
+		return fs
+	}
+
+	// assertNullLockIntact confirms the locked null-version row survived the
+	// versioned write (the prior version must remain protected).
+	assertNullLockIntact := func(t *testing.T, fs *FileSystem) {
+		t.Helper()
+		mode, until, err := fs.metadata.GetObjectRetention(context.Background(), "b", "k", "")
+		if err != nil {
+			t.Fatalf("GetObjectRetention(null): %v", err)
+		}
+		if mode != "GOVERNANCE" || until == nil {
+			t.Errorf("null-version retention must survive versioned write: mode=%q until=%v", mode, until)
+		}
+	}
+
+	t.Run("PutObjectVersioned", func(t *testing.T) {
+		ctx := context.Background()
+		fs := seed(t)
+		_, versionID, err := fs.PutObjectVersioned(ctx, "b", "k", strings.NewReader("v1"), 2, "text/plain", nil)
+		if err != nil {
+			t.Fatalf("PutObjectVersioned blocked by null-version guard: %v", err)
+		}
+		if versionID == "" {
+			t.Fatalf("PutObjectVersioned must return a new version id")
+		}
+		assertNullLockIntact(t, fs)
+	})
+
+	t.Run("CopyObjectVersioned", func(t *testing.T) {
+		ctx := context.Background()
+		fs := seed(t)
+		// Source object on a different key.
+		if _, err := fs.PutObject(ctx, "b", "src", strings.NewReader("source"), 6, "text/plain", nil); err != nil {
+			t.Fatalf("PutObject src: %v", err)
+		}
+		_, versionID, err := fs.CopyObjectVersioned(ctx, "b", "src", "", "b", "k", nil)
+		if err != nil {
+			t.Fatalf("CopyObjectVersioned blocked by null-version guard: %v", err)
+		}
+		if versionID == "" {
+			t.Fatalf("CopyObjectVersioned must return a new version id")
+		}
+		assertNullLockIntact(t, fs)
+	})
+
+	t.Run("CompleteMultipartUploadVersioned", func(t *testing.T) {
+		ctx := context.Background()
+		fs := seed(t)
+		upload, err := fs.CreateMultipartUpload(ctx, "b", "k", "text/plain", nil)
+		if err != nil {
+			t.Fatalf("CreateMultipartUpload: %v", err)
+		}
+		part, err := fs.UploadPart(ctx, "b", "k", upload.UploadID, 1, strings.NewReader("multipartdata"), 13)
+		if err != nil {
+			t.Fatalf("UploadPart: %v", err)
+		}
+		_, versionID, err := fs.CompleteMultipartUploadVersioned(ctx, "b", "k", upload.UploadID, []Part{{PartNumber: 1, ETag: part.ETag, Size: 13}})
+		if err != nil {
+			t.Fatalf("CompleteMultipartUploadVersioned blocked by null-version guard: %v", err)
+		}
+		if versionID == "" {
+			t.Fatalf("CompleteMultipartUploadVersioned must return a new version id")
+		}
+		assertNullLockIntact(t, fs)
+	})
+}
+
+func TestObjectVersionExists_NullVersionOnVersionOnlyKey(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	now := time.Now()
+
+	if err := fs.CreateBucket(ctx, "b"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := fs.PutBucketVersioning(ctx, "b", VersioningStatusEnabled); err != nil {
+		t.Fatalf("PutBucketVersioning: %v", err)
+	}
+	if err := fs.SetBucketObjectLockEnabled(ctx, "b", true); err != nil {
+		t.Fatalf("SetBucketObjectLockEnabled: %v", err)
+	}
+	_, versionID, err := fs.PutObjectVersioned(ctx, "b", "k", strings.NewReader("v1"), 2, "text/plain", nil)
+	if err != nil {
+		t.Fatalf("PutObjectVersioned: %v", err)
+	}
+	if versionID == "" {
+		t.Fatal("expected non-empty version id")
+	}
+
+	exists, err := fs.objectVersionExists(ctx, "b", "k", "")
+	if err != nil {
+		t.Fatalf("objectVersionExists: %v", err)
+	}
+	if exists {
+		t.Fatal("null version must not exist when only versioned rows are present")
+	}
+
+	retention := &ObjectRetention{
+		Mode:            ObjectLockRetentionModeGovernance,
+		RetainUntilDate: ptrTime(now.Add(time.Hour)),
+	}
+	if err := fs.PutObjectRetention(ctx, "b", "k", "", retention); !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("PutObjectRetention(null) error = %v, want %v", err, ErrObjectNotFound)
+	}
+
+	if err := fs.PutObjectLegalHold(ctx, "b", "k", "", &ObjectLegalHold{Status: ObjectLegalHoldStatusOn}); !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("PutObjectLegalHold(null) error = %v, want %v", err, ErrObjectNotFound)
+	}
+}
+
+func TestDeleteObjectVersioned_NullVersionAbsentNoOpWhenEmpty(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+
+	if err := fs.CreateBucket(ctx, "b"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := fs.PutBucketVersioning(ctx, "b", VersioningStatusEnabled); err != nil {
+		t.Fatalf("PutBucketVersioning: %v", err)
+	}
+
+	returnedID, isDeleteMarker, err := fs.DeleteObjectVersioned(ctx, "b", "missing-key", "", true)
+	if err != nil {
+		t.Fatalf("DeleteObjectVersioned(null): %v", err)
+	}
+	if returnedID != "" || isDeleteMarker {
+		t.Fatalf("DeleteObjectVersioned(null) = (%q, %v), want (\"\", false)", returnedID, isDeleteMarker)
+	}
+}
+
+func TestDeleteObjectVersioned_NullVersionAbsentDeletesPreVersioningCurrent(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	now := time.Now()
+
+	if err := fs.CreateBucket(ctx, "b"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := fs.PutBucketVersioning(ctx, "b", VersioningStatusEnabled); err != nil {
+		t.Fatalf("PutBucketVersioning: %v", err)
+	}
+	if _, err := fs.PutObject(ctx, "b", "k", strings.NewReader("pre"), 3, "text/plain", nil); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+	if err := fs.metadata.PutObjectRetention(ctx, "b", "k", "", "GOVERNANCE", now.Add(time.Hour)); err != nil {
+		t.Fatalf("PutObjectRetention: %v", err)
+	}
+
+	returnedID, isDeleteMarker, err := fs.DeleteObjectVersioned(ctx, "b", "k", "", true)
+	if err != nil {
+		t.Fatalf("DeleteObjectVersioned(null): %v", err)
+	}
+	if returnedID != "" || isDeleteMarker {
+		t.Fatalf("DeleteObjectVersioned(null) = (%q, %v), want (\"\", false)", returnedID, isDeleteMarker)
+	}
+
+	if _, err := fs.GetObject(ctx, "b", "k"); !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("GetObject after null delete = %v, want %v", err, ErrObjectNotFound)
+	}
+	currentPath := fs.dataDir + "/b/k"
+	if _, err := os.Stat(currentPath); !os.IsNotExist(err) {
+		t.Fatalf("current file should be removed: stat err=%v", err)
+	}
+	mode, until, err := fs.metadata.GetObjectRetention(ctx, "b", "k", "")
+	if err != nil || mode != "" || until != nil {
+		t.Fatalf("null-version retention should be deleted: mode=%q until=%v err=%v", mode, until, err)
+	}
+}
+
+func TestDeleteObjectVersioned_NullVersionAbsentPreservesCurrent(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+
+	if err := fs.CreateBucket(ctx, "b"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := fs.PutBucketVersioning(ctx, "b", VersioningStatusEnabled); err != nil {
+		t.Fatalf("PutBucketVersioning: %v", err)
+	}
+	_, versionID, err := fs.PutObjectVersioned(ctx, "b", "k", strings.NewReader("latest"), 6, "text/plain", nil)
+	if err != nil {
+		t.Fatalf("PutObjectVersioned: %v", err)
+	}
+
+	returnedID, isDeleteMarker, err := fs.DeleteObjectVersioned(ctx, "b", "k", "", true)
+	if err != nil {
+		t.Fatalf("DeleteObjectVersioned(null): %v", err)
+	}
+	if returnedID != "" || isDeleteMarker {
+		t.Fatalf("DeleteObjectVersioned(null) = (%q, %v), want (\"\", false)", returnedID, isDeleteMarker)
+	}
+
+	got, err := fs.GetObject(ctx, "b", "k")
+	if err != nil {
+		t.Fatalf("GetObject after null delete: %v", err)
+	}
+	defer got.Body.Close()
+	body, _ := io.ReadAll(got.Body)
+	if string(body) != "latest" {
+		t.Fatalf("current body = %q, want latest", body)
+	}
+
+	ver, err := fs.metadata.GetObjectVersion(ctx, "b", "k", versionID)
+	if err != nil || ver == nil {
+		t.Fatalf("version row must remain: err=%v ver=%v", err, ver)
+	}
+}
+
+func TestDeleteObjectVersioned_LatestRestoresPrevious(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+
+	if err := fs.CreateBucket(ctx, "b"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := fs.PutBucketVersioning(ctx, "b", VersioningStatusEnabled); err != nil {
+		t.Fatalf("PutBucketVersioning: %v", err)
+	}
+	_, v1, err := fs.PutObjectVersioned(ctx, "b", "k", strings.NewReader("v1"), 2, "text/plain", nil)
+	if err != nil {
+		t.Fatalf("PutObjectVersioned v1: %v", err)
+	}
+	_, v2, err := fs.PutObjectVersioned(ctx, "b", "k", strings.NewReader("v2"), 2, "text/plain", nil)
+	if err != nil {
+		t.Fatalf("PutObjectVersioned v2: %v", err)
+	}
+
+	if _, _, err := fs.DeleteObjectVersioned(ctx, "b", "k", v2, true); err != nil {
+		t.Fatalf("DeleteObjectVersioned latest: %v", err)
+	}
+
+	got, err := fs.GetObject(ctx, "b", "k")
+	if err != nil {
+		t.Fatalf("GetObject after latest delete: %v", err)
+	}
+	defer got.Body.Close()
+	body, _ := io.ReadAll(got.Body)
+	if string(body) != "v1" {
+		t.Fatalf("current body = %q, want v1", body)
+	}
+
+	if _, err := fs.metadata.GetObjectVersion(ctx, "b", "k", v2); err != nil {
+		t.Fatalf("GetObjectVersion(v2): %v", err)
+	}
+	if ver, err := fs.metadata.GetObjectVersion(ctx, "b", "k", v1); err != nil || ver == nil {
+		t.Fatalf("v1 must remain: err=%v ver=%v", err, ver)
+	}
+}
+
+func TestDeleteObjectVersioned_NonLatestNullPreservesCurrent(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	now := time.Now()
+
+	if err := fs.CreateBucket(ctx, "b"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := fs.PutBucketVersioning(ctx, "b", VersioningStatusEnabled); err != nil {
+		t.Fatalf("PutBucketVersioning: %v", err)
+	}
+	if _, err := fs.PutObject(ctx, "b", "k", strings.NewReader("null"), 4, "text/plain", nil); err != nil {
+		t.Fatalf("PutObject seed: %v", err)
+	}
+	nullVersion := &ObjectVersion{
+		Key: "k", VersionID: "", Size: 4, LastModified: now,
+		ETag: "e0", ContentType: "text/plain",
+	}
+	if err := fs.metadata.PutObjectVersion(ctx, "b", nullVersion); err != nil {
+		t.Fatalf("PutObjectVersion null: %v", err)
+	}
+	nullPath := fs.versionFilePath("b", "k", "")
+	if err := os.MkdirAll(filepath.Dir(nullPath), 0755); err != nil {
+		t.Fatalf("mkdir null version dir: %v", err)
+	}
+	if err := os.WriteFile(nullPath, []byte("null"), 0644); err != nil {
+		t.Fatalf("write null version file: %v", err)
+	}
+
+	_, v2, err := fs.PutObjectVersioned(ctx, "b", "k", strings.NewReader("v2"), 2, "text/plain", nil)
+	if err != nil {
+		t.Fatalf("PutObjectVersioned v2: %v", err)
+	}
+
+	if _, _, err := fs.DeleteObjectVersioned(ctx, "b", "k", "", true); err != nil {
+		t.Fatalf("DeleteObjectVersioned(null): %v", err)
+	}
+
+	got, err := fs.GetObject(ctx, "b", "k")
+	if err != nil {
+		t.Fatalf("GetObject after non-latest null delete: %v", err)
+	}
+	defer got.Body.Close()
+	body, _ := io.ReadAll(got.Body)
+	if string(body) != "v2" {
+		t.Fatalf("current body = %q, want v2", body)
+	}
+
+	if ver, err := fs.metadata.GetObjectVersion(ctx, "b", "k", v2); err != nil || ver == nil {
+		t.Fatalf("latest version must remain: err=%v ver=%v", err, ver)
+	}
+	if ver, err := fs.metadata.GetObjectVersion(ctx, "b", "k", ""); err != nil || ver != nil {
+		t.Fatalf("null version row must be deleted: err=%v ver=%v", err, ver)
+	}
+}
+
+func TestRebuildCurrentAfterVersionDelete_MissingVersionFileFails(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+
+	if err := fs.CreateBucket(ctx, "b"); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := fs.PutBucketVersioning(ctx, "b", VersioningStatusEnabled); err != nil {
+		t.Fatalf("PutBucketVersioning: %v", err)
+	}
+	_, v1, err := fs.PutObjectVersioned(ctx, "b", "k", strings.NewReader("v1"), 2, "text/plain", nil)
+	if err != nil {
+		t.Fatalf("PutObjectVersioned v1: %v", err)
+	}
+	_, v2, err := fs.PutObjectVersioned(ctx, "b", "k", strings.NewReader("v2"), 2, "text/plain", nil)
+	if err != nil {
+		t.Fatalf("PutObjectVersioned v2: %v", err)
+	}
+
+	v1Path := fs.versionFilePath("b", "k", v1)
+	if err := os.Remove(v1Path); err != nil {
+		t.Fatalf("remove v1 file: %v", err)
+	}
+
+	if _, _, err := fs.DeleteObjectVersioned(ctx, "b", "k", v2, true); err == nil {
+		t.Fatal("DeleteObjectVersioned latest should fail when remaining version file is missing")
+	}
+
+	got, err := fs.GetObject(ctx, "b", "k")
+	if err != nil {
+		t.Fatalf("GetObject after failed rebuild: %v", err)
+	}
+	defer got.Body.Close()
+	body, _ := io.ReadAll(got.Body)
+	if string(body) != "v2" {
+		t.Fatalf("current body = %q, want v2 (unchanged)", body)
+	}
+	if ver, err := fs.metadata.GetObjectVersion(ctx, "b", "k", v2); err != nil || ver == nil {
+		t.Fatalf("v2 version row must remain after failed rebuild: err=%v ver=%v", err, ver)
+	}
+}
+
+func ptrTime(t time.Time) *time.Time {
+	return &t
 }

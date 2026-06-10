@@ -230,6 +230,87 @@ func TestPutObjectRetention(t *testing.T) {
 	assert.WithinDuration(t, retainUntil, *result.Retention.RetainUntilDate, time.Second)
 }
 
+// TestPutObjectOnLockedKeyCreatesNewVersion is the #39 fix-round-1 E2E
+// regression. An Object-Lock-enabled bucket auto-enables versioning, so a PUT
+// onto a key whose existing version is under GOVERNANCE retention must create a
+// brand-new version and succeed (S3 semantic: new-version creation is always
+// allowed regardless of locks on prior versions). Before the fix the storage
+// guard rejected this versioned write with ErrObjectLocked, surfacing as 500.
+func TestPutObjectOnLockedKeyCreatesNewVersion(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket:                     aws.String(bucketName),
+		ObjectLockEnabledForBucket: aws.Bool(true),
+	})
+	require.NoError(t, err)
+	defer func() {
+		listOutput, _ := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(bucketName)})
+		if listOutput != nil {
+			for _, v := range listOutput.Versions {
+				client.DeleteObject(ctx, &s3.DeleteObjectInput{
+					Bucket:                    aws.String(bucketName),
+					Key:                       v.Key,
+					VersionId:                 v.VersionId,
+					BypassGovernanceRetention: aws.Bool(true),
+				})
+			}
+		}
+		client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)})
+	}()
+
+	objectKey := testutil.RandomObjectKey()
+
+	// First PUT creates the initial version.
+	putOut, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(objectKey),
+		Body:   strings.NewReader("v0"),
+	})
+	require.NoError(t, err)
+	firstVersionID := aws.ToString(putOut.VersionId)
+	require.NotEmpty(t, firstVersionID, "Object Lock bucket must auto-enable versioning")
+
+	// Lock that first version under GOVERNANCE retention.
+	retainUntil := time.Now().Add(24 * time.Hour).UTC()
+	_, err = client.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(objectKey),
+		VersionId: aws.String(firstVersionID),
+		Retention: &types.ObjectLockRetention{
+			Mode:            types.ObjectLockRetentionModeGovernance,
+			RetainUntilDate: aws.Time(retainUntil),
+		},
+	})
+	require.NoError(t, err)
+
+	// A second PUT must create a NEW version and succeed (must NOT 500 / be
+	// blocked by the null-version guard on the locked prior version).
+	put2, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(objectKey),
+		Body:   strings.NewReader("v1-overwrite"),
+	})
+	require.NoError(t, err, "new-version PUT must not be blocked by lock on prior version")
+	secondVersionID := aws.ToString(put2.VersionId)
+	require.NotEmpty(t, secondVersionID)
+	require.NotEqual(t, firstVersionID, secondVersionID, "PUT must create a new version")
+
+	// The locked first version must remain retrievable with its retention.
+	ret, err := client.GetObjectRetention(ctx, &s3.GetObjectRetentionInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(objectKey),
+		VersionId: aws.String(firstVersionID),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, types.ObjectLockRetentionModeGovernance, ret.Retention.Mode)
+}
+
 // TestPutObjectRetentionComplianceMode tests setting object retention with compliance mode.
 func TestPutObjectRetentionComplianceMode(t *testing.T) {
 	ts := testutil.NewTestServer(t)
@@ -670,12 +751,14 @@ func TestDeleteObject_GovernanceRetentionBlocksDelete(t *testing.T) {
 	}()
 
 	objectKey := testutil.RandomObjectKey()
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+	putOut, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(objectKey),
 		Body:   strings.NewReader("locked"),
 	})
 	require.NoError(t, err)
+	versionID := aws.ToString(putOut.VersionId)
+	require.NotEmpty(t, versionID, "object lock bucket must auto-enable versioning (#39)")
 
 	retainUntil := time.Now().Add(24 * time.Hour).UTC()
 	_, err = client.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
@@ -688,21 +771,33 @@ func TestDeleteObject_GovernanceRetentionBlocksDelete(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Plain delete should be rejected because the retention is still active.
-	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+	// A plain DELETE (no versionId) creates a delete marker on a versioned
+	// bucket and is allowed even when the underlying version is protected —
+	// this is canonical S3 behaviour (#39).
+	delMarkerOut, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(objectKey),
 	})
-	require.Error(t, err, "delete must be rejected while object is under GOVERNANCE retention")
+	require.NoError(t, err, "plain DELETE creates a delete marker and must be allowed")
+	assert.True(t, aws.ToBool(delMarkerOut.DeleteMarker), "plain DELETE must create a delete marker")
+
+	// A version-targeted DELETE of the protected version must be rejected.
+	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(objectKey),
+		VersionId: aws.String(versionID),
+	})
+	require.Error(t, err, "version-targeted DELETE must be rejected while under GOVERNANCE retention")
 	var apiErr smithy.APIError
 	if assert.ErrorAs(t, err, &apiErr) {
 		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
 	}
 
-	// With BypassGovernanceRetention the delete should succeed.
+	// With BypassGovernanceRetention the version-targeted delete should succeed.
 	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket:                    aws.String(bucketName),
 		Key:                       aws.String(objectKey),
+		VersionId:                 aws.String(versionID),
 		BypassGovernanceRetention: aws.Bool(true),
 	})
 	require.NoError(t, err)
@@ -744,12 +839,14 @@ func TestDeleteObject_LegalHoldOnBlocksDelete(t *testing.T) {
 	}()
 
 	objectKey := "hold-key"
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+	putOut, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(objectKey),
 		Body:   strings.NewReader("legal-hold"),
 	})
 	require.NoError(t, err)
+	versionID := aws.ToString(putOut.VersionId)
+	require.NotEmpty(t, versionID, "object lock bucket must auto-enable versioning (#39)")
 
 	_, err = client.PutObjectLegalHold(ctx, &s3.PutObjectLegalHoldInput{
 		Bucket:    aws.String(bucketName),
@@ -758,23 +855,25 @@ func TestDeleteObject_LegalHoldOnBlocksDelete(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// A version-targeted DELETE of the version under legal hold must be rejected.
 	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(bucketName),
-		Key:    aws.String(objectKey),
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(objectKey),
+		VersionId: aws.String(versionID),
 	})
-	require.Error(t, err, "delete must be rejected while legal hold is ON")
+	require.Error(t, err, "version-targeted delete must be rejected while legal hold is ON")
 	var apiErr smithy.APIError
 	if assert.ErrorAs(t, err, &apiErr) {
 		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
 	}
 }
 
-// TestPutObject_OverwriteLockedObjectRejected verifies that overwriting a
-// non-versioned bucket's object via PUT is blocked when the existing object
-// is protected by an active retention (CR-5). On a non-versioned bucket the
-// overwrite is effectively a delete + create of the same key, which would
-// silently bypass Object Lock without this check.
-func TestPutObject_OverwriteLockedObjectRejected(t *testing.T) {
+// TestPutObject_OverwriteLockedObjectCreatesNewVersion verifies the canonical
+// S3 semantics on an Object Lock bucket (which is always versioned, #39): a PUT
+// to a key whose current version is under COMPLIANCE retention creates a NEW
+// version and leaves the locked version intact and still protected, rather than
+// being rejected. The shorter retention is scoped to the original version.
+func TestPutObject_OverwriteLockedObjectCreatesNewVersion(t *testing.T) {
 	ts := testutil.NewTestServer(t)
 	defer ts.Cleanup()
 
@@ -788,28 +887,22 @@ func TestPutObject_OverwriteLockedObjectRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defer func() {
-		listOutput, _ := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucketName)})
-		if listOutput != nil {
-			for _, obj := range listOutput.Contents {
-				_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
-					Bucket:                    aws.String(bucketName),
-					Key:                       obj.Key,
-					BypassGovernanceRetention: aws.Bool(true),
-				})
-			}
-		}
 		_, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)})
 	}()
 
 	objectKey := testutil.RandomObjectKey()
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+	putOut, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(objectKey),
 		Body:   strings.NewReader("v1"),
 	})
 	require.NoError(t, err)
+	v1 := aws.ToString(putOut.VersionId)
+	require.NotEmpty(t, v1, "object lock bucket must auto-enable versioning (#39)")
 
-	retainUntil := time.Now().Add(24 * time.Hour).UTC()
+	// Use a short COMPLIANCE retention so the temp data dir is the only cleanup
+	// needed; the version stays immutable until the (short) date passes.
+	retainUntil := time.Now().Add(3 * time.Second).UTC()
 	_, err = client.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(objectKey),
@@ -820,18 +913,36 @@ func TestPutObject_OverwriteLockedObjectRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Overwrite attempt: must fail because the existing object is under
-	// COMPLIANCE retention and the bucket is not versioned.
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+	// Overwrite: creates a new version (must succeed) without disturbing v1.
+	put2, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(objectKey),
 		Body:   strings.NewReader("v2-overwrite"),
 	})
-	require.Error(t, err, "overwrite of locked object must be rejected")
-	var apiErr smithy.APIError
-	if assert.ErrorAs(t, err, &apiErr) {
-		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
-	}
+	require.NoError(t, err, "PUT on a versioned lock bucket creates a new version and must be allowed")
+	v2 := aws.ToString(put2.VersionId)
+	require.NotEmpty(t, v2)
+	assert.NotEqual(t, v1, v2, "overwrite must create a distinct new version")
+
+	// v1 is still retrievable and still carries its COMPLIANCE retention.
+	ret, err := client.GetObjectRetention(ctx, &s3.GetObjectRetentionInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(objectKey),
+		VersionId: aws.String(v1),
+	})
+	require.NoError(t, err, "v1 retention must survive the overwrite (#39, defect 2 regression)")
+	assert.Equal(t, types.ObjectLockRetentionModeCompliance, ret.Retention.Mode)
+
+	gotV1, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(objectKey),
+		VersionId: aws.String(v1),
+	})
+	require.NoError(t, err)
+	defer gotV1.Body.Close()
+	body, err := io.ReadAll(gotV1.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "v1", string(body), "v1 bytes must be intact after overwrite")
 }
 
 // TestDeleteObjects_GovernanceRetentionBlocksBatchDelete verifies that the
@@ -869,13 +980,16 @@ func TestDeleteObjects_GovernanceRetentionBlocksBatchDelete(t *testing.T) {
 	lockedKey := "locked-" + testutil.RandomObjectKey()
 	freeKey := "free-" + testutil.RandomObjectKey()
 
+	versionIDs := map[string]string{}
 	for _, k := range []string{lockedKey, freeKey} {
-		_, err = client.PutObject(ctx, &s3.PutObjectInput{
+		putOut, err := client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucketName),
 			Key:    aws.String(k),
 			Body:   strings.NewReader("payload"),
 		})
 		require.NoError(t, err)
+		versionIDs[k] = aws.ToString(putOut.VersionId)
+		require.NotEmpty(t, versionIDs[k], "object lock bucket must auto-enable versioning (#39)")
 	}
 
 	retainUntil := time.Now().Add(24 * time.Hour).UTC()
@@ -889,14 +1003,15 @@ func TestDeleteObjects_GovernanceRetentionBlocksBatchDelete(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Bulk delete without bypass: the locked key must surface as a per-key
-	// AccessDenied while the free key is removed.
+	// Version-targeted bulk delete without bypass: the locked version must
+	// surface as a per-key AccessDenied while the free version is removed
+	// (#39: per-entry version-aware lock evaluation).
 	out, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 		Bucket: aws.String(bucketName),
 		Delete: &types.Delete{
 			Objects: []types.ObjectIdentifier{
-				{Key: aws.String(lockedKey)},
-				{Key: aws.String(freeKey)},
+				{Key: aws.String(lockedKey), VersionId: aws.String(versionIDs[lockedKey])},
+				{Key: aws.String(freeKey), VersionId: aws.String(versionIDs[freeKey])},
 			},
 		},
 	})
@@ -909,23 +1024,24 @@ func TestDeleteObjects_GovernanceRetentionBlocksBatchDelete(t *testing.T) {
 			assert.Equal(t, "AccessDenied", aws.ToString(e.Code))
 		}
 	}
-	assert.True(t, sawLockedDenied, "locked key must appear in DeleteObjects errors with AccessDenied")
+	assert.True(t, sawLockedDenied, "locked version must appear in DeleteObjects errors with AccessDenied")
 
-	// The unprotected key must have been deleted.
+	// The unprotected version must have been deleted.
 	deletedFree := false
 	for _, d := range out.Deleted {
 		if aws.ToString(d.Key) == freeKey {
 			deletedFree = true
 		}
 	}
-	assert.True(t, deletedFree, "unprotected key must be reported as deleted")
+	assert.True(t, deletedFree, "unprotected version must be reported as deleted")
 
-	// The locked key must still exist.
+	// The locked version must still exist.
 	_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(bucketName),
-		Key:    aws.String(lockedKey),
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(lockedKey),
+		VersionId: aws.String(versionIDs[lockedKey]),
 	})
-	assert.NoError(t, err, "locked key must still be retrievable after blocked delete")
+	assert.NoError(t, err, "locked version must still be retrievable after blocked delete")
 
 	// With BypassGovernanceRetention the same call must remove it.
 	out, err = client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
@@ -933,7 +1049,7 @@ func TestDeleteObjects_GovernanceRetentionBlocksBatchDelete(t *testing.T) {
 		BypassGovernanceRetention: aws.Bool(true),
 		Delete: &types.Delete{
 			Objects: []types.ObjectIdentifier{
-				{Key: aws.String(lockedKey)},
+				{Key: aws.String(lockedKey), VersionId: aws.String(versionIDs[lockedKey])},
 			},
 		},
 	})
@@ -941,12 +1057,12 @@ func TestDeleteObjects_GovernanceRetentionBlocksBatchDelete(t *testing.T) {
 	assert.Empty(t, out.Errors, "bypass must clear the per-key error")
 }
 
-// TestCopyObject_OverwriteLockedDestinationRejected verifies that CopyObject
-// honours Object Lock on the destination key when the destination bucket is
-// not versioned (CR-5). Without this guard, a client that cannot directly
-// PUT/DELETE the protected key could simply COPY any source over it,
-// silently defeating retention.
-func TestCopyObject_OverwriteLockedDestinationRejected(t *testing.T) {
+// TestCopyObject_OntoLockedDestinationCreatesNewVersion verifies the canonical
+// S3 semantics on an Object Lock bucket (always versioned, #39): a CopyObject
+// onto a key whose current version is locked creates a NEW destination version
+// (allowed) and leaves the locked version's bytes intact, rather than being
+// rejected.
+func TestCopyObject_OntoLockedDestinationCreatesNewVersion(t *testing.T) {
 	ts := testutil.NewTestServer(t)
 	defer ts.Cleanup()
 
@@ -960,16 +1076,6 @@ func TestCopyObject_OverwriteLockedDestinationRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defer func() {
-		listOutput, _ := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucketName)})
-		if listOutput != nil {
-			for _, obj := range listOutput.Contents {
-				_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
-					Bucket:                    aws.String(bucketName),
-					Key:                       obj.Key,
-					BypassGovernanceRetention: aws.Bool(true),
-				})
-			}
-		}
 		_, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)})
 	}()
 
@@ -983,47 +1089,50 @@ func TestCopyObject_OverwriteLockedDestinationRejected(t *testing.T) {
 		Body:   strings.NewReader("source-payload"),
 	})
 	require.NoError(t, err)
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+	dstPut, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(dstKey),
 		Body:   strings.NewReader("destination-original"),
 	})
 	require.NoError(t, err)
+	dstV1 := aws.ToString(dstPut.VersionId)
+	require.NotEmpty(t, dstV1)
 
-	// Lock the destination under GOVERNANCE retention.
-	retainUntil := time.Now().Add(24 * time.Hour).UTC()
+	// Lock the destination's current version under a short COMPLIANCE retention.
+	retainUntil := time.Now().Add(3 * time.Second).UTC()
 	_, err = client.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
-		Bucket: aws.String(bucketName),
-		Key:    aws.String(dstKey),
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(dstKey),
+		VersionId: aws.String(dstV1),
 		Retention: &types.ObjectLockRetention{
-			Mode:            types.ObjectLockRetentionModeGovernance,
+			Mode:            types.ObjectLockRetentionModeCompliance,
 			RetainUntilDate: aws.Time(retainUntil),
 		},
 	})
 	require.NoError(t, err)
 
-	// Copy without bypass must be rejected with AccessDenied.
-	_, err = client.CopyObject(ctx, &s3.CopyObjectInput{
+	// Copy must succeed, producing a new destination version.
+	copyOut, err := client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:     aws.String(bucketName),
 		Key:        aws.String(dstKey),
 		CopySource: aws.String(bucketName + "/" + srcKey),
 	})
-	require.Error(t, err, "copy onto a locked destination must be rejected")
-	var apiErr smithy.APIError
-	if assert.ErrorAs(t, err, &apiErr) {
-		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
-	}
+	require.NoError(t, err, "copy onto a versioned lock bucket creates a new version and must be allowed")
+	dstV2 := aws.ToString(copyOut.VersionId)
+	require.NotEmpty(t, dstV2)
+	assert.NotEqual(t, dstV1, dstV2, "copy must create a distinct new destination version")
 
-	// Verify the destination payload is untouched (original bytes still there).
+	// The locked version's original bytes must still be retrievable.
 	got, err := client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(bucketName),
-		Key:    aws.String(dstKey),
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(dstKey),
+		VersionId: aws.String(dstV1),
 	})
 	require.NoError(t, err)
 	defer got.Body.Close()
 	body, err := io.ReadAll(got.Body)
 	require.NoError(t, err)
-	assert.Equal(t, "destination-original", string(body), "destination must keep its original payload after blocked copy")
+	assert.Equal(t, "destination-original", string(body), "the locked version must keep its original payload after copy")
 }
 
 // objectLockRetentionTestSetup creates a bucket with Object Lock enabled and
@@ -1325,12 +1434,12 @@ func TestPutObjectRetention_GovernanceUpgradeWithExtensionAllowed(t *testing.T) 
 	assert.WithinDuration(t, extended, *got.Retention.RetainUntilDate, time.Second, "RetainUntilDate must be the extended value")
 }
 
-// TestCompleteMultipartUpload_GovernanceRetentionBlocksOverwrite verifies
-// that finishing a multipart upload onto a key already protected by an
-// active GOVERNANCE retention is rejected with AccessDenied (H-1). Without
-// this guard, multipart provides a full Object Lock bypass: the storage
-// CompleteMultipartUpload call would silently overwrite the locked object.
-func TestCompleteMultipartUpload_GovernanceRetentionBlocksOverwrite(t *testing.T) {
+// TestCompleteMultipartUpload_OntoLockedKeyCreatesNewVersion verifies the
+// canonical S3 semantics on an Object Lock bucket (always versioned, #39):
+// completing a multipart upload onto a key whose current version is locked
+// creates a NEW version (allowed) and leaves the locked version's bytes intact,
+// rather than being rejected.
+func TestCompleteMultipartUpload_OntoLockedKeyCreatesNewVersion(t *testing.T) {
 	ts := testutil.NewTestServer(t)
 	defer ts.Cleanup()
 
@@ -1344,39 +1453,33 @@ func TestCompleteMultipartUpload_GovernanceRetentionBlocksOverwrite(t *testing.T
 	})
 	require.NoError(t, err)
 	defer func() {
-		listOutput, _ := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucketName)})
-		if listOutput != nil {
-			for _, obj := range listOutput.Contents {
-				_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
-					Bucket:                    aws.String(bucketName),
-					Key:                       obj.Key,
-					BypassGovernanceRetention: aws.Bool(true),
-				})
-			}
-		}
 		_, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)})
 	}()
 
 	objectKey := testutil.RandomObjectKey()
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+	putOut, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(objectKey),
 		Body:   strings.NewReader("v1-locked"),
 	})
 	require.NoError(t, err)
+	v1 := aws.ToString(putOut.VersionId)
+	require.NotEmpty(t, v1)
 
-	retainUntil := time.Now().Add(24 * time.Hour).UTC()
+	// Short COMPLIANCE retention on v1 so no bypass-based cleanup is needed.
+	retainUntil := time.Now().Add(3 * time.Second).UTC()
 	_, err = client.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
-		Bucket: aws.String(bucketName),
-		Key:    aws.String(objectKey),
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(objectKey),
+		VersionId: aws.String(v1),
 		Retention: &types.ObjectLockRetention{
-			Mode:            types.ObjectLockRetentionModeGovernance,
+			Mode:            types.ObjectLockRetentionModeCompliance,
 			RetainUntilDate: aws.Time(retainUntil),
 		},
 	})
 	require.NoError(t, err)
 
-	// Now try to overwrite via multipart.
+	// Overwrite via multipart: creates a new version, must succeed.
 	createResult, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(objectKey),
@@ -1393,7 +1496,7 @@ func TestCompleteMultipartUpload_GovernanceRetentionBlocksOverwrite(t *testing.T
 	})
 	require.NoError(t, err)
 
-	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+	completeOut, err := client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket:   aws.String(bucketName),
 		Key:      aws.String(objectKey),
 		UploadId: createResult.UploadId,
@@ -1403,29 +1506,22 @@ func TestCompleteMultipartUpload_GovernanceRetentionBlocksOverwrite(t *testing.T
 			},
 		},
 	})
-	require.Error(t, err, "complete-multipart onto a locked object must be rejected without bypass")
-	var apiErr smithy.APIError
-	if assert.ErrorAs(t, err, &apiErr) {
-		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
-	}
+	require.NoError(t, err, "complete-multipart on a versioned lock bucket creates a new version and must be allowed")
+	v2 := aws.ToString(completeOut.VersionId)
+	require.NotEmpty(t, v2)
+	assert.NotEqual(t, v1, v2, "complete-multipart must create a distinct new version")
 
-	// Verify the original payload is still intact.
+	// The locked version's original payload must still be intact.
 	got, err := client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(bucketName),
-		Key:    aws.String(objectKey),
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(objectKey),
+		VersionId: aws.String(v1),
 	})
 	require.NoError(t, err)
 	defer got.Body.Close()
 	body, err := io.ReadAll(got.Body)
 	require.NoError(t, err)
-	assert.Equal(t, "v1-locked", string(body), "locked object must keep its original payload after blocked complete-multipart")
-
-	// Best-effort abort so the in-progress upload does not block bucket cleanup.
-	_, _ = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
-		Bucket:   aws.String(bucketName),
-		Key:      aws.String(objectKey),
-		UploadId: createResult.UploadId,
-	})
+	assert.Equal(t, "v1-locked", string(body), "locked version must keep its original payload after the new version is created")
 }
 
 // TestCompleteMultipartUpload_BypassGovernanceAllowsOverwrite verifies that
@@ -1523,6 +1619,7 @@ func TestCompleteMultipartUpload_BypassGovernanceAllowsOverwrite(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, partContent, string(body), "bypass complete-multipart must overwrite the locked object")
 }
+
 // upgrading GOVERNANCE to COMPLIANCE is allowed without bypass (C-1). Going
 // from a relaxed mode to a stricter mode never reduces protection.
 func TestPutObjectRetention_GovernanceUpgradeToComplianceAllowed(t *testing.T) {
@@ -1700,12 +1797,12 @@ func versioningEnabledLockedBucket(t *testing.T, ts *testutil.TestServer, payloa
 	return bucketName, objectKey, retainUntil, cleanup
 }
 
-// TestPutObject_VersioningEnabledStillEnforcesObjectLock verifies that the
-// versioning-Enabled carve-out is gone on the single-shot PUT path.
-// metadata.PutObject unconditionally clears object_retention /
-// object_legal_hold on overwrite, so versioning Enabled must NOT silently
-// bypass the lock check.
-func TestPutObject_VersioningEnabledStillEnforcesObjectLock(t *testing.T) {
+// TestPutObject_VersioningEnabled_CreatesNewVersionLeavingLockIntact verifies
+// the S3-canonical semantics restored in #39: a PUT to a key whose current
+// version is locked creates a NEW version (allowed) and leaves the locked
+// version intact. This replaces the PR #38 interim behaviour where versioning
+// Enabled blocked the overwrite.
+func TestPutObject_VersioningEnabled_CreatesNewVersionLeavingLockIntact(t *testing.T) {
 	ts := testutil.NewTestServer(t)
 	defer ts.Cleanup()
 
@@ -1715,32 +1812,33 @@ func TestPutObject_VersioningEnabledStillEnforcesObjectLock(t *testing.T) {
 	bucketName, objectKey, _, cleanup := versioningEnabledLockedBucket(t, ts, "v1-locked")
 	defer cleanup()
 
-	// Attempt to overwrite — must be rejected (AccessDenied), even with
-	// versioning Enabled.
-	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+	// A new PUT creates a new version and must be allowed.
+	put2, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(objectKey),
 		Body:   strings.NewReader("v2-overwrite"),
 	})
-	require.Error(t, err, "PUT onto a locked object must be rejected even with versioning Enabled")
-	var apiErr smithy.APIError
-	if assert.ErrorAs(t, err, &apiErr) {
-		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
-	}
+	require.NoError(t, err, "PUT creates a new version and must be allowed on a versioned lock bucket")
+	require.NotEmpty(t, aws.ToString(put2.VersionId))
 
-	// Retry with bypass-governance-retention=true must succeed.
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+	// The current (latest) object now reflects the new payload.
+	got, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(objectKey),
-		Body:   strings.NewReader("v2-bypass"),
-	}, withBypassGovernanceHeader())
-	require.NoError(t, err, "bypass header must allow PUT overwrite even with versioning Enabled")
+	})
+	require.NoError(t, err)
+	defer got.Body.Close()
+	body, err := io.ReadAll(got.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "v2-overwrite", string(body))
 }
 
-// TestDeleteObject_VersioningEnabledStillEnforcesObjectLock verifies that an
-// unversioned DELETE (no versionId query param) on a versioning-Enabled
-// bucket still evaluates Object Lock on the current version.
-func TestDeleteObject_VersioningEnabledStillEnforcesObjectLock(t *testing.T) {
+// TestDeleteObject_VersioningEnabled_MarkerAllowed_VersionTargetedBlocked
+// verifies the S3-canonical semantics restored in #39: an unspecified DELETE
+// on a versioned bucket creates a delete marker (allowed even when the current
+// version is locked), while a version-targeted DELETE of the locked version is
+// rejected with AccessDenied and succeeds only with the bypass header.
+func TestDeleteObject_VersioningEnabled_MarkerAllowed_VersionTargetedBlocked(t *testing.T) {
 	ts := testutil.NewTestServer(t)
 	defer ts.Cleanup()
 
@@ -1750,12 +1848,31 @@ func TestDeleteObject_VersioningEnabledStillEnforcesObjectLock(t *testing.T) {
 	bucketName, objectKey, _, cleanup := versioningEnabledLockedBucket(t, ts, "v1-locked")
 	defer cleanup()
 
-	// Unversioned DELETE on a versioned bucket must honour the lock.
-	_, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
+	// Resolve the locked version's id.
+	versions, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+		Bucket: aws.String(bucketName),
+		Prefix: aws.String(objectKey),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, versions.Versions)
+	lockedVersionID := aws.ToString(versions.Versions[0].VersionId)
+	require.NotEmpty(t, lockedVersionID)
+
+	// Unspecified DELETE creates a delete marker and must be allowed.
+	delOut, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(objectKey),
 	})
-	require.Error(t, err, "unversioned DELETE on a locked object must be rejected even with versioning Enabled")
+	require.NoError(t, err, "unspecified DELETE creates a delete marker and must be allowed")
+	assert.True(t, aws.ToBool(delOut.DeleteMarker))
+
+	// Version-targeted DELETE of the locked version must be rejected.
+	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(objectKey),
+		VersionId: aws.String(lockedVersionID),
+	})
+	require.Error(t, err, "version-targeted DELETE of a locked version must be rejected")
 	var apiErr smithy.APIError
 	if assert.ErrorAs(t, err, &apiErr) {
 		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
@@ -1765,17 +1882,18 @@ func TestDeleteObject_VersioningEnabledStillEnforcesObjectLock(t *testing.T) {
 	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket:                    aws.String(bucketName),
 		Key:                       aws.String(objectKey),
+		VersionId:                 aws.String(lockedVersionID),
 		BypassGovernanceRetention: aws.Bool(true),
 	})
-	require.NoError(t, err, "bypass header must allow DELETE even with versioning Enabled")
+	require.NoError(t, err, "bypass header must allow version-targeted DELETE of a GOVERNANCE-locked version")
 }
 
-// TestDeleteObjects_VersioningEnabledStillEnforcesObjectLock verifies that
-// the batch-delete path applies per-key lock evaluation regardless of
-// versioning status. This was previously the most dangerous carve-out:
-// versioning Enabled = silently delete N protected objects in one round
-// trip.
-func TestDeleteObjects_VersioningEnabledStillEnforcesObjectLock(t *testing.T) {
+// TestDeleteObjects_VersioningEnabled_PerVersionLockEvaluation verifies the
+// S3-canonical batch semantics restored in #39: a version-targeted batch
+// delete evaluates the lock per entry, so the locked version surfaces as
+// AccessDenied while the unlocked version is removed in the same round trip,
+// and the bypass header lifts a GOVERNANCE block.
+func TestDeleteObjects_VersioningEnabled_PerVersionLockEvaluation(t *testing.T) {
 	ts := testutil.NewTestServer(t)
 	defer ts.Cleanup()
 
@@ -1785,36 +1903,47 @@ func TestDeleteObjects_VersioningEnabledStillEnforcesObjectLock(t *testing.T) {
 	bucketName, objectKey, _, cleanup := versioningEnabledLockedBucket(t, ts, "v1-locked")
 	defer cleanup()
 
-	// Add a second unlocked object to confirm only the locked key is
-	// reported as failed.
+	// Resolve the locked version's id.
+	versions, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+		Bucket: aws.String(bucketName),
+		Prefix: aws.String(objectKey),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, versions.Versions)
+	lockedVersionID := aws.ToString(versions.Versions[0].VersionId)
+	require.NotEmpty(t, lockedVersionID)
+
+	// Add a second unlocked object to confirm only the locked version fails.
 	unlockedKey := "unlocked-" + testutil.RandomObjectKey()
-	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+	unlockedPut, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(unlockedKey),
 		Body:   strings.NewReader("free"),
 	})
 	require.NoError(t, err)
+	unlockedVersionID := aws.ToString(unlockedPut.VersionId)
+	require.NotEmpty(t, unlockedVersionID)
 
 	out, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 		Bucket: aws.String(bucketName),
 		Delete: &types.Delete{
 			Objects: []types.ObjectIdentifier{
-				{Key: aws.String(objectKey)},
-				{Key: aws.String(unlockedKey)},
+				{Key: aws.String(objectKey), VersionId: aws.String(lockedVersionID)},
+				{Key: aws.String(unlockedKey), VersionId: aws.String(unlockedVersionID)},
 			},
 		},
 	})
 	require.NoError(t, err)
 
-	// Locked key must surface as an error entry; unlocked key must be in
-	// the Deleted list (delete-marker creation).
+	// Locked version must surface as an error entry; unlocked version must be
+	// in the Deleted list.
 	var lockedErrCode string
 	for _, e := range out.Errors {
 		if e.Key != nil && *e.Key == objectKey && e.Code != nil {
 			lockedErrCode = *e.Code
 		}
 	}
-	assert.Equal(t, "AccessDenied", lockedErrCode, "locked key must be reported as AccessDenied even with versioning Enabled")
+	assert.Equal(t, "AccessDenied", lockedErrCode, "locked version must be reported as AccessDenied")
 
 	var unlockedDeleted bool
 	for _, d := range out.Deleted {
@@ -1822,15 +1951,15 @@ func TestDeleteObjects_VersioningEnabledStillEnforcesObjectLock(t *testing.T) {
 			unlockedDeleted = true
 		}
 	}
-	assert.True(t, unlockedDeleted, "unlocked key must still be deleted in the same batch")
+	assert.True(t, unlockedDeleted, "unlocked version must still be deleted in the same batch")
 
-	// Bypass on the batch must allow the locked key through.
+	// Bypass on the batch must allow the locked version through.
 	out, err = client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 		Bucket:                    aws.String(bucketName),
 		BypassGovernanceRetention: aws.Bool(true),
 		Delete: &types.Delete{
 			Objects: []types.ObjectIdentifier{
-				{Key: aws.String(objectKey)},
+				{Key: aws.String(objectKey), VersionId: aws.String(lockedVersionID)},
 			},
 		},
 	})
@@ -1841,15 +1970,14 @@ func TestDeleteObjects_VersioningEnabledStillEnforcesObjectLock(t *testing.T) {
 			bypassDeleted = true
 		}
 	}
-	assert.True(t, bypassDeleted, "bypass must allow batch delete of locked key even with versioning Enabled")
+	assert.True(t, bypassDeleted, "bypass must allow batch delete of the locked version")
 }
 
-// TestCopyObject_VersioningEnabledStillEnforcesObjectLock verifies the
-// CopyObject carve-out removal: a copy that targets a locked destination
-// key must be rejected even when the destination bucket has versioning
-// Enabled, because the underlying overwrite still clobbers the live lock
-// row.
-func TestCopyObject_VersioningEnabledStillEnforcesObjectLock(t *testing.T) {
+// TestCopyObject_VersioningEnabled_CreatesNewDestinationVersion verifies the
+// S3-canonical semantics restored in #39: a copy onto a key whose current
+// version is locked creates a NEW destination version (allowed) and leaves the
+// locked version's bytes intact.
+func TestCopyObject_VersioningEnabled_CreatesNewDestinationVersion(t *testing.T) {
 	ts := testutil.NewTestServer(t)
 	defer ts.Cleanup()
 
@@ -1859,41 +1987,49 @@ func TestCopyObject_VersioningEnabledStillEnforcesObjectLock(t *testing.T) {
 	bucketName, dstKey, _, cleanup := versioningEnabledLockedBucket(t, ts, "destination-original")
 	defer cleanup()
 
+	// Resolve the locked destination version.
+	versions, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+		Bucket: aws.String(bucketName),
+		Prefix: aws.String(dstKey),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, versions.Versions)
+	lockedVersionID := aws.ToString(versions.Versions[0].VersionId)
+
 	srcKey := "src-" + testutil.RandomObjectKey()
-	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(srcKey),
 		Body:   strings.NewReader("source-payload"),
 	})
 	require.NoError(t, err)
 
-	_, err = client.CopyObject(ctx, &s3.CopyObjectInput{
+	copyOut, err := client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:     aws.String(bucketName),
 		Key:        aws.String(dstKey),
 		CopySource: aws.String(bucketName + "/" + srcKey),
 	})
-	require.Error(t, err, "copy onto a locked destination must be rejected even with versioning Enabled")
-	var apiErr smithy.APIError
-	if assert.ErrorAs(t, err, &apiErr) {
-		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
-	}
+	require.NoError(t, err, "copy creates a new destination version and must be allowed")
+	require.NotEmpty(t, aws.ToString(copyOut.VersionId))
 
-	// Bypass must allow the copy. CopyObjectInput in the AWS SDK Go v2
-	// does not expose BypassGovernanceRetention as a typed field, so we
-	// inject the header via the smithy middleware helper.
-	_, err = client.CopyObject(ctx, &s3.CopyObjectInput{
-		Bucket:     aws.String(bucketName),
-		Key:        aws.String(dstKey),
-		CopySource: aws.String(bucketName + "/" + srcKey),
-	}, withBypassGovernanceHeader())
-	require.NoError(t, err, "bypass must allow copy onto a locked destination even with versioning Enabled")
+	// The locked version's bytes must be unchanged.
+	got, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(dstKey),
+		VersionId: aws.String(lockedVersionID),
+	})
+	require.NoError(t, err)
+	defer got.Body.Close()
+	body, err := io.ReadAll(got.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "destination-original", string(body))
 }
 
-// TestCompleteMultipartUpload_VersioningEnabledStillEnforcesObjectLock
-// verifies the multipart carve-out removal: completing a multipart upload
-// onto a locked key must be rejected even when versioning is Enabled,
-// because the storage path destroys the live lock row on overwrite.
-func TestCompleteMultipartUpload_VersioningEnabledStillEnforcesObjectLock(t *testing.T) {
+// TestCompleteMultipartUpload_VersioningEnabled_CreatesNewVersion verifies the
+// S3-canonical semantics restored in #39: completing a multipart upload onto a
+// key whose current version is locked creates a NEW version (allowed) and
+// leaves the locked version's bytes intact.
+func TestCompleteMultipartUpload_VersioningEnabled_CreatesNewVersion(t *testing.T) {
 	ts := testutil.NewTestServer(t)
 	defer ts.Cleanup()
 
@@ -1902,6 +2038,15 @@ func TestCompleteMultipartUpload_VersioningEnabledStillEnforcesObjectLock(t *tes
 
 	bucketName, objectKey, _, cleanup := versioningEnabledLockedBucket(t, ts, "v1-locked")
 	defer cleanup()
+
+	// Resolve the locked version.
+	versions, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+		Bucket: aws.String(bucketName),
+		Prefix: aws.String(objectKey),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, versions.Versions)
+	lockedVersionID := aws.ToString(versions.Versions[0].VersionId)
 
 	createResult, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 		Bucket: aws.String(bucketName),
@@ -1919,7 +2064,7 @@ func TestCompleteMultipartUpload_VersioningEnabledStillEnforcesObjectLock(t *tes
 	})
 	require.NoError(t, err)
 
-	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+	completeOut, err := client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket:   aws.String(bucketName),
 		Key:      aws.String(objectKey),
 		UploadId: createResult.UploadId,
@@ -1929,31 +2074,20 @@ func TestCompleteMultipartUpload_VersioningEnabledStillEnforcesObjectLock(t *tes
 			},
 		},
 	})
-	require.Error(t, err, "complete-multipart onto a locked object must be rejected even with versioning Enabled")
-	var apiErr smithy.APIError
-	if assert.ErrorAs(t, err, &apiErr) {
-		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
-	}
+	require.NoError(t, err, "complete-multipart creates a new version and must be allowed")
+	require.NotEmpty(t, aws.ToString(completeOut.VersionId))
 
-	// Bypass via header must allow the completion.
-	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
-		Bucket:   aws.String(bucketName),
-		Key:      aws.String(objectKey),
-		UploadId: createResult.UploadId,
-		MultipartUpload: &types.CompletedMultipartUpload{
-			Parts: []types.CompletedPart{
-				{PartNumber: aws.Int32(1), ETag: partResult.ETag},
-			},
-		},
-	}, withBypassGovernanceHeader())
-	require.NoError(t, err, "bypass header must allow complete-multipart even with versioning Enabled")
-
-	// Best-effort abort fallback in case the bypass did not complete.
-	_, _ = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
-		Bucket:   aws.String(bucketName),
-		Key:      aws.String(objectKey),
-		UploadId: createResult.UploadId,
+	// The locked version's original bytes must be unchanged.
+	got, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(objectKey),
+		VersionId: aws.String(lockedVersionID),
 	})
+	require.NoError(t, err)
+	defer got.Body.Close()
+	body, err := io.ReadAll(got.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "v1-locked", string(body))
 }
 
 // TestCopyObject_VersioningEnabled_NonExistentSourceReturnsNoSuchKey verifies
@@ -2042,5 +2176,304 @@ func TestCompleteMultipartUpload_VersioningEnabled_NonExistentUploadIdReturnsNoS
 	if assert.ErrorAs(t, err, &apiErr) {
 		assert.Equal(t, "NoSuchUpload", apiErr.ErrorCode(),
 			"non-existent uploadId must surface NoSuchUpload, not AccessDenied from the lock check")
+	}
+}
+
+// TestObjectRetention_PerVersion verifies the #39 per-version retention model:
+// retention set on v1 survives a v2 overwrite, is readable via versionId, and
+// a version-targeted delete of v1 is blocked while v2 (unlocked) deletes
+// freely. v1 uses a short COMPLIANCE retention so no bypass cleanup is needed.
+func TestObjectRetention_PerVersion(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket:                     aws.String(bucketName),
+		ObjectLockEnabledForBucket: aws.Bool(true),
+	})
+	require.NoError(t, err)
+	defer func() { _, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)}) }()
+
+	// Auto-versioning must be on for an Object Lock bucket (#39).
+	vc, err := client.GetBucketVersioning(ctx, &s3.GetBucketVersioningInput{Bucket: aws.String(bucketName)})
+	require.NoError(t, err)
+	assert.Equal(t, types.BucketVersioningStatusEnabled, vc.Status, "object lock bucket must auto-enable versioning")
+
+	key := testutil.RandomObjectKey()
+	put1, err := client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucketName), Key: aws.String(key), Body: strings.NewReader("v1")})
+	require.NoError(t, err)
+	v1 := aws.ToString(put1.VersionId)
+	require.NotEmpty(t, v1)
+
+	retainUntil := time.Now().Add(3 * time.Second).UTC()
+	_, err = client.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(key),
+		VersionId: aws.String(v1),
+		Retention: &types.ObjectLockRetention{Mode: types.ObjectLockRetentionModeCompliance, RetainUntilDate: aws.Time(retainUntil)},
+	})
+	require.NoError(t, err)
+
+	// Create v2 (new version) — must not disturb v1's retention.
+	put2, err := client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucketName), Key: aws.String(key), Body: strings.NewReader("v2")})
+	require.NoError(t, err)
+	v2 := aws.ToString(put2.VersionId)
+	require.NotEmpty(t, v2)
+
+	// GetObjectRetention(v1) must still return the COMPLIANCE retention.
+	gotV1, err := client.GetObjectRetention(ctx, &s3.GetObjectRetentionInput{Bucket: aws.String(bucketName), Key: aws.String(key), VersionId: aws.String(v1)})
+	require.NoError(t, err, "v1 retention must survive the v2 overwrite (#39 defect 2 regression)")
+	assert.Equal(t, types.ObjectLockRetentionModeCompliance, gotV1.Retention.Mode)
+
+	// GetObjectRetention(v2) must report no retention configured.
+	_, err = client.GetObjectRetention(ctx, &s3.GetObjectRetentionInput{Bucket: aws.String(bucketName), Key: aws.String(key), VersionId: aws.String(v2)})
+	require.Error(t, err, "v2 must have no retention")
+	var noRet smithy.APIError
+	if assert.ErrorAs(t, err, &noRet) {
+		assert.Equal(t, "NoSuchObjectLockConfiguration", noRet.ErrorCode())
+	}
+
+	// Deleting v1 must be blocked (COMPLIANCE, no bypass possible).
+	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucketName), Key: aws.String(key), VersionId: aws.String(v1)})
+	require.Error(t, err, "v1 delete must be blocked while under COMPLIANCE retention")
+	var delErr smithy.APIError
+	if assert.ErrorAs(t, err, &delErr) {
+		assert.Equal(t, "AccessDenied", delErr.ErrorCode())
+	}
+
+	// Deleting v2 (unlocked) must succeed.
+	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucketName), Key: aws.String(key), VersionId: aws.String(v2)})
+	require.NoError(t, err, "v2 delete must succeed (no lock)")
+}
+
+// TestObjectLegalHold_PerVersion verifies per-version legal hold: a hold set on
+// v1 is readable by versionId, blocks a version-targeted delete of v1, and is
+// independent of v2. The hold is turned OFF at the end so cleanup can proceed.
+func TestObjectLegalHold_PerVersion(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket:                     aws.String(bucketName),
+		ObjectLockEnabledForBucket: aws.Bool(true),
+	})
+	require.NoError(t, err)
+
+	key := testutil.RandomObjectKey()
+	put1, err := client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucketName), Key: aws.String(key), Body: strings.NewReader("v1")})
+	require.NoError(t, err)
+	v1 := aws.ToString(put1.VersionId)
+	put2, err := client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucketName), Key: aws.String(key), Body: strings.NewReader("v2")})
+	require.NoError(t, err)
+	v2 := aws.ToString(put2.VersionId)
+
+	defer func() {
+		_, _ = client.PutObjectLegalHold(ctx, &s3.PutObjectLegalHoldInput{
+			Bucket: aws.String(bucketName), Key: aws.String(key), VersionId: aws.String(v1),
+			LegalHold: &types.ObjectLockLegalHold{Status: types.ObjectLockLegalHoldStatusOff},
+		})
+		_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucketName), Key: aws.String(key), VersionId: aws.String(v1)})
+		_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucketName), Key: aws.String(key), VersionId: aws.String(v2)})
+		_, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)})
+	}()
+
+	// Legal hold ON v1 only.
+	_, err = client.PutObjectLegalHold(ctx, &s3.PutObjectLegalHoldInput{
+		Bucket: aws.String(bucketName), Key: aws.String(key), VersionId: aws.String(v1),
+		LegalHold: &types.ObjectLockLegalHold{Status: types.ObjectLockLegalHoldStatusOn},
+	})
+	require.NoError(t, err)
+
+	holdV1, err := client.GetObjectLegalHold(ctx, &s3.GetObjectLegalHoldInput{Bucket: aws.String(bucketName), Key: aws.String(key), VersionId: aws.String(v1)})
+	require.NoError(t, err)
+	assert.Equal(t, types.ObjectLockLegalHoldStatusOn, holdV1.LegalHold.Status)
+
+	// v2 has no legal hold.
+	_, err = client.GetObjectLegalHold(ctx, &s3.GetObjectLegalHoldInput{Bucket: aws.String(bucketName), Key: aws.String(key), VersionId: aws.String(v2)})
+	require.Error(t, err, "v2 must have no legal hold")
+
+	// Delete of v1 blocked; v2 not (legal hold is per-version).
+	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucketName), Key: aws.String(key), VersionId: aws.String(v1)})
+	require.Error(t, err, "v1 delete must be blocked by legal hold")
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
+	}
+}
+
+// TestDeleteMarker_CoexistsWithProtectedVersion verifies that creating a delete
+// marker over a protected version is allowed, the marker hides the object from
+// a plain GET, ListObjectVersions still shows both the marker and the protected
+// version, and a version-targeted delete of the protected version stays blocked.
+func TestDeleteMarker_CoexistsWithProtectedVersion(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName, objectKey, _, cleanup := versioningEnabledLockedBucket(t, ts, "protected-v1")
+	defer cleanup()
+
+	versions, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(bucketName), Prefix: aws.String(objectKey)})
+	require.NoError(t, err)
+	require.NotEmpty(t, versions.Versions)
+	protectedVersionID := aws.ToString(versions.Versions[0].VersionId)
+
+	// Plain DELETE creates a delete marker (allowed even though v1 is locked).
+	dm, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucketName), Key: aws.String(objectKey)})
+	require.NoError(t, err)
+	assert.True(t, aws.ToBool(dm.DeleteMarker))
+
+	// Plain GET now returns 404 (the marker is the latest version).
+	_, err = client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucketName), Key: aws.String(objectKey)})
+	require.Error(t, err, "GET must 404 once a delete marker is the latest version")
+
+	// ListObjectVersions still shows the protected version and the marker.
+	after, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(bucketName), Prefix: aws.String(objectKey)})
+	require.NoError(t, err)
+	foundProtected := false
+	for _, v := range after.Versions {
+		if aws.ToString(v.VersionId) == protectedVersionID {
+			foundProtected = true
+		}
+	}
+	assert.True(t, foundProtected, "protected version must still be listed alongside the delete marker")
+	assert.NotEmpty(t, after.DeleteMarkers, "delete marker must be listed")
+
+	// Version-targeted delete of the protected version is still blocked.
+	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucketName), Key: aws.String(objectKey), VersionId: aws.String(protectedVersionID)})
+	require.Error(t, err, "protected version must remain undeletable behind the marker")
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "AccessDenied", apiErr.ErrorCode())
+	}
+}
+
+// TestVersioningSuspend_RejectedOnLockBucket verifies an Object Lock bucket
+// rejects PutBucketVersioning(Suspended) with InvalidBucketState (#39).
+func TestVersioningSuspend_RejectedOnLockBucket(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket:                     aws.String(bucketName),
+		ObjectLockEnabledForBucket: aws.Bool(true),
+	})
+	require.NoError(t, err)
+	defer func() { _, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)}) }()
+
+	_, err = client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+		Bucket:                  aws.String(bucketName),
+		VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusSuspended},
+	})
+	require.Error(t, err, "suspending versioning on an Object Lock bucket must be rejected")
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "InvalidBucketState", apiErr.ErrorCode())
+	}
+}
+
+// TestGetObjectRetention_NonExistentVersionReturnsNoSuchVersion verifies the
+// versionId resolution: a retention GET against a fabricated versionId surfaces
+// NoSuchVersion (#39), not NoSuchKey.
+func TestGetObjectRetention_NonExistentVersionReturnsNoSuchVersion(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket:                     aws.String(bucketName),
+		ObjectLockEnabledForBucket: aws.Bool(true),
+	})
+	require.NoError(t, err)
+	defer func() { _, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)}) }()
+
+	key := testutil.RandomObjectKey()
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucketName), Key: aws.String(key), Body: strings.NewReader("v1")})
+	require.NoError(t, err)
+
+	_, err = client.GetObjectRetention(ctx, &s3.GetObjectRetentionInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(key),
+		VersionId: aws.String("fabricated-version-id"),
+	})
+	require.Error(t, err)
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "NoSuchVersion", apiErr.ErrorCode())
+	}
+}
+
+func TestObjectLockNullVersionOnVersionOnlyKeyReturnsNoSuchKey(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket:                     aws.String(bucketName),
+		ObjectLockEnabledForBucket: aws.Bool(true),
+	})
+	require.NoError(t, err)
+	defer func() { _, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)}) }()
+
+	_, err = client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+		Bucket: aws.String(bucketName),
+		VersioningConfiguration: &types.VersioningConfiguration{
+			Status: types.BucketVersioningStatusEnabled,
+		},
+	})
+	require.NoError(t, err)
+
+	key := testutil.RandomObjectKey()
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+		Body:   strings.NewReader("v1"),
+	})
+	require.NoError(t, err)
+
+	retainUntil := time.Now().Add(24 * time.Hour)
+	_, err = client.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(key),
+		VersionId: aws.String("null"),
+		Retention: &types.ObjectLockRetention{
+			Mode:            types.ObjectLockRetentionModeGovernance,
+			RetainUntilDate: aws.Time(retainUntil),
+		},
+	})
+	require.Error(t, err)
+	var apiErr smithy.APIError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "NoSuchKey", apiErr.ErrorCode())
+	}
+
+	_, err = client.GetObjectLegalHold(ctx, &s3.GetObjectLegalHoldInput{
+		Bucket:    aws.String(bucketName),
+		Key:       aws.String(key),
+		VersionId: aws.String("null"),
+	})
+	require.Error(t, err)
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, "NoSuchKey", apiErr.ErrorCode())
 	}
 }

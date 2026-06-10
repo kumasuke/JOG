@@ -381,7 +381,7 @@ func (s *failClosedLockStorage) GetObjectLockConfiguration(ctx context.Context, 
 // to allow.
 func TestEvaluateObjectLock_GetObjectLockConfigurationErrorFailClosed(t *testing.T) {
 	h := &Handler{storage: &failClosedLockStorage{}}
-	got := h.evaluateObjectLock(context.Background(), "any-bucket", "any-key", false)
+	got := h.evaluateObjectLock(context.Background(), "any-bucket", "any-key", "", false)
 	require.NotNil(t, got, "non-sentinel storage error must deny via AccessDenied")
 	assert.Equal(t, ErrAccessDenied, got)
 }

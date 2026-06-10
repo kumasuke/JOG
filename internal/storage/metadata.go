@@ -15,7 +15,8 @@ import (
 
 // Metadata manages object metadata using SQLite.
 type Metadata struct {
-	db *sql.DB
+	db     *sql.DB
+	dbPath string
 }
 
 // NewMetadata creates a new metadata store.
@@ -30,7 +31,7 @@ func NewMetadata(dbPath string) (*Metadata, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	m := &Metadata{db: db}
+	m := &Metadata{db: db, dbPath: dbPath}
 	if err := m.initialize(); err != nil {
 		db.Close()
 		return nil, err
@@ -263,33 +264,11 @@ func (m *Metadata) initialize() error {
 		return fmt.Errorf("failed to create bucket_object_lock table: %w", err)
 	}
 
-	// Create object_retention table
-	_, err = m.db.Exec(`
-		CREATE TABLE IF NOT EXISTS object_retention (
-			bucket TEXT NOT NULL,
-			key TEXT NOT NULL,
-			mode TEXT NOT NULL,
-			retain_until_date DATETIME NOT NULL,
-			PRIMARY KEY (bucket, key),
-			FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE
-		)
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to create object_retention table: %w", err)
-	}
-
-	// Create object_legal_hold table
-	_, err = m.db.Exec(`
-		CREATE TABLE IF NOT EXISTS object_legal_hold (
-			bucket TEXT NOT NULL,
-			key TEXT NOT NULL,
-			status TEXT NOT NULL,
-			PRIMARY KEY (bucket, key),
-			FOREIGN KEY (bucket, key) REFERENCES objects(bucket, key) ON DELETE CASCADE
-		)
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to create object_legal_hold table: %w", err)
+	// Create the per-version Object Lock tables (v2 schema) and migrate any
+	// legacy (bucket, key)-keyed rows. See migrateObjectLockSchema for the
+	// fail-closed migration contract. This MUST run before any lock writes.
+	if err := m.migrateObjectLockSchema(); err != nil {
+		return err
 	}
 
 	// Create bucket_policy table
@@ -326,6 +305,404 @@ func (m *Metadata) initialize() error {
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to create bucket_notification table: %w", err)
+	}
+
+	return nil
+}
+
+// objectLockSchemaVersion is written to PRAGMA user_version once the
+// per-version Object Lock tables (v2) are in place.
+const objectLockSchemaVersion = 1
+
+// createRetentionV2DDL / createLegalHoldV2DDL are the canonical v2 DDL for the
+// per-version Object Lock tables. The foreign key references buckets(name)
+// (NOT objects(bucket, key)) so that INSERT OR REPLACE INTO objects no longer
+// cascade-deletes lock rows on overwrite — that cascade was a silent
+// Object Lock bypass (issue #39, risk 1).
+const createRetentionV2DDL = `
+	CREATE TABLE IF NOT EXISTS object_retention (
+		bucket            TEXT NOT NULL,
+		key               TEXT NOT NULL,
+		version_id        TEXT NOT NULL DEFAULT '',
+		mode              TEXT NOT NULL CHECK (mode IN ('GOVERNANCE', 'COMPLIANCE')),
+		retain_until_date DATETIME NOT NULL,
+		PRIMARY KEY (bucket, key, version_id),
+		FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+	)`
+
+const createLegalHoldV2DDL = `
+	CREATE TABLE IF NOT EXISTS object_legal_hold (
+		bucket     TEXT NOT NULL,
+		key        TEXT NOT NULL,
+		version_id TEXT NOT NULL DEFAULT '',
+		status     TEXT NOT NULL CHECK (status IN ('ON', 'OFF')),
+		PRIMARY KEY (bucket, key, version_id),
+		FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+	)`
+
+// migrateObjectLockSchema brings the object_retention / object_legal_hold
+// tables to the per-version (bucket, key, version_id) schema. It is fail-closed:
+// a fresh DB gets the v2 DDL directly, a legacy DB is migrated inside a single
+// BEGIN IMMEDIATE transaction with row-count / value validation, and any
+// mismatch ROLLBACKs and aborts startup (better to refuse to start than to run
+// with silently-lost lock data). Old tables are renamed to *_legacy_v1 rather
+// than dropped, and a physical backup is taken before migrating.
+// lockTableGeneration describes the Object Lock table schema generation.
+type lockTableGeneration int
+
+const (
+	lockTableAbsent lockTableGeneration = iota
+	lockTableLegacy
+	lockTableV2
+)
+
+func (g lockTableGeneration) String() string {
+	switch g {
+	case lockTableAbsent:
+		return "absent"
+	case lockTableLegacy:
+		return "legacy"
+	case lockTableV2:
+		return "v2"
+	default:
+		return "unknown"
+	}
+}
+
+func (m *Metadata) migrateObjectLockSchema() error {
+	retentionGen, err := m.lockTableGeneration("object_retention")
+	if err != nil {
+		return err
+	}
+	legalHoldGen, err := m.lockTableGeneration("object_legal_hold")
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case retentionGen == lockTableAbsent && legalHoldGen == lockTableAbsent:
+		if _, err := m.db.Exec(createRetentionV2DDL); err != nil {
+			return fmt.Errorf("failed to create object_retention table: %w", err)
+		}
+		if _, err := m.db.Exec(createLegalHoldV2DDL); err != nil {
+			return fmt.Errorf("failed to create object_legal_hold table: %w", err)
+		}
+		if _, err := m.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, objectLockSchemaVersion)); err != nil {
+			return fmt.Errorf("failed to set user_version: %w", err)
+		}
+		return nil
+	case retentionGen == lockTableV2 && legalHoldGen == lockTableV2:
+		var userVersion int
+		if err := m.db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
+			return fmt.Errorf("failed to read user_version: %w", err)
+		}
+		if userVersion < objectLockSchemaVersion {
+			if _, err := m.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, objectLockSchemaVersion)); err != nil {
+				return fmt.Errorf("failed to set user_version: %w", err)
+			}
+		}
+		return nil
+	case retentionGen == lockTableLegacy && legalHoldGen == lockTableLegacy:
+		return m.runObjectLockMigration()
+	default:
+		return fmt.Errorf(
+			"object lock schema mismatch: object_retention=%s object_legal_hold=%s (fail-closed)",
+			retentionGen, legalHoldGen,
+		)
+	}
+}
+
+// lockTableGeneration reports whether a lock table is absent, legacy
+// (no version_id column), or v2 (has version_id).
+func (m *Metadata) lockTableGeneration(table string) (lockTableGeneration, error) {
+	rows, err := m.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return lockTableAbsent, fmt.Errorf("failed to inspect %s columns: %w", table, err)
+	}
+	defer rows.Close()
+
+	tableExists := false
+	hasVersionCol := false
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			ctype      string
+			notNull    int
+			dfltValue  sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &primaryKey); err != nil {
+			return lockTableAbsent, fmt.Errorf("failed to scan %s column info: %w", table, err)
+		}
+		tableExists = true
+		if name == "version_id" {
+			hasVersionCol = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return lockTableAbsent, err
+	}
+	if !tableExists {
+		return lockTableAbsent, nil
+	}
+	if hasVersionCol {
+		return lockTableV2, nil
+	}
+	return lockTableLegacy, nil
+}
+
+// runObjectLockMigration performs the legacy -> v2 migration described in the
+// issue #39 design doc. The whole migration runs in BEGIN IMMEDIATE; a physical
+// VACUUM INTO backup is taken first (outside the transaction).
+func (m *Metadata) runObjectLockMigration() error {
+	// Step 0: physical backup before touching anything.
+	if m.dbPath != "" {
+		backupPath := m.dbPath + ".pre-lockv2.bak"
+		_ = os.Remove(backupPath)
+		if _, err := m.db.Exec(`VACUUM INTO ?`, backupPath); err != nil {
+			return fmt.Errorf("object lock migration: failed to create backup %q: %w", backupPath, err)
+		}
+	}
+
+	ctx := context.Background()
+
+	// Step 2 (pre-transaction validation): reject CHECK-violating legacy
+	// rows up front so the migration never silently drops data.
+	var badMode int
+	if err := m.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM object_retention WHERE mode NOT IN ('GOVERNANCE','COMPLIANCE')`).Scan(&badMode); err != nil {
+		return fmt.Errorf("object lock migration: failed to validate legacy retention modes: %w", err)
+	}
+	if badMode != 0 {
+		return fmt.Errorf("object lock migration aborted: %d legacy object_retention rows have an invalid mode; manual cleanup required", badMode)
+	}
+	var badStatus int
+	if err := m.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM object_legal_hold WHERE status NOT IN ('ON','OFF')`).Scan(&badStatus); err != nil {
+		return fmt.Errorf("object lock migration: failed to validate legacy legal hold statuses: %w", err)
+	}
+	if badStatus != 0 {
+		return fmt.Errorf("object lock migration aborted: %d legacy object_legal_hold rows have an invalid status; manual cleanup required", badStatus)
+	}
+
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("object lock migration: failed to begin transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Acquire an immediate write lock so any future concurrent opener blocks.
+	if _, err := tx.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		// modernc/sqlite already opened an implicit deferred transaction via
+		// BeginTx; a nested BEGIN may error. Fall through — the BeginTx
+		// transaction already provides isolation for our single-process use.
+		_ = err
+	}
+
+	// Step 3: create the v2 tables under temporary names.
+	if _, err := tx.ExecContext(ctx, `
+		CREATE TABLE object_retention_v2 (
+			bucket            TEXT NOT NULL,
+			key               TEXT NOT NULL,
+			version_id        TEXT NOT NULL DEFAULT '',
+			mode              TEXT NOT NULL CHECK (mode IN ('GOVERNANCE', 'COMPLIANCE')),
+			retain_until_date DATETIME NOT NULL,
+			PRIMARY KEY (bucket, key, version_id),
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)`); err != nil {
+		return fmt.Errorf("object lock migration: failed to create object_retention_v2: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		CREATE TABLE object_legal_hold_v2 (
+			bucket     TEXT NOT NULL,
+			key        TEXT NOT NULL,
+			version_id TEXT NOT NULL DEFAULT '',
+			status     TEXT NOT NULL CHECK (status IN ('ON', 'OFF')),
+			PRIMARY KEY (bucket, key, version_id),
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)`); err != nil {
+		return fmt.Errorf("object lock migration: failed to create object_legal_hold_v2: %w", err)
+	}
+
+	// Step 4: backfill. A legacy lock row protected "the current version" of
+	// the key, so bind it to the newest non-delete-marker version_id when one
+	// exists, else to '' (null version). mode / status / retain_until_date are
+	// copied verbatim (zero transformation = zero loss).
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO object_retention_v2 (bucket, key, version_id, mode, retain_until_date)
+		SELECT
+			r.bucket,
+			r.key,
+			COALESCE(
+				(SELECT v.version_id
+				   FROM object_versions v
+				  WHERE v.bucket = r.bucket
+				    AND v.key    = r.key
+				    AND v.is_delete_marker = 0
+				  ORDER BY v.last_modified DESC, v.version_id DESC
+				  LIMIT 1),
+				''
+			),
+			r.mode,
+			r.retain_until_date
+		FROM object_retention r`); err != nil {
+		return fmt.Errorf("object lock migration: failed to backfill object_retention_v2: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO object_legal_hold_v2 (bucket, key, version_id, status)
+		SELECT
+			h.bucket,
+			h.key,
+			COALESCE(
+				(SELECT v.version_id
+				   FROM object_versions v
+				  WHERE v.bucket = h.bucket
+				    AND v.key    = h.key
+				    AND v.is_delete_marker = 0
+				  ORDER BY v.last_modified DESC, v.version_id DESC
+				  LIMIT 1),
+				''
+			),
+			h.status
+		FROM object_legal_hold h`); err != nil {
+		return fmt.Errorf("object lock migration: failed to backfill object_legal_hold_v2: %w", err)
+	}
+
+	// Step 5: in-transaction validation. Any mismatch aborts the migration.
+	if err := validateLockMigration(ctx, tx); err != nil {
+		return err
+	}
+
+	// Step 6: retire the legacy tables (rename, not drop) and promote v2.
+	for _, stmt := range []string{
+		`ALTER TABLE object_retention   RENAME TO object_retention_legacy_v1`,
+		`ALTER TABLE object_retention_v2 RENAME TO object_retention`,
+		`ALTER TABLE object_legal_hold   RENAME TO object_legal_hold_legacy_v1`,
+		`ALTER TABLE object_legal_hold_v2 RENAME TO object_legal_hold`,
+	} {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("object lock migration: rename step failed (%q): %w", stmt, err)
+		}
+	}
+
+	// Step 7: stamp the schema generation (user_version is transactional).
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, objectLockSchemaVersion)); err != nil {
+		return fmt.Errorf("object lock migration: failed to set user_version: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("object lock migration: commit failed: %w", err)
+	}
+	committed = true
+
+	// Step 8 (post-commit): the renamed schema must satisfy all FK constraints.
+	var fkViolations int
+	if err := m.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&fkViolations); err != nil {
+		return fmt.Errorf("object lock migration: foreign_key_check failed: %w", err)
+	}
+	if fkViolations != 0 {
+		return fmt.Errorf("object lock migration: %d foreign key violations after commit", fkViolations)
+	}
+
+	return nil
+}
+
+// validateLockMigration runs the design-doc verification queries against the
+// in-flight v2 tables. It returns a descriptive error on any discrepancy so
+// startup fails closed.
+func validateLockMigration(ctx context.Context, tx *sql.Tx) error {
+	// (a) row-count parity for retention.
+	var oldN, newN int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM object_retention`).Scan(&oldN); err != nil {
+		return fmt.Errorf("object lock migration: count old retention: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM object_retention_v2`).Scan(&newN); err != nil {
+		return fmt.Errorf("object lock migration: count new retention: %w", err)
+	}
+	if oldN != newN {
+		return fmt.Errorf("object lock migration: retention row count mismatch (old=%d new=%d)", oldN, newN)
+	}
+
+	// (b) no value loss / mutation for retention.
+	var missing int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM object_retention r
+		LEFT JOIN object_retention_v2 n
+		  ON  n.bucket = r.bucket AND n.key = r.key
+		  AND n.mode = r.mode AND n.retain_until_date = r.retain_until_date
+		WHERE n.bucket IS NULL`).Scan(&missing); err != nil {
+		return fmt.Errorf("object lock migration: retention value-loss check failed: %w", err)
+	}
+	if missing != 0 {
+		return fmt.Errorf("object lock migration: %d retention rows lost or altered during backfill", missing)
+	}
+
+	// (c) COMPLIANCE row-count parity (the strictest invariant).
+	var oldCompliance, newCompliance int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM object_retention WHERE mode = 'COMPLIANCE'`).Scan(&oldCompliance); err != nil {
+		return fmt.Errorf("object lock migration: count old compliance: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM object_retention_v2 WHERE mode = 'COMPLIANCE'`).Scan(&newCompliance); err != nil {
+		return fmt.Errorf("object lock migration: count new compliance: %w", err)
+	}
+	if oldCompliance != newCompliance {
+		return fmt.Errorf("object lock migration: COMPLIANCE row count mismatch (old=%d new=%d)", oldCompliance, newCompliance)
+	}
+
+	// (d) legal hold parity + value loss.
+	var oldH, newH int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM object_legal_hold`).Scan(&oldH); err != nil {
+		return fmt.Errorf("object lock migration: count old legal hold: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM object_legal_hold_v2`).Scan(&newH); err != nil {
+		return fmt.Errorf("object lock migration: count new legal hold: %w", err)
+	}
+	if oldH != newH {
+		return fmt.Errorf("object lock migration: legal hold row count mismatch (old=%d new=%d)", oldH, newH)
+	}
+	var missingH int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM object_legal_hold h
+		LEFT JOIN object_legal_hold_v2 n
+		  ON n.bucket = h.bucket AND n.key = h.key AND n.status = h.status
+		WHERE n.bucket IS NULL`).Scan(&missingH); err != nil {
+		return fmt.Errorf("object lock migration: legal hold value-loss check failed: %w", err)
+	}
+	if missingH != 0 {
+		return fmt.Errorf("object lock migration: %d legal hold rows lost or altered during backfill", missingH)
+	}
+
+	// (e) orphan check: every non-'' version_id must exist in object_versions.
+	var orphans int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM object_retention_v2 n
+		WHERE n.version_id <> ''
+		  AND NOT EXISTS (SELECT 1 FROM object_versions v
+		                   WHERE v.bucket = n.bucket AND v.key = n.key
+		                     AND v.version_id = n.version_id)`).Scan(&orphans); err != nil {
+		return fmt.Errorf("object lock migration: retention orphan check failed: %w", err)
+	}
+	if orphans != 0 {
+		return fmt.Errorf("object lock migration: %d retention rows reference a non-existent version", orphans)
+	}
+
+	var holdOrphans int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM object_legal_hold_v2 n
+		WHERE n.version_id <> ''
+		  AND NOT EXISTS (SELECT 1 FROM object_versions v
+		                   WHERE v.bucket = n.bucket AND v.key = n.key
+		                     AND v.version_id = n.version_id)`).Scan(&holdOrphans); err != nil {
+		return fmt.Errorf("object lock migration: legal hold orphan check failed: %w", err)
+	}
+	if holdOrphans != 0 {
+		return fmt.Errorf("object lock migration: %d legal hold rows reference a non-existent version", holdOrphans)
 	}
 
 	return nil
@@ -391,22 +768,111 @@ func (m *Metadata) ListBuckets(ctx context.Context) ([]Bucket, error) {
 	return buckets, rows.Err()
 }
 
-// PutObject stores object metadata.
+// PutObject stores object metadata for a non-versioning in-place overwrite.
+//
+// With the per-version Object Lock schema (issue #39), lock rows are no longer
+// cascade-deleted by an overwrite: the FK now references buckets(name) and the
+// unconditional DELETE of the legacy code is gone. Instead, on a non-versioning
+// overwrite we apply a ” (null version) fail-closed guard — if the live null
+// version still carries an active retention or legal hold, the overwrite is
+// refused (ErrObjectLocked); only an expired retention has its ” row pruned so
+// the object can be replaced. This is a second防壁 behind the handler's
+// evaluateObjectLock check.
+//
+// IMPORTANT: this guard is scoped to the genuine non-versioning overwrite path
+// (FileSystem.PutObject / CopyObject / CompleteMultipartUpload). Versioned write
+// paths must instead use PutObjectCurrentPointer, which updates the live objects
+// row WITHOUT the guard: creating a NEW version must always be allowed and must
+// leave the locked prior version intact (core S3 semantic restored by #39).
 func (m *Metadata) PutObject(ctx context.Context, bucket string, obj *Object) error {
+	return m.putObject(ctx, bucket, obj, true)
+}
+
+// PutObjectCurrentPointer updates the live objects row (the "current version"
+// pointer) without running the null-version Object Lock guard.
+//
+// Versioned write paths (CopyObjectVersioned, CompleteMultipartUploadVersioned,
+// PutObjectVersioned) call this after persisting the new version row: the new
+// write creates a brand-new version and must always succeed regardless of any
+// retention or legal hold on a prior version (including the ” null version).
+// Applying the overwrite guard here would wrongly reject new-version creation
+// whenever the key's null version is locked.
+func (m *Metadata) PutObjectCurrentPointer(ctx context.Context, bucket string, obj *Object) error {
+	return m.putObject(ctx, bucket, obj, false)
+}
+
+// putObject upserts the live objects row. When guard is true it first enforces
+// the null-version Object Lock guard (non-versioning overwrite path); when false
+// it skips the guard (versioned current-pointer update).
+func (m *Metadata) putObject(ctx context.Context, bucket string, obj *Object, guard bool) error {
 	metadata, err := json.Marshal(obj.Metadata)
 	if err != nil {
 		return err
 	}
 
-	// Clean up old retention/legal-hold settings when overwriting object
-	_, _ = m.db.ExecContext(ctx, `DELETE FROM object_retention WHERE bucket = ? AND key = ?`, bucket, obj.Key)
-	_, _ = m.db.ExecContext(ctx, `DELETE FROM object_legal_hold WHERE bucket = ? AND key = ?`, bucket, obj.Key)
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 
-	_, err = m.db.ExecContext(ctx, `
+	if guard {
+		if err := guardNullVersionLockForOverwrite(ctx, tx, bucket, obj.Key); err != nil {
+			return err
+		}
+	}
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT OR REPLACE INTO objects (bucket, key, size, last_modified, etag, content_type, metadata)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`, bucket, obj.Key, obj.Size, obj.LastModified, obj.ETag, obj.ContentType, string(metadata))
-	return err
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// guardNullVersionLockForOverwrite enforces the ” (null version) Object Lock
+// state before a non-versioning overwrite replaces the live objects row. If an
+// active retention or legal hold protects the null version, the overwrite is
+// rejected; an expired retention row is pruned so the overwrite may proceed.
+func guardNullVersionLockForOverwrite(ctx context.Context, tx *sql.Tx, bucket, key string) error {
+	// Legal hold ON on the null version blocks the overwrite outright.
+	var holdStatus string
+	err := tx.QueryRowContext(ctx,
+		`SELECT status FROM object_legal_hold WHERE bucket = ? AND key = ? AND version_id = ''`,
+		bucket, key).Scan(&holdStatus)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if err == nil && holdStatus == "ON" {
+		return ErrObjectLocked
+	}
+
+	// Active retention (COMPLIANCE or GOVERNANCE) on the null version blocks
+	// the overwrite. An expired retention row is removed so the object can be
+	// replaced; the storage handler already evaluated bypass-governance.
+	var mode string
+	var retainUntil time.Time
+	err = tx.QueryRowContext(ctx,
+		`SELECT mode, retain_until_date FROM object_retention WHERE bucket = ? AND key = ? AND version_id = ''`,
+		bucket, key).Scan(&mode, &retainUntil)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if err == nil {
+		if retainUntil.After(time.Now()) {
+			return ErrObjectLocked
+		}
+		// Expired: prune the stale null-version retention row.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM object_retention WHERE bucket = ? AND key = ? AND version_id = ''`,
+			bucket, key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // GetObject returns object metadata.
@@ -928,6 +1394,32 @@ func (m *Metadata) GetLatestObjectVersion(ctx context.Context, bucket, key strin
 	return &version, nil
 }
 
+// GetLatestObjectVersionExcluding returns the newest version row for key,
+// skipping excludeVersionID (used to preview the post-delete latest).
+func (m *Metadata) GetLatestObjectVersionExcluding(ctx context.Context, bucket, key, excludeVersionID string) (*ObjectVersion, error) {
+	var version ObjectVersion
+	var metadataStr string
+	err := m.db.QueryRowContext(ctx, `
+		SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
+		FROM object_versions WHERE bucket = ? AND key = ? AND version_id != ?
+		ORDER BY last_modified DESC LIMIT 1
+	`, bucket, key, excludeVersionID).Scan(&version.Key, &version.VersionID, &version.Size, &version.LastModified, &version.ETag, &version.ContentType, &metadataStr, &version.IsDeleteMarker)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if metadataStr != "" {
+		if err := json.Unmarshal([]byte(metadataStr), &version.Metadata); err != nil {
+			return nil, err
+		}
+	}
+
+	return &version, nil
+}
+
 // DeleteObjectVersion deletes a specific version of an object.
 func (m *Metadata) DeleteObjectVersion(ctx context.Context, bucket, key, versionID string) error {
 	_, err := m.db.ExecContext(ctx, `DELETE FROM object_versions WHERE bucket = ? AND key = ? AND version_id = ?`, bucket, key, versionID)
@@ -1183,22 +1675,29 @@ func (m *Metadata) GetBucketObjectLockConfig(ctx context.Context, bucket string)
 	return config.String, nil
 }
 
-// PutObjectRetention stores the retention configuration for an object.
-func (m *Metadata) PutObjectRetention(ctx context.Context, bucket, key string, mode string, retainUntilDate time.Time) error {
+// PutObjectRetention stores the retention configuration for a specific object
+// version. versionID is the resolved version_id ("" means the null version).
+// The write is an upsert scoped to (bucket, key, version_id) — never an
+// INSERT OR REPLACE, whose internal DELETE could fire FK cascades.
+func (m *Metadata) PutObjectRetention(ctx context.Context, bucket, key, versionID string, mode string, retainUntilDate time.Time) error {
 	_, err := m.db.ExecContext(ctx, `
-		INSERT OR REPLACE INTO object_retention (bucket, key, mode, retain_until_date)
-		VALUES (?, ?, ?, ?)
-	`, bucket, key, mode, retainUntilDate)
+		INSERT INTO object_retention (bucket, key, version_id, mode, retain_until_date)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(bucket, key, version_id) DO UPDATE SET
+			mode = excluded.mode,
+			retain_until_date = excluded.retain_until_date
+	`, bucket, key, versionID, mode, retainUntilDate)
 	return err
 }
 
-// GetObjectRetention returns the retention configuration for an object.
-func (m *Metadata) GetObjectRetention(ctx context.Context, bucket, key string) (string, *time.Time, error) {
+// GetObjectRetention returns the retention configuration for a specific object
+// version. versionID "" addresses the null version.
+func (m *Metadata) GetObjectRetention(ctx context.Context, bucket, key, versionID string) (string, *time.Time, error) {
 	var mode string
 	var retainUntilDate time.Time
 	err := m.db.QueryRowContext(ctx, `
-		SELECT mode, retain_until_date FROM object_retention WHERE bucket = ? AND key = ?
-	`, bucket, key).Scan(&mode, &retainUntilDate)
+		SELECT mode, retain_until_date FROM object_retention WHERE bucket = ? AND key = ? AND version_id = ?
+	`, bucket, key, versionID).Scan(&mode, &retainUntilDate)
 	if err == sql.ErrNoRows {
 		return "", nil, nil
 	}
@@ -1208,21 +1707,23 @@ func (m *Metadata) GetObjectRetention(ctx context.Context, bucket, key string) (
 	return mode, &retainUntilDate, nil
 }
 
-// PutObjectLegalHold stores the legal hold status for an object.
-func (m *Metadata) PutObjectLegalHold(ctx context.Context, bucket, key string, status string) error {
+// PutObjectLegalHold stores the legal hold status for a specific object version.
+func (m *Metadata) PutObjectLegalHold(ctx context.Context, bucket, key, versionID string, status string) error {
 	_, err := m.db.ExecContext(ctx, `
-		INSERT OR REPLACE INTO object_legal_hold (bucket, key, status)
-		VALUES (?, ?, ?)
-	`, bucket, key, status)
+		INSERT INTO object_legal_hold (bucket, key, version_id, status)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(bucket, key, version_id) DO UPDATE SET
+			status = excluded.status
+	`, bucket, key, versionID, status)
 	return err
 }
 
-// GetObjectLegalHold returns the legal hold status for an object.
-func (m *Metadata) GetObjectLegalHold(ctx context.Context, bucket, key string) (string, error) {
+// GetObjectLegalHold returns the legal hold status for a specific object version.
+func (m *Metadata) GetObjectLegalHold(ctx context.Context, bucket, key, versionID string) (string, error) {
 	var status string
 	err := m.db.QueryRowContext(ctx, `
-		SELECT status FROM object_legal_hold WHERE bucket = ? AND key = ?
-	`, bucket, key).Scan(&status)
+		SELECT status FROM object_legal_hold WHERE bucket = ? AND key = ? AND version_id = ?
+	`, bucket, key, versionID).Scan(&status)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -1230,6 +1731,23 @@ func (m *Metadata) GetObjectLegalHold(ctx context.Context, bucket, key string) (
 		return "", err
 	}
 	return status, nil
+}
+
+// DeleteObjectLockRows removes the retention and legal hold rows for a specific
+// object version. Always fully scoped to (bucket, key, version_id); used after
+// a version's data is physically deleted to avoid orphan lock rows.
+func (m *Metadata) DeleteObjectLockRows(ctx context.Context, bucket, key, versionID string) error {
+	if _, err := m.db.ExecContext(ctx,
+		`DELETE FROM object_retention WHERE bucket = ? AND key = ? AND version_id = ?`,
+		bucket, key, versionID); err != nil {
+		return err
+	}
+	if _, err := m.db.ExecContext(ctx,
+		`DELETE FROM object_legal_hold WHERE bucket = ? AND key = ? AND version_id = ?`,
+		bucket, key, versionID); err != nil {
+		return err
+	}
+	return nil
 }
 
 // PutBucketPolicy stores the policy for a bucket.

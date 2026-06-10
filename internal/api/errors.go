@@ -218,6 +218,18 @@ var (
 		Message:    "Your proposed upload exceeds the maximum allowed size.",
 		HTTPStatus: http.StatusBadRequest,
 	}
+
+	ErrNoSuchVersion = &S3Error{
+		Code:       "NoSuchVersion",
+		Message:    "The specified version does not exist.",
+		HTTPStatus: http.StatusNotFound,
+	}
+
+	ErrInvalidBucketState = &S3Error{
+		Code:       "InvalidBucketState",
+		Message:    "The request is not valid with the current state of the bucket.",
+		HTTPStatus: http.StatusConflict,
+	}
 )
 
 // WriteError writes an S3 error response.
