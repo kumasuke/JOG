@@ -406,3 +406,13 @@ objectlock_test.go（26 関数）・versioning_test.go（9 関数）・internal/
 7. **ユーザー削除経路の原子性**: `DeleteObjectVersioned` / `DeleteObject` のファイル先行・非 tx は本設計のスコープ外として残置。エンジン用 tx メソッドが安定したら user 経路を同メソッドへ寄せる改善を別 Issue で。
 8. **Filter の And 未対応**: S3 の `<Filter><And>` 複合は CRUD 構造体ごと未対応（フラットな Prefix+Tag+Size を AND 解釈）。エンジンは保存形式に従うのみで、互換ギャップとして記録。
 9. **保持中 current への Expiration DM**（論点D の設計判断）: S3 準拠で生成する（データ非破壊・versionId で取得可能）が、「保持中なのにリストから消える」を驚きと感じる運用者向けに Report/INFO ログで件数を可視化する。問題になれば「保持中 current には DM を被せない」オプション追加で対応可能な構造にしておく。
+
+---
+
+## 8. 実装後レビュー (codex) の指摘と対応
+
+PR #51 の codex レビュー結果。最上位制約（Object Lock fail-closed）・`withImmediateTx` の排他性・トランザクション原子性・CAS ガード・孤立ファイル GC には指摘なし。
+
+- **[P1] NCVE が Tag/Size フィルタを無視 → 修正済み**: `noncurrentRule` は prefix のみ判定していたため、Tag/Size 付きルールで非該当の noncurrent バージョンまで削除しうる過剰削除バグだった。`noncurrentExpiryCandidates` に match 述語を追加し、エンジン側で各 noncurrent バージョンに対し size + バージョン別タグでフィルタを評価してから削除するよう修正。`NewerNoncurrentVersions` の保護件数もフィルタ一致バージョンに対して数える。ユニット（filter-scopes-and-protects-only-matching）+ E2E（タグ付与前後の挙動）で固定。
+- **[P1] `NewerNoncurrentVersions` 単独で `NoncurrentDays` なし → 意図的挙動として維持**: S3 仕様上 `NewerNoncurrentVersions` 単独でも超過分は失効対象。本実装は `days=0`（翌日 0:00 丸めにより約 1 日の猶予あり）で S3 準拠。`NoncurrentDays`・`NewerNoncurrentVersions` の双方が無いルールのみ skip（不完全ルール）。
+- **[P2] 複数 AIMU / NCVE ルール → v1 既知の制限（過少削除＝安全側）**: 同一キー/アップロードに複数ルールが重なる場合、現状は prefix 一致の最初のルールのみ適用（マージしない）。安全側に倒れるため v1 では許容し、複数ルールマージは別 Issue 候補。`noncurrentRule` / `abortMPURule` のコメントに明記。

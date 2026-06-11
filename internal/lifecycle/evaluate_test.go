@@ -140,7 +140,7 @@ func TestNoncurrentExpiryCandidates(t *testing.T) {
 	now := base.AddDate(0, 0, 100) // far future, everything past NoncurrentDays
 
 	t.Run("keep-2-deletes-rest", func(t *testing.T) {
-		got := noncurrentExpiryCandidates(vs, 2, 1, now)
+		got := noncurrentExpiryCandidates(vs, 2, 1, now, nil)
 		// Protect v4, v3 (newest 2 noncurrent). Delete v2, v1.
 		want := map[string]bool{"v2": true, "v1": true}
 		if len(got) != 2 || !want[got[0]] || !want[got[1]] {
@@ -151,7 +151,7 @@ func TestNoncurrentExpiryCandidates(t *testing.T) {
 	t.Run("keep-0-noncurrentdays-not-elapsed", func(t *testing.T) {
 		// now just after v5 written: v4 became noncurrent at day5; NoncurrentDays=30 not elapsed.
 		nowEarly := base.AddDate(0, 0, 5).Add(time.Hour)
-		got := noncurrentExpiryCandidates(vs, 0, 30, nowEarly)
+		got := noncurrentExpiryCandidates(vs, 0, 30, nowEarly, nil)
 		if len(got) != 0 {
 			t.Fatalf("got %v, want none (NoncurrentDays not elapsed)", got)
 		}
@@ -163,10 +163,23 @@ func TestNoncurrentExpiryCandidates(t *testing.T) {
 			mk("v2", 2, false),
 			mk("v1", 1, false),
 		}
-		got := noncurrentExpiryCandidates(withDM, 0, 1, now)
+		got := noncurrentExpiryCandidates(withDM, 0, 1, now, nil)
 		// Both v2, v1 are real noncurrent and eligible; dm is current (index 0), excluded.
 		if len(got) != 2 {
 			t.Fatalf("got %v, want v2,v1", got)
+		}
+	})
+
+	t.Run("filter-scopes-and-protects-only-matching", func(t *testing.T) {
+		// Only odd-numbered versions are in scope. keep=1 protects the newest
+		// matching (v3); the next matching (v1) is eligible. v2/v4 (out of
+		// scope) are never deleted regardless of age.
+		match := func(v storage.ObjectVersion) bool {
+			return v.VersionID == "v1" || v.VersionID == "v3"
+		}
+		got := noncurrentExpiryCandidates(vs, 1, 1, now, match)
+		if len(got) != 1 || got[0] != "v1" {
+			t.Fatalf("got %v, want [v1] (v3 protected, v2/v4 out of scope)", got)
 		}
 	})
 }

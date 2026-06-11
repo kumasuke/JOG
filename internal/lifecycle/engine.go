@@ -506,7 +506,14 @@ func (e *Engine) expireNoncurrent(ctx context.Context, bucket string, rules []st
 		days = *ncve.NoncurrentDays
 	}
 
-	for _, vid := range noncurrentExpiryCandidates(vs, keep, days, now) {
+	// Apply the full rule filter (size + per-version tags) per version, so a
+	// tag/size-filtered NCVE rule never expires an out-of-scope version. Prefix
+	// was already matched at the key level by noncurrentRule.
+	match := func(v storage.ObjectVersion) bool {
+		return e.versionMatchesFilter(ctx, bucket, key, v, rule.Filter)
+	}
+
+	for _, vid := range noncurrentExpiryCandidates(vs, keep, days, now, match) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -589,6 +596,20 @@ func (e *Engine) lockVerdict(ctx context.Context, bucket, key, versionID string,
 		return false
 	}
 	return v.Deletable
+}
+
+// versionMatchesFilter applies a rule filter to a specific version. Per-version
+// tags are only fetched when the filter actually constrains on a tag, to avoid
+// a query per version in the common (prefix/size-only) case.
+func (e *Engine) versionMatchesFilter(ctx context.Context, bucket, key string, v storage.ObjectVersion, filter *storage.LifecycleRuleFilter) bool {
+	if filter == nil {
+		return true
+	}
+	var tags []storage.Tag
+	if filter.Tag != nil {
+		tags = e.objectTags(ctx, bucket, key, v.VersionID)
+	}
+	return filterMatches(filter, key, v.Size, tags)
 }
 
 func (e *Engine) objectTags(ctx context.Context, bucket, key, versionID string) []storage.Tag {

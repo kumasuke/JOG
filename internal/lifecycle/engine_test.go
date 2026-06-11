@@ -130,6 +130,44 @@ func TestEngine_NoncurrentVersionExpiration(t *testing.T) {
 	}
 }
 
+// TestEngine_NoncurrentExpirationRespectsTagFilter verifies the fix for the
+// codex P1: a tag-filtered NCVE rule must not expire noncurrent versions that
+// do not carry the tag (no over-deletion of out-of-scope versions).
+func TestEngine_NoncurrentExpirationRespectsTagFilter(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Add(100 * 24 * time.Hour)
+	st, eng := newEngineFixture(t, false, now)
+	enabledBucket(t, st, "b")
+	v1 := putV(t, st, "b", "k", "1") // will be noncurrent, NOT tagged
+	putV(t, st, "b", "k", "2")       // current
+	setLifecycle(t, st, "b", storage.LifecycleRule{
+		ID:     "ncve-tagged",
+		Status: "Enabled",
+		Filter: &storage.LifecycleRuleFilter{Tag: &storage.Tag{Key: "expire", Value: "yes"}},
+		NoncurrentVersionExpiration: &storage.NoncurrentVersionExpiration{
+			NoncurrentDays: i32(1),
+		},
+	})
+
+	if _, err := eng.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetObjectVersioned(ctx, "b", "k", v1); err != nil {
+		t.Fatal("untagged noncurrent version must survive a tag-filtered NCVE rule (over-deletion)")
+	}
+
+	// Now tag v1 with the matching tag; it should become eligible.
+	if err := st.PutObjectTagging(ctx, "b", "k", v1, []storage.Tag{{Key: "expire", Value: "yes"}}); err != nil {
+		t.Fatalf("PutObjectTagging: %v", err)
+	}
+	if _, err := eng.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetObjectVersioned(ctx, "b", "k", v1); err == nil {
+		t.Error("tagged noncurrent version should be expired by the matching NCVE rule")
+	}
+}
+
 func TestEngine_DryRunHasNoSideEffects(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Add(100 * 24 * time.Hour)

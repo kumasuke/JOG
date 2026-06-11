@@ -131,8 +131,10 @@ func dateParseError(r storage.LifecycleRule) bool {
 }
 
 // noncurrentRule returns the first enabled rule with a NoncurrentVersionExpiration
-// whose filter matches the key (prefix/size; tags are not evaluated for
-// noncurrent versions in v1). ok is false when none applies.
+// whose prefix matches the key. The caller applies the full filter (size/tag)
+// per version. v1 limitation: only the first prefix-matching rule is used; when
+// several NCVE rules overlap a key they are not merged (under-deletion, safe).
+// ok is false when none applies.
 func noncurrentRule(rules []storage.LifecycleRule, key string) (storage.LifecycleRule, bool) {
 	for _, r := range rules {
 		if r.NoncurrentVersionExpiration == nil {
@@ -148,26 +150,33 @@ func noncurrentRule(rules []storage.LifecycleRule, key string) (storage.Lifecycl
 
 // noncurrentExpiryCandidates returns the version IDs of noncurrent, non-delete-
 // marker versions eligible for NoncurrentVersionExpiration. vs MUST be ordered
-// (last_modified DESC, version_id DESC) so vs[0] is the current version. The
-// newest `keep` real noncurrent versions are protected; the rest are eligible
-// once NoncurrentDays have elapsed since they became noncurrent (the
-// last_modified of the immediately newer version).
-func noncurrentExpiryCandidates(vs []storage.ObjectVersion, keep int, noncurrentDays int32, now time.Time) []string {
+// (last_modified DESC, version_id DESC) so vs[0] is the current version.
+//
+// `match` reports whether a version is in scope of the rule filter (prefix /
+// size / tag). Only matching versions are considered: the newest `keep`
+// matching versions are protected by NewerNoncurrentVersions, and the rest
+// become eligible once NoncurrentDays have elapsed since they became noncurrent
+// (the last_modified of the immediately newer version, matching or not). A nil
+// match treats every version as in scope.
+func noncurrentExpiryCandidates(vs []storage.ObjectVersion, keep int, noncurrentDays int32, now time.Time, match func(storage.ObjectVersion) bool) []string {
 	if keep < 0 {
 		keep = 0
 	}
 	var out []string
-	realSeen := 0
+	matchedSeen := 0
 	for i := 1; i < len(vs); i++ {
 		v := vs[i]
 		if v.IsDeleteMarker {
 			continue // delete markers are handled by the EODM path, never NCVE
 		}
-		if realSeen < keep {
-			realSeen++
+		if match != nil && !match(v) {
+			continue // filtered out — never delete an out-of-scope version
+		}
+		if matchedSeen < keep {
+			matchedSeen++
 			continue // protected by NewerNoncurrentVersions
 		}
-		realSeen++
+		matchedSeen++
 		noncurrentSince := vs[i-1].LastModified // immediately newer version
 		if eligibleByDays(now, noncurrentSince, noncurrentDays) {
 			out = append(out, v.VersionID)
@@ -207,7 +216,9 @@ func eodmRuleMatches(rules []storage.LifecycleRule, key string) bool {
 
 // abortMPURule returns the first enabled rule with an
 // AbortIncompleteMultipartUpload action. S3 forbids combining a tag filter with
-// AIMU, so rules carrying a Tag filter are skipped.
+// AIMU, so rules carrying a Tag filter are skipped. v1 limitation: only the
+// first such rule is applied; multiple AIMU rules with disjoint prefixes are
+// not all evaluated (under-action, safe).
 func abortMPURule(rules []storage.LifecycleRule) (storage.LifecycleRule, bool) {
 	for _, r := range rules {
 		if r.AbortIncompleteMultipartUpload == nil || r.AbortIncompleteMultipartUpload.DaysAfterInitiation == nil {
