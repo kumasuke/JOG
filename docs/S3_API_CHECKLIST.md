@@ -67,6 +67,14 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 | PutBucketLifecycleConfiguration | [x] | Set lifecycle configuration |
 | DeleteBucketLifecycle | [x] | Delete lifecycle configuration |
 
+> **Execution**: lifecycle rules are executed by the background engine
+> (`internal/lifecycle`) — an in-server ticker plus the `jog lifecycle run
+> [--dry-run]` CLI. Supported actions: Expiration (delete marker on versioned
+> buckets / physical delete on non-versioned), NoncurrentVersionExpiration,
+> ExpiredObjectDeleteMarker, and AbortIncompleteMultipartUpload. Transition is a
+> no-op on single-node storage. Versions under COMPLIANCE/GOVERNANCE retention
+> or legal hold are never deleted (fail-closed).
+
 ### Encryption
 
 | Operation | Status | Description |

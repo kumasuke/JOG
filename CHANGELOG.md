@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **ライフサイクル実行エンジン** (`internal/lifecycle`): これまで CRUD API で受理するだけだったバケットライフサイクル設定を、実際に実行するバックグラウンドエンジンを実装。サーバー内蔵の `time.Ticker`（既定 1h、起動 1 分後に初回）で周期実行し、`jog lifecycle run [--bucket B] [--dry-run]` サブコマンドで手動実行もできる。
+  - 対応アクション: Expiration（Enabled バケットは delete marker 生成・データ非破壊／非バージョニングは物理削除）、NoncurrentVersionExpiration（`NoncurrentDays` / `NewerNoncurrentVersions`、delete marker は対象外）、ExpiredObjectDeleteMarker、AbortIncompleteMultipartUpload。Transition は単一ノードでは no-op。
+  - **最上位の安全性保証**: COMPLIANCE/GOVERNANCE 保持期限内・legal hold ON のバージョンは、いかなる経路・中断状態でも削除しない（fail-closed）。削除は新設の `BEGIN IMMEDIATE` トランザクション内ガード経由のみで、ガードの読み取りと削除が同一書き込みロック下に置かれる。GOVERNANCE もエンジンは bypass しない。
+  - クラッシュ安全性: 「行削除→commit→ファイル unlink」順により、中断は孤立ファイル（不可視・GC 可能）しか残さない。孤立ファイルは猶予付き GC が回収する。
+  - `JOG_LIFECYCLE_ENABLED`（既定 true）/ `JOG_LIFECYCLE_INTERVAL`（既定 1h）/ `JOG_LIFECYCLE_MAX_ACTIONS`（既定 10000）で設定可能。
+- `internal/objectlock`: Object Lock 評価ロジック (`EvaluateDeletable`) を HTTP 非依存のパッケージへ抽出（API とライフサイクルエンジンで共用）。
+- `internal/storage`: ガード付きトランザクショナル削除 primitive（`withImmediateTx` ほか）と、ライフサイクル走査用のキー列挙・バージョン取得・観測用 `lifecycle_runs` テーブルを追加。
+
+### Fixed
+
+- `GetLatestObjectVersion`: 同一 `last_modified` の複数バージョンで latest 判定が非決定的になる問題を `version_id DESC` タイブレークで修正（current を noncurrent と誤判定して消しすぎる経路を防ぐ）。
+
+### 互換性
+
+- 既存テーブルの破壊的スキーマ変更なし（`lifecycle_runs` は additive、`PRAGMA user_version` の繰り上げなし）。Object Lock / Versioning の既存挙動・テストは不変。
+
 ## [0.1.3] - 2026-05-07
 
 ### Changed

@@ -90,6 +90,12 @@ Each feature follows TDD (Test-Driven Development):
 - Noncurrent version expiration
 - Abort incomplete multipart upload
 - Filter by prefix, tag, or object size
+- **Lifecycle execution engine** (`internal/lifecycle`): rules are now actually
+  executed (previously CRUD-only). In-server ticker + `jog lifecycle run
+  [--dry-run]` CLI. Expiration (delete marker on versioned / physical delete on
+  non-versioned), NoncurrentVersionExpiration, ExpiredObjectDeleteMarker, and
+  AbortIncompleteMultipartUpload. Fail-closed against retention / legal hold via
+  guarded `BEGIN IMMEDIATE` transactions. Transition is a no-op on single-node.
 
 ---
 
