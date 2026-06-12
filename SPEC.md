@@ -195,11 +195,17 @@ jog/
 
 | 変数名 | 説明 | デフォルト |
 |--------|------|-----------|
-| `JOG_DATA_DIR` | データ保存ディレクトリ | `./data` |
-| `JOG_PORT` | リッスンポート | `9000` |
-| `JOG_ACCESS_KEY` | アクセスキー | `minioadmin` |
-| `JOG_SECRET_KEY` | シークレットキー | `minioadmin` |
-| `JOG_LOG_LEVEL` | ログレベル | `info` |
+| `JOG_SERVER_PORT` | リッスンポート | `9000` |
+| `JOG_SERVER_ADDRESS` | リッスンアドレス | `0.0.0.0` |
+| `JOG_STORAGE_DATA_DIR` | データ保存ディレクトリ | `./data` |
+| `JOG_STORAGE_METADATA_DB` | メタデータDBパス | `./data/metadata.db` |
+| `JOG_AUTH_ACCESS_KEY` | アクセスキー | `minioadmin` |
+| `JOG_AUTH_SECRET_KEY` | シークレットキー | `minioadmin` |
+| `JOG_LOGGING_LEVEL` | ログレベル | `info` |
+| `JOG_LOGGING_FORMAT` | ログ形式 (`json` / `console`) | `json` |
+| `JOG_LIFECYCLE_ENABLED` | ライフサイクル実行エンジンの有効化 | `true` |
+| `JOG_LIFECYCLE_INTERVAL` | 実行周期 (Go duration) | `1h` |
+| `JOG_LIFECYCLE_MAX_ACTIONS` | 1サイクルの最大アクション数 | `10000` |
 
 ### 設定ファイル (config.yaml)
 
