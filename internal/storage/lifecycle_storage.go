@@ -27,14 +27,24 @@ func (fs *FileSystem) ListLifecycleObjectKeys(ctx context.Context, bucket, after
 	if limit <= 0 {
 		limit = 1000
 	}
+	// Push the keyset window (ORDER BY key LIMIT) into each UNION branch so a
+	// page reads at most ~limit index entries per table instead of scanning
+	// every key > afterKey. Without this, each page is O(remaining keys) and a
+	// full scan degrades to O(n^2). object_versions needs DISTINCT key (many
+	// rows per key); objects.key is unique per bucket so it does not. Both
+	// branches ride the (bucket, key) index.
 	rows, err := fs.metadata.db.QueryContext(ctx, `
 		SELECT key FROM (
-			SELECT key FROM objects WHERE bucket = ? AND key > ?
+			SELECT key FROM (
+				SELECT key FROM objects WHERE bucket = ? AND key > ? ORDER BY key LIMIT ?
+			)
 			UNION
-			SELECT key FROM object_versions WHERE bucket = ? AND key > ?
+			SELECT key FROM (
+				SELECT DISTINCT key FROM object_versions WHERE bucket = ? AND key > ? ORDER BY key LIMIT ?
+			)
 		)
 		ORDER BY key LIMIT ?
-	`, bucket, afterKey, bucket, afterKey, limit)
+	`, bucket, afterKey, limit, bucket, afterKey, limit, limit)
 	if err != nil {
 		return nil, err
 	}

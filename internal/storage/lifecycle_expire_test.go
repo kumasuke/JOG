@@ -581,3 +581,49 @@ func TestListLifecycleObjectKeys(t *testing.T) {
 		t.Fatalf("page = %v, want [mmm]", page)
 	}
 }
+
+// TestListLifecycleObjectKeys_VersionOnlyPagination guards the per-branch
+// LIMIT + DISTINCT optimization: keys that exist only in object_versions
+// (current is a delete marker, so no objects row) and carry several versions
+// must still be enumerated exactly once and in order, even with a tiny page
+// size. Without DISTINCT, a multi-version key would fill a page with duplicate
+// rows and earlier keys could starve later ones.
+func TestListLifecycleObjectKeys_VersionOnlyPagination(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	lifecycleTestBucket(t, fs, "b")
+
+	want := []string{"a", "b", "c", "d"}
+	for _, k := range want {
+		putVersion(t, fs, "b", k, "1")
+		putVersion(t, fs, "b", k, "2")
+		// Unspecified delete creates a delete marker and removes the objects
+		// row, leaving the key present only in object_versions with 3 rows.
+		if _, _, err := fs.DeleteObjectVersioned(ctx, "b", k, "", false); err != nil {
+			t.Fatalf("delete marker %q: %v", k, err)
+		}
+	}
+
+	var got []string
+	after := ""
+	for {
+		page, err := fs.ListLifecycleObjectKeys(ctx, "b", after, 1) // page size 1: stress pagination
+		if err != nil {
+			t.Fatalf("ListLifecycleObjectKeys: %v", err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		got = append(got, page...)
+		after = page[len(page)-1]
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("enumerated %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("enumerated %v, want %v", got, want)
+		}
+	}
+}
