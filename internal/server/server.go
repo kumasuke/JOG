@@ -10,6 +10,7 @@ import (
 	"github.com/kumasuke/jog/internal/api"
 	"github.com/kumasuke/jog/internal/auth"
 	"github.com/kumasuke/jog/internal/config"
+	"github.com/kumasuke/jog/internal/lifecycle"
 	"github.com/kumasuke/jog/internal/storage"
 	"github.com/rs/zerolog/log"
 )
@@ -19,6 +20,9 @@ type Server struct {
 	httpServer *http.Server
 	storage    storage.Storage
 	config     *config.Config
+	lifecycle  *lifecycle.Engine
+	lcCancel   context.CancelFunc
+	lcDone     chan struct{}
 }
 
 // New creates a new Server instance.
@@ -49,15 +53,40 @@ func New(cfg *config.Config) (*Server, error) {
 		MaxHeaderBytes:    1 << 20, // 1 MiB
 	}
 
+	// Build the lifecycle engine over the same storage. It is only started in
+	// Start() when cfg.Lifecycle.Enabled is true.
+	lcEngine := lifecycle.NewEngine(store, lifecycle.Config{
+		Interval:           cfg.Lifecycle.Interval.Std(),
+		MaxActionsPerCycle: cfg.Lifecycle.MaxActionsPerCycle,
+	}, time.Now)
+
 	return &Server{
 		httpServer: httpServer,
 		storage:    store,
 		config:     cfg,
+		lifecycle:  lcEngine,
 	}, nil
 }
 
-// Start starts the HTTP server.
+// Start starts the HTTP server. When lifecycle.enabled is set it first launches
+// the lifecycle engine in a background goroutine, then serves HTTP.
 func (s *Server) Start() error {
+	if s.config.Lifecycle.Enabled {
+		lcCtx, cancel := context.WithCancel(context.Background())
+		s.lcCancel = cancel
+		s.lcDone = make(chan struct{})
+		go func() {
+			defer close(s.lcDone)
+			s.lifecycle.Run(lcCtx)
+		}()
+		log.Info().
+			Dur("interval", s.config.Lifecycle.Interval.Std()).
+			Int("max_actions_per_cycle", s.config.Lifecycle.MaxActionsPerCycle).
+			Msg("Lifecycle engine enabled")
+	} else {
+		log.Info().Msg("Lifecycle engine disabled (lifecycle.enabled=false)")
+	}
+
 	log.Info().Str("addr", s.httpServer.Addr).Msg("Starting HTTP server")
 	err := s.httpServer.ListenAndServe()
 	if err != nil && err != http.ErrServerClosed {
@@ -66,12 +95,19 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Shutdown gracefully shuts down the server.
+// Shutdown gracefully shuts down the server. The lifecycle engine is stopped
+// first (and awaited at a version-level boundary) so no guarded deletion is
+// interrupted mid-flight, then the HTTP server drains and storage closes.
 func (s *Server) Shutdown() error {
+	log.Info().Msg("Shutting down server")
+
+	if s.lcCancel != nil {
+		s.lcCancel()
+		<-s.lcDone // wait for the engine to stop at a transaction boundary
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	log.Info().Msg("Shutting down server")
 
 	if err := s.httpServer.Shutdown(ctx); err != nil {
 		return fmt.Errorf("shutdown error: %w", err)

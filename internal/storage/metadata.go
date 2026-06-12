@@ -4,13 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // Metadata manages object metadata using SQLite.
@@ -26,7 +28,15 @@ func NewMetadata(dbPath string) (*Metadata, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_pragma=foreign_keys(1)")
+	// NOTE: modernc.org/sqlite only honors the `_pragma=name(value)` query form.
+	// The previous DSN used the mattn/go-sqlite3 spellings `_journal_mode=WAL`
+	// and `_busy_timeout=5000`, which modernc silently ignored — leaving the DB
+	// in rollback-journal mode with no busy timeout (so any write contention
+	// failed immediately with SQLITE_BUSY). WAL is also required by the
+	// Litestream deployment (docs/DEPLOYMENT.md) and by the lifecycle engine's
+	// concurrency design.
+	dsn := fmt.Sprintf("%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(%d)&_pragma=foreign_keys(1)", dbPath, defaultBusyTimeoutMS)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -38,6 +48,98 @@ func NewMetadata(dbPath string) (*Metadata, error) {
 	}
 
 	return m, nil
+}
+
+// ErrBusy is returned by withImmediateTx when BEGIN IMMEDIATE cannot acquire
+// the write lock within busy_timeout. Lifecycle callers treat it as a
+// fail-closed skip ("re-evaluate next cycle"), never as "proceed without the
+// guard".
+var ErrBusy = errors.New("database is busy")
+
+const (
+	// defaultBusyTimeoutMS is the connection busy timeout applied to every
+	// pooled connection via the DSN. Request-path writes wait this long for a
+	// momentarily-held write lock instead of failing fast with SQLITE_BUSY.
+	defaultBusyTimeoutMS = 5000
+	// engineBusyTimeoutMS is the shorter busy timeout used only inside
+	// withImmediateTx, so the background lifecycle engine skips a contended
+	// version quickly (fail-closed) rather than blocking a whole cycle behind
+	// request-path writes.
+	engineBusyTimeoutMS = 100
+)
+
+// isSQLiteBusy reports whether err is (or wraps) a SQLITE_BUSY result code.
+// Extended busy codes (BUSY_SNAPSHOT, BUSY_RECOVERY, BUSY_TIMEOUT) all share
+// SQLITE_BUSY as their low-byte primary code, so masking covers them.
+func isSQLiteBusy(err error) bool {
+	var serr *sqlite.Error
+	if errors.As(err, &serr) {
+		return serr.Code()&0xFF == sqlite3.SQLITE_BUSY
+	}
+	return false
+}
+
+// wrapBusy maps a SQLITE_BUSY error to ErrBusy and leaves everything else
+// untouched.
+func wrapBusy(err error) error {
+	if isSQLiteBusy(err) {
+		return ErrBusy
+	}
+	return err
+}
+
+// withImmediateTx pins a single pooled connection and runs fn inside a real
+// BEGIN IMMEDIATE transaction. BEGIN IMMEDIATE acquires the write lock up
+// front, so every read fn performs sees the latest committed state and no
+// concurrent writer can interleave before COMMIT. This is the exclusion
+// primitive for the lifecycle engine's guarded deletes — the migration code's
+// nested `BEGIN IMMEDIATE` inside BeginTx (metadata.go ~557/~947) is a no-op
+// and cannot be reused.
+//
+// SQLITE_BUSY at BEGIN (after busy_timeout) is returned as ErrBusy so callers
+// can treat it as a fail-closed skip. fn returning an error rolls back; a nil
+// return commits. Errors from fn are returned verbatim (busy errors surfaced
+// by fn's own statements are also normalized to ErrBusy).
+func (m *Metadata) withImmediateTx(ctx context.Context, fn func(conn *sql.Conn) error) error {
+	conn, err := m.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// Shorten busy_timeout for the duration of this guarded operation so a
+	// contended BEGIN IMMEDIATE returns ErrBusy quickly (engine skips, fail-
+	// closed) instead of blocking the cycle. Restore the pool default before
+	// the connection is reused by a request-path write, which wants the full
+	// timeout. busy_timeout is per-connection and is NOT reset by the pool.
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", engineBusyTimeoutMS)); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout=%d", defaultBusyTimeoutMS))
+	}()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return wrapBusy(err)
+	}
+
+	if err := fn(conn); err != nil {
+		if _, rbErr := conn.ExecContext(ctx, "ROLLBACK"); rbErr != nil {
+			// Surface the original error; the rollback failure is logged at
+			// the call site if needed. A failed ROLLBACK on a pinned conn that
+			// is about to be closed cannot leak the lock beyond Close().
+			_ = rbErr
+		}
+		return wrapBusy(err)
+	}
+
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		// COMMIT can still fail busy under WAL snapshot conflicts; roll back so
+		// the connection is clean before it returns to the pool.
+		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		return wrapBusy(err)
+	}
+	return nil
 }
 
 // escapeLikePattern escapes '%' and '_' characters in a SQLite LIKE pattern
@@ -243,6 +345,24 @@ func (m *Metadata) initialize() error {
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to create bucket_lifecycle table: %w", err)
+	}
+
+	// Create lifecycle_runs table (observability for the lifecycle engine).
+	// Additive and best-effort: it carries no protection invariant, so it
+	// follows the CREATE TABLE IF NOT EXISTS pattern without bumping
+	// PRAGMA user_version (reserved for destructive migrations).
+	_, err = m.db.Exec(`
+		CREATE TABLE IF NOT EXISTS lifecycle_runs (
+			bucket TEXT PRIMARY KEY,
+			last_run_at DATETIME NOT NULL,
+			actions INTEGER NOT NULL DEFAULT 0,
+			skipped_locked INTEGER NOT NULL DEFAULT 0,
+			errors INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create lifecycle_runs table: %w", err)
 	}
 
 	// Create bucket_object_lock table (stores object lock configuration)
@@ -1880,7 +2000,7 @@ func (m *Metadata) GetLatestObjectVersion(ctx context.Context, bucket, key strin
 	err := m.db.QueryRowContext(ctx, `
 		SELECT key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker
 		FROM object_versions WHERE bucket = ? AND key = ?
-		ORDER BY last_modified DESC LIMIT 1
+		ORDER BY last_modified DESC, version_id DESC LIMIT 1
 	`, bucket, key).Scan(&version.Key, &version.VersionID, &version.Size, &version.LastModified, &version.ETag, &version.ContentType, &metadataStr, &version.IsDeleteMarker)
 	if err == sql.ErrNoRows {
 		return nil, nil

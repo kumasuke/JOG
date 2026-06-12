@@ -6,17 +6,46 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"gopkg.in/yaml.v3"
 )
 
+// Duration wraps time.Duration so YAML/string values like "1h" parse via
+// time.ParseDuration. yaml.v3 would otherwise reject the non-integer form.
+type Duration time.Duration
+
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return err
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+	*d = Duration(parsed)
+	return nil
+}
+
+// Std returns the underlying time.Duration.
+func (d Duration) Std() time.Duration { return time.Duration(d) }
+
+// LifecycleConfig holds settings for the lifecycle execution engine.
+type LifecycleConfig struct {
+	Enabled            bool     `yaml:"enabled"`
+	Interval           Duration `yaml:"interval"`
+	MaxActionsPerCycle int      `yaml:"max_actions_per_cycle"`
+}
+
 // Config holds the server configuration.
 type Config struct {
-	Server  ServerConfig  `yaml:"server"`
-	Storage StorageConfig `yaml:"storage"`
-	Auth    AuthConfig    `yaml:"auth"`
-	Logging LoggingConfig `yaml:"logging"`
+	Server    ServerConfig    `yaml:"server"`
+	Storage   StorageConfig   `yaml:"storage"`
+	Auth      AuthConfig      `yaml:"auth"`
+	Logging   LoggingConfig   `yaml:"logging"`
+	Lifecycle LifecycleConfig `yaml:"lifecycle"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -61,6 +90,11 @@ func DefaultConfig() *Config {
 		Logging: LoggingConfig{
 			Level:  "info",
 			Format: "json",
+		},
+		Lifecycle: LifecycleConfig{
+			Enabled:            true,
+			Interval:           Duration(time.Hour),
+			MaxActionsPerCycle: 10000,
 		},
 	}
 }
@@ -137,6 +171,15 @@ func applyEnv(cfg *Config) error {
 	envString("JOG_AUTH_SECRET_KEY", &cfg.Auth.SecretKey)
 	envString("JOG_LOGGING_LEVEL", &cfg.Logging.Level)
 	envString("JOG_LOGGING_FORMAT", &cfg.Logging.Format)
+	if err := envBool("JOG_LIFECYCLE_ENABLED", &cfg.Lifecycle.Enabled); err != nil {
+		return err
+	}
+	if err := envDuration("JOG_LIFECYCLE_INTERVAL", &cfg.Lifecycle.Interval); err != nil {
+		return err
+	}
+	if err := envInt("JOG_LIFECYCLE_MAX_ACTIONS", &cfg.Lifecycle.MaxActionsPerCycle); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -159,5 +202,31 @@ func envInt(key string, dst *int) error {
 		return fmt.Errorf("invalid value for %s=%q: %w", key, v, err)
 	}
 	*dst = n
+	return nil
+}
+
+func envBool(key string, dst *bool) error {
+	v := os.Getenv(key)
+	if v == "" {
+		return nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fmt.Errorf("invalid value for %s=%q: %w", key, v, err)
+	}
+	*dst = b
+	return nil
+}
+
+func envDuration(key string, dst *Duration) error {
+	v := os.Getenv(key)
+	if v == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fmt.Errorf("invalid value for %s=%q: %w", key, v, err)
+	}
+	*dst = Duration(d)
 	return nil
 }

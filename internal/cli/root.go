@@ -22,6 +22,7 @@ func NewRootCmd() *cobra.Command {
 
 	rootCmd.AddCommand(NewServerCmd())
 	rootCmd.AddCommand(NewVersionCmd())
+	rootCmd.AddCommand(NewLifecycleCmd())
 
 	return rootCmd
 }

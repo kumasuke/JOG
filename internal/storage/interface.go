@@ -576,6 +576,104 @@ type Storage interface {
 	PutBucketNotification(ctx context.Context, bucket string, config *NotificationConfiguration) error
 	GetBucketNotification(ctx context.Context, bucket string) (*NotificationConfiguration, error)
 
+	// --- Lifecycle engine support ---
+
+	// ListLifecycleObjectKeys returns object keys in a bucket using keyset
+	// pagination. Keys come from the DISTINCT union of the objects and
+	// object_versions tables so pre-versioning objects (which have no version
+	// rows) are not missed. Results are sorted ascending and only include keys
+	// strictly greater than afterKey.
+	ListLifecycleObjectKeys(ctx context.Context, bucket, afterKey string, limit int) ([]string, error)
+
+	// GetObjectVersionsForKey returns every version of a single key ordered by
+	// (last_modified DESC, version_id DESC) so element 0 is the deterministic
+	// latest (current) version.
+	GetObjectVersionsForKey(ctx context.Context, bucket, key string) ([]ObjectVersion, error)
+
+	// ExpireObjectVersionGuarded physically deletes a single noncurrent object
+	// version inside a real BEGIN IMMEDIATE transaction. It re-checks legal
+	// hold / retention (fail-closed, GOVERNANCE is never bypassed) and the
+	// requested state guards before deleting the version + lock/acl/tag rows;
+	// the version file is unlinked only after commit. Guard failures and busy
+	// locks are reported via ExpireOutcome, not as errors.
+	ExpireObjectVersionGuarded(ctx context.Context, bucket, key, versionID string, guards ExpireGuards, now time.Time) (ExpireOutcome, error)
+
+	// CreateExpirationDeleteMarker creates an S3-style expiration delete marker
+	// over the current version of a key (Enabled buckets). Inside a BEGIN
+	// IMMEDIATE transaction it CAS-verifies that the latest version is still
+	// expectedCurrentVersionID and not already a delete marker, inserts the
+	// marker row, removes the current pointer, and unlinks the current file
+	// after commit. Pre-versioning objects are snapshotted to the null version
+	// first (pass expectedCurrentVersionID == ""). No data is destroyed, so
+	// retention / legal hold do not block marker creation (S3-compliant).
+	CreateExpirationDeleteMarker(ctx context.Context, bucket, key, expectedCurrentVersionID string) (markerVersionID string, outcome ExpireOutcome, err error)
+
+	// ExpireCurrentObjectGuarded physically deletes the current object of a
+	// non-versioned bucket inside a BEGIN IMMEDIATE transaction. It re-checks
+	// the null-version lock rows (fail-closed) and verifies objects.last_modified
+	// still equals expectedLastModified before deleting; the file is unlinked
+	// only after commit.
+	ExpireCurrentObjectGuarded(ctx context.Context, bucket, key string, expectedLastModified time.Time, now time.Time) (ExpireOutcome, error)
+
+	// RecordLifecycleRun persists a per-bucket summary of the last lifecycle
+	// cycle for observability (best-effort; failures must not abort a cycle).
+	RecordLifecycleRun(ctx context.Context, bucket string, lastRunAt time.Time, actions, skippedLocked, errs int) error
+
+	// LifecycleOrphanGC removes files left behind by interrupted operations:
+	// version files under .versions/<key>/ with no object_versions row,
+	// .uploads/<uploadID> directories with no multipart_uploads row, and
+	// .tmp-* scratch files inside those trees — each only when its mtime is
+	// strictly older than cutoff. Current object files are never touched.
+	// Returns the number of files scanned and removed.
+	LifecycleOrphanGC(ctx context.Context, cutoff time.Time) (scanned int, removed int, err error)
+
 	// Close releases storage resources.
 	Close() error
+}
+
+// ExpireGuards selects the transactional state guards applied by
+// ExpireObjectVersionGuarded in addition to the always-on lock guard.
+type ExpireGuards struct {
+	// RequireNoncurrent fails the delete (SkippedStateChanged) unless a newer
+	// version exists for the key — i.e. the target is still noncurrent and has
+	// not been promoted to current by a concurrent latest-version delete.
+	RequireNoncurrent bool
+	// RequireAllVersionsAreDeleteMarkers fails the delete unless every version
+	// of the key is a delete marker (the EODM precondition). Guards against
+	// resurrecting a real version by removing the marker that hides it.
+	RequireAllVersionsAreDeleteMarkers bool
+}
+
+// ExpireOutcome reports the result of a guarded lifecycle deletion.
+type ExpireOutcome int
+
+const (
+	// ExpireExpired means the version/object was deleted.
+	ExpireExpired ExpireOutcome = iota
+	// ExpireSkippedLocked means an active retention or legal hold blocked it.
+	ExpireSkippedLocked
+	// ExpireSkippedStateChanged means a concurrent change invalidated the plan.
+	ExpireSkippedStateChanged
+	// ExpireSkippedBusy means the write lock could not be acquired (fail-closed).
+	ExpireSkippedBusy
+	// ExpireNotFound means the target row no longer exists (idempotent no-op).
+	ExpireNotFound
+)
+
+// String renders an ExpireOutcome for logs and reports.
+func (o ExpireOutcome) String() string {
+	switch o {
+	case ExpireExpired:
+		return "Expired"
+	case ExpireSkippedLocked:
+		return "SkippedLocked"
+	case ExpireSkippedStateChanged:
+		return "SkippedStateChanged"
+	case ExpireSkippedBusy:
+		return "SkippedBusy"
+	case ExpireNotFound:
+		return "NotFound"
+	default:
+		return "Unknown"
+	}
 }

@@ -4,9 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 // chdirTemp moves into an isolated working directory so Load() does not
@@ -280,6 +282,58 @@ func TestLoadFromFile_MalformedYAML_ReturnsError(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("server: : :\n"), 0o644))
 
 	_, err := LoadFromFile(path)
+	require.Error(t, err)
+}
+
+// ----- LifecycleConfig tests -----
+
+func TestDefaultConfig_LifecycleDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	assert.True(t, cfg.Lifecycle.Enabled)
+	assert.Equal(t, Duration(time.Hour), cfg.Lifecycle.Interval)
+	assert.Equal(t, 10000, cfg.Lifecycle.MaxActionsPerCycle)
+}
+
+func TestLifecycleConfig_YAMLUnmarshal(t *testing.T) {
+	raw := []byte(`
+lifecycle:
+  enabled: false
+  interval: 30m
+  max_actions_per_cycle: 500
+`)
+	cfg := DefaultConfig()
+	require.NoError(t, yaml.Unmarshal(raw, cfg))
+	assert.False(t, cfg.Lifecycle.Enabled)
+	assert.Equal(t, Duration(30*time.Minute), cfg.Lifecycle.Interval)
+	assert.Equal(t, 500, cfg.Lifecycle.MaxActionsPerCycle)
+}
+
+func TestLifecycleConfig_EnvOverlay(t *testing.T) {
+	chdirTemp(t)
+	t.Setenv("JOG_LIFECYCLE_ENABLED", "false")
+	t.Setenv("JOG_LIFECYCLE_INTERVAL", "2h")
+	t.Setenv("JOG_LIFECYCLE_MAX_ACTIONS", "50")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.Lifecycle.Enabled)
+	assert.Equal(t, Duration(2*time.Hour), cfg.Lifecycle.Interval)
+	assert.Equal(t, 50, cfg.Lifecycle.MaxActionsPerCycle)
+}
+
+func TestLifecycleConfig_InvalidDurationEnv_ReturnsError(t *testing.T) {
+	chdirTemp(t)
+	t.Setenv("JOG_LIFECYCLE_INTERVAL", "not-a-duration")
+
+	_, err := Load()
+	require.Error(t, err)
+}
+
+func TestLifecycleConfig_InvalidBoolEnv_ReturnsError(t *testing.T) {
+	chdirTemp(t)
+	t.Setenv("JOG_LIFECYCLE_ENABLED", "not-a-bool")
+
+	_, err := Load()
 	require.Error(t, err)
 }
 

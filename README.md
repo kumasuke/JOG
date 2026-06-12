@@ -100,6 +100,25 @@ Environment variables:
 - `JOG_AUTH_SECRET_KEY` - Secret key (default: minioadmin)
 - `JOG_LOGGING_LEVEL` - Log level (default: info)
 - `JOG_LOGGING_FORMAT` - Log format: json or console (default: json)
+- `JOG_LIFECYCLE_ENABLED` - Run the lifecycle engine (default: true)
+- `JOG_LIFECYCLE_INTERVAL` - Lifecycle cycle interval, Go duration (default: 1h)
+- `JOG_LIFECYCLE_MAX_ACTIONS` - Max actions per cycle (default: 10000)
+
+### Lifecycle engine
+
+JOG executes bucket lifecycle rules with a background engine (in-server ticker,
+first run ~1 minute after startup). You can also drive it manually:
+
+```bash
+# Preview what a cycle would do without changing anything
+jog lifecycle run --dry-run
+
+# Run one cycle (optionally scoped to a single bucket)
+jog lifecycle run --bucket my-bucket
+```
+
+Versions under COMPLIANCE/GOVERNANCE retention or legal hold are never deleted
+(fail-closed). Set `JOG_LIFECYCLE_ENABLED=false` to disable the engine.
 
 ### Docker Compose
 

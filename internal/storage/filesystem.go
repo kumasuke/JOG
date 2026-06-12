@@ -8,19 +8,33 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
 
+// keyLockStripes bounds the per-(bucket,key) lock table. Striping means two
+// distinct keys may share a mutex (harmless over-serialization); 1024 stripes
+// keeps real same-key contention negligible.
+const keyLockStripes = 1024
+
 // FileSystem implements Storage using local file system.
 type FileSystem struct {
 	dataDir  string
 	metadata *Metadata
+	// keyMu serializes the current-file write of PutObject/PutObjectVersioned
+	// against the lifecycle engine's current-file unlink for the same key, so a
+	// guarded expiration cannot delete a file a concurrent successful PUT just
+	// wrote (a TOCTOU that could lose data on non-versioned buckets). Locks are
+	// always acquired before the DB transaction (keyMu -> SQLite), never the
+	// reverse, so there is no deadlock with withImmediateTx.
+	keyMu []sync.Mutex
 }
 
 // NewFileSystem creates a new file system storage backend.
@@ -39,7 +53,21 @@ func NewFileSystem(dataDir string, metadataDB string) (*FileSystem, error) {
 	return &FileSystem{
 		dataDir:  dataDir,
 		metadata: metadata,
+		keyMu:    make([]sync.Mutex, keyLockStripes),
 	}, nil
+}
+
+// lockKey acquires the stripe mutex for (bucket, key) and returns its unlock
+// function for use with defer. Hold it around the section that writes/removes
+// the current object file plus the matching metadata write.
+func (fs *FileSystem) lockKey(bucket, key string) func() {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(bucket))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(key))
+	mu := &fs.keyMu[h.Sum32()%keyLockStripes]
+	mu.Lock()
+	return mu.Unlock
 }
 
 // CreateBucket creates a new bucket.
@@ -157,6 +185,12 @@ func (fs *FileSystem) PutObject(ctx context.Context, bucket, key string, body io
 
 	// Calculate ETag
 	etag := hex.EncodeToString(hash.Sum(nil))
+
+	// From here we publish the current file + metadata. Serialize this against
+	// the lifecycle engine's current-file unlink for this key so an expiration
+	// cannot remove the file we are about to make live (the slow body copy
+	// above stays outside the lock).
+	defer fs.lockKey(bucket, key)()
 
 	// Rename temp file to final path
 	if err := os.Rename(tmpPath, objectPath); err != nil {
@@ -1723,6 +1757,11 @@ func (fs *FileSystem) PutObjectVersioned(ctx context.Context, bucket, key string
 	}
 
 	now := time.Now()
+
+	// Publish this version (version row + current pointer + current-file copy).
+	// Serialize against the lifecycle engine's current-file unlink for this key
+	// (codex P1); the body copy above stays outside the lock.
+	defer fs.lockKey(bucket, key)()
 
 	// Save version metadata
 	version := &ObjectVersion{

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/kumasuke/jog/internal/objectlock"
 	"github.com/kumasuke/jog/internal/storage"
 )
 
@@ -34,48 +35,12 @@ import (
 // behaviour was a fail-open silent bypass — a transient DB outage would
 // have let destructive operations through against locked objects.
 func (h *Handler) evaluateObjectLock(ctx context.Context, bucket, key, versionID string, bypassGovernance bool) *S3Error {
-	cfg, err := h.storage.GetObjectLockConfiguration(ctx, bucket)
+	v, err := objectlock.EvaluateDeletable(ctx, h.storage, bucket, key, versionID, bypassGovernance, time.Now())
 	if err != nil {
-		// Treat "no configuration on this bucket" as allow; everything
-		// else (DB I/O failure, schema corruption, …) as deny.
-		if errors.Is(err, storage.ErrBucketNotFound) ||
-			errors.Is(err, storage.ErrNoSuchObjectLockConfiguration) ||
-			errors.Is(err, storage.ErrObjectLockConfigurationNotFound) {
-			return nil
-		}
 		return ErrAccessDenied
 	}
-	if cfg == nil || !cfg.ObjectLockEnabled {
-		return nil
-	}
-
-	legalHold, err := h.storage.GetObjectLegalHold(ctx, bucket, key, versionID)
-	if err == nil && legalHold != nil && legalHold.Status == storage.ObjectLegalHoldStatusOn {
+	if !v.Deletable {
 		return ErrAccessDenied
-	} else if err != nil && !errors.Is(err, storage.ErrNoSuchObjectLockConfiguration) && !errors.Is(err, storage.ErrObjectNotFound) {
-		return ErrAccessDenied
-	}
-
-	retention, err := h.storage.GetObjectRetention(ctx, bucket, key, versionID)
-	if err != nil {
-		if errors.Is(err, storage.ErrNoSuchObjectLockConfiguration) || errors.Is(err, storage.ErrObjectNotFound) {
-			return nil
-		}
-		return ErrAccessDenied
-	}
-	if retention == nil || retention.RetainUntilDate == nil {
-		return nil
-	}
-	if !retention.RetainUntilDate.After(time.Now()) {
-		return nil
-	}
-	switch retention.Mode {
-	case storage.ObjectLockRetentionModeCompliance:
-		return ErrAccessDenied
-	case storage.ObjectLockRetentionModeGovernance:
-		if !bypassGovernance {
-			return ErrAccessDenied
-		}
 	}
 	return nil
 }
