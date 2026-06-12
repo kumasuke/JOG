@@ -69,7 +69,16 @@ cd benchmark
 - 結果は `benchmark/results/` に出力される。
 - **再掲の注意**: これは一般的な S3 スループット比較であり、ライフサイクルエンジンの性能・競合影響は測定できない。
 
-<!-- RESULTS:WARP -->
+実測（Apple M2 / OrbStack、`warp mixed` 1KiB・8並列・20s、JOG 9200 vs MinIO 9300、JOG はエンジン有効・走行中は未発火）:
+
+| サーバー | 集計スループット | GET | PUT | エラー |
+|---|---|---|---|---|
+| **JOG** | **6,252 obj/s (3.66 MiB/s)** | 2,813 obj/s | 937 obj/s | 0 |
+| MinIO | 5,718 obj/s (3.35 MiB/s) | 2,574 obj/s | 857 obj/s | 0 |
+
+小オブジェクト mixed では JOG が MinIO を約 9% 上回った（WAL 有効化が書き込み並行性に寄与）。20s 走行中はライフサイクルエンジンが発火しないため、**エンジン有効時もリクエストスループットに影響しない**ことを確認。
+
+> 補足: `run-all.sh both mixed` は全サービス（rclone/versitygw 含む）を起動するが、ベンチ compose の `rclone/rclone:1.72.1` タグが現在 manifest 不在で `up` が失敗する（本エンジンとは無関係の既存設定の陳腐化）。JOG/MinIO だけを比較するなら `docker compose -f docker-compose.benchmark.yml up -d jog minio` で 2 サービスのみ起動して `./bin/warp mixed ...` を各ホストに対して実行する。
 
 ---
 
