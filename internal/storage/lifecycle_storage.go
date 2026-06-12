@@ -158,6 +158,11 @@ func (fs *FileSystem) ExpireObjectVersionGuarded(ctx context.Context, bucket, ke
 // current version (design §1-D, §4.4). Data is never destroyed, so retention /
 // legal hold do not block it.
 func (fs *FileSystem) CreateExpirationDeleteMarker(ctx context.Context, bucket, key, expectedCurrentVersionID string) (string, ExpireOutcome, error) {
+	// Serialize the whole CAS + current-file unlink against a concurrent PUT to
+	// the same key, so we never unlink a current file a successful PUT just
+	// published (codex P1). Lock is taken before the DB tx (keyMu -> SQLite).
+	defer fs.lockKey(bucket, key)()
+
 	// Snapshot a pre-versioning current object into the null version first.
 	// Idempotent no-op once any version row exists for the key.
 	if err := fs.snapshotNullVersionIfNeeded(ctx, bucket, key); err != nil {
@@ -212,6 +217,12 @@ func (fs *FileSystem) CreateExpirationDeleteMarker(ctx context.Context, bucket, 
 // ExpireCurrentObjectGuarded physically deletes the current object of a
 // non-versioned bucket under the null-version lock guard + a last_modified CAS.
 func (fs *FileSystem) ExpireCurrentObjectGuarded(ctx context.Context, bucket, key string, expectedLastModified, now time.Time) (ExpireOutcome, error) {
+	// Serialize the CAS + current-file unlink against a concurrent PUT to the
+	// same key so we never unlink a file a successful PUT just wrote. On a
+	// non-versioned bucket that file is the only copy, so this prevents data
+	// loss (codex P1). Lock order is keyMu -> SQLite (no deadlock).
+	defer fs.lockKey(bucket, key)()
+
 	nowUTC := now.UTC()
 	expLM := expectedLastModified.UTC()
 	outcome := ExpireNotFound

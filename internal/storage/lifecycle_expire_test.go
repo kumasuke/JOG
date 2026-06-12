@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -445,6 +446,53 @@ func TestExpireGuarded_ConcurrentRetentionVsExpire(t *testing.T) {
 			}
 		default:
 			t.Fatalf("iter %d: unexpected outcome %v", i, outcome)
+		}
+	}
+}
+
+// TestExpireCurrent_NoRaceWithConcurrentPut is the regression for the codex P1
+// data-loss race: a guarded current-object expiration must not unlink the file a
+// concurrent successful PUT to the same key just published. The per-key lock
+// serializes the two, so the end state is always consistent — never an objects
+// row whose current file is missing (which on a non-versioned bucket would be
+// silent data loss). Run with -race to also catch shared-state races.
+func TestExpireCurrent_NoRaceWithConcurrentPut(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+
+	for i := 0; i < 100; i++ {
+		fs := newTestFileSystem(t)
+		if err := fs.CreateBucket(ctx, "b"); err != nil {
+			t.Fatalf("CreateBucket: %v", err)
+		}
+		if _, err := fs.PutObject(ctx, "b", "k", bytes.NewReader([]byte("old")), 3, "text/plain", nil); err != nil {
+			t.Fatalf("seed PutObject: %v", err)
+		}
+		obj, err := fs.metadata.GetObject(ctx, "b", "k")
+		if err != nil || obj == nil {
+			t.Fatalf("seed GetObject: %v", err)
+		}
+		expLM := obj.LastModified
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = fs.PutObject(ctx, "b", "k", bytes.NewReader([]byte("brand-new")), 9, "text/plain", nil)
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = fs.ExpireCurrentObjectGuarded(ctx, "b", "k", expLM, now)
+		}()
+		wg.Wait()
+
+		// Invariant: if the objects row exists, GetObject can read the file
+		// (no "row present, file missing"). A clean expiry yields NotFound.
+		data, err := fs.GetObject(ctx, "b", "k")
+		if err == nil {
+			data.Body.Close()
+		} else if !errors.Is(err, ErrObjectNotFound) {
+			t.Fatalf("iter %d: GetObject = %v; objects row without its current file (data-loss race)", i, err)
 		}
 	}
 }
