@@ -170,16 +170,31 @@ func TestNoncurrentExpiryCandidates(t *testing.T) {
 		}
 	})
 
-	t.Run("filter-scopes-and-protects-only-matching", func(t *testing.T) {
-		// Only odd-numbered versions are in scope. keep=1 protects the newest
-		// matching (v3); the next matching (v1) is eligible. v2/v4 (out of
-		// scope) are never deleted regardless of age.
+	t.Run("filter-selects-candidates-keep-counts-all", func(t *testing.T) {
+		// keep=1 protects the newest real noncurrent version (v4) regardless of
+		// filter. Beyond the keep window, only filter-matching versions are
+		// deletion candidates: v3 and v1 match and are eligible; v2 is out of
+		// scope and is never deleted. (S3: NewerNoncurrentVersions counts ALL
+		// newer noncurrent versions, not just matching ones.)
 		match := func(v storage.ObjectVersion) bool {
 			return v.VersionID == "v1" || v.VersionID == "v3"
 		}
 		got := noncurrentExpiryCandidates(vs, 1, 1, now, match)
-		if len(got) != 1 || got[0] != "v1" {
-			t.Fatalf("got %v, want [v1] (v3 protected, v2/v4 out of scope)", got)
+		if len(got) != 2 || got[0] != "v3" || got[1] != "v1" {
+			t.Fatalf("got %v, want [v3 v1] (v4 protected by keep, v2 out of scope)", got)
+		}
+	})
+
+	t.Run("keep-counts-nonmatching-versions", func(t *testing.T) {
+		// keep=1, but the newest noncurrent (v4) does NOT match the filter; it
+		// still occupies the single keep slot, so the next matching version (v3)
+		// is eligible — it already has a newer noncurrent version (v4).
+		match := func(v storage.ObjectVersion) bool { return v.VersionID != "v4" }
+		got := noncurrentExpiryCandidates(vs, 1, 1, now, match)
+		// v4 protected (keep), v3/v2/v1 match and are eligible.
+		want := map[string]bool{"v3": true, "v2": true, "v1": true}
+		if len(got) != 3 || !want[got[0]] || !want[got[1]] || !want[got[2]] {
+			t.Fatalf("got %v, want v3,v2,v1 (v4 fills the keep slot despite not matching)", got)
 		}
 	})
 }

@@ -164,31 +164,35 @@ func noncurrentRule(rules []storage.LifecycleRule, key string) (storage.Lifecycl
 // marker versions eligible for NoncurrentVersionExpiration. vs MUST be ordered
 // (last_modified DESC, version_id DESC) so vs[0] is the current version.
 //
-// `match` reports whether a version is in scope of the rule filter (prefix /
-// size / tag). Only matching versions are considered: the newest `keep`
-// matching versions are protected by NewerNoncurrentVersions, and the rest
-// become eligible once NoncurrentDays have elapsed since they became noncurrent
-// (the last_modified of the immediately newer version, matching or not). A nil
-// match treats every version as in scope.
+// NewerNoncurrentVersions (keep) counts ALL real (non-delete-marker) noncurrent
+// versions of the key, not just filter-matching ones — that is the S3 contract:
+// a version is eligible only once more than `keep` newer noncurrent versions
+// exist, regardless of the rule filter. The newest `keep` real noncurrent
+// versions are therefore always protected. The `match` predicate (prefix /
+// size / tag) is applied only to SELECT deletion candidates among the versions
+// beyond the keep window, so an out-of-scope version is never deleted but still
+// occupies a keep slot. A nil match treats every version as in scope.
+// Eligibility additionally requires NoncurrentDays elapsed since the version
+// became noncurrent (the last_modified of the immediately newer version).
 func noncurrentExpiryCandidates(vs []storage.ObjectVersion, keep int, noncurrentDays int32, now time.Time, match func(storage.ObjectVersion) bool) []string {
 	if keep < 0 {
 		keep = 0
 	}
 	var out []string
-	matchedSeen := 0
+	realRank := 0 // rank among all real noncurrent versions (newest = 0)
 	for i := 1; i < len(vs); i++ {
 		v := vs[i]
 		if v.IsDeleteMarker {
 			continue // delete markers are handled by the EODM path, never NCVE
 		}
+		protected := realRank < keep
+		realRank++
+		if protected {
+			continue // among the newest `keep` noncurrent versions
+		}
 		if match != nil && !match(v) {
-			continue // filtered out — never delete an out-of-scope version
+			continue // beyond keep but out of filter scope — never delete
 		}
-		if matchedSeen < keep {
-			matchedSeen++
-			continue // protected by NewerNoncurrentVersions
-		}
-		matchedSeen++
 		noncurrentSince := vs[i-1].LastModified // immediately newer version
 		if eligibleByDays(now, noncurrentSince, noncurrentDays) {
 			out = append(out, v.VersionID)

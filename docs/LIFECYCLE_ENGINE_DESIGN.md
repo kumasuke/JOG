@@ -413,7 +413,8 @@ objectlock_test.go（26 関数）・versioning_test.go（9 関数）・internal/
 
 PR #51 の codex レビュー結果。最上位制約（Object Lock fail-closed）・`withImmediateTx` の排他性・トランザクション原子性・CAS ガード・孤立ファイル GC には指摘なし。
 
-- **[P1] NCVE が Tag/Size フィルタを無視 → 修正済み**: `noncurrentRule` は prefix のみ判定していたため、Tag/Size 付きルールで非該当の noncurrent バージョンまで削除しうる過剰削除バグだった。`noncurrentExpiryCandidates` に match 述語を追加し、エンジン側で各 noncurrent バージョンに対し size + バージョン別タグでフィルタを評価してから削除するよう修正。`NewerNoncurrentVersions` の保護件数もフィルタ一致バージョンに対して数える。ユニット（filter-scopes-and-protects-only-matching）+ E2E（タグ付与前後の挙動）で固定。
+- **[P1] NCVE が Tag/Size フィルタを無視 → 修正済み**: `noncurrentRule` は prefix のみ判定していたため、Tag/Size 付きルールで非該当の noncurrent バージョンまで削除しうる過剰削除バグだった。`noncurrentExpiryCandidates` に match 述語を追加し、エンジン側で各 noncurrent バージョンに対し size + バージョン別タグでフィルタを評価してから削除するよう修正。E2E（タグ付与前後の挙動）で固定。
+- **[P2/2巡目] `NewerNoncurrentVersions` の保護件数は全実非現行版で数える → 修正済み**: 上記 P1 修正時に保持件数カウンタを「フィルタ一致版のみ」で進めてしまっていたが、S3 仕様では保持件数は**フィルタに関係なく全ての新しい非DM非現行版**を数える（一致版の削除可否は「自分より新しい非現行版が keep を超えるか」で決まる）。フィルタは削除候補の選別のみに使い、保持カウンタは全実非現行版で進めるよう修正（非該当版は keep スロットを占有するが削除はされない＝P1 は維持）。Object Lock 保護とは無関係（ストレージ層ガードが担保）。`keep-counts-nonmatching-versions` 等で固定。
 - **[P1] `NewerNoncurrentVersions` 単独で `NoncurrentDays` なし → 意図的挙動として維持**: S3 仕様上 `NewerNoncurrentVersions` 単独でも超過分は失効対象。本実装は `days=0`（翌日 0:00 丸めにより約 1 日の猶予あり）で S3 準拠。`NoncurrentDays`・`NewerNoncurrentVersions` の双方が無いルールのみ skip（不完全ルール）。
 - **[P2] 複数 AIMU / NCVE ルール → v1 既知の制限（過少削除＝安全側）**: 同一キー/アップロードに複数ルールが重なる場合、現状は prefix 一致の最初のルールのみ適用（マージしない）。安全側に倒れるため v1 では許容し、複数ルールマージは別 Issue 候補。`noncurrentRule` / `abortMPURule` のコメントに明記。
 
