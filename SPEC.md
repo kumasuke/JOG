@@ -149,7 +149,14 @@ jog/
 │   ├── storage/              # ストレージ抽象化
 │   │   ├── interface.go
 │   │   ├── filesystem.go
-│   │   └── metadata.go
+│   │   ├── metadata.go
+│   │   └── lifecycle_storage.go  # ライフサイクル用ガード付き削除 primitive
+│   ├── objectlock/           # Object Lock 評価ロジック (HTTP非依存・共用)
+│   │   └── evaluate.go
+│   ├── lifecycle/            # ライフサイクル実行エンジン
+│   │   ├── engine.go
+│   │   ├── evaluate.go
+│   │   └── actions.go
 │   └── config/               # 設定管理
 │       └── config.go
 ├── pkg/                      # 公開パッケージ (将来用)
@@ -212,6 +219,11 @@ auth:
 logging:
   level: "info"
   format: "json"
+
+lifecycle:
+  enabled: true              # ライフサイクル実行エンジン (JOG_LIFECYCLE_ENABLED)
+  interval: 1h               # 実行周期 (JOG_LIFECYCLE_INTERVAL, Go duration)
+  max_actions_per_cycle: 10000  # 1サイクルの最大アクション数 (JOG_LIFECYCLE_MAX_ACTIONS)
 ```
 
 ## 使用例

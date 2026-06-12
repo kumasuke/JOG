@@ -416,3 +416,14 @@ PR #51 の codex レビュー結果。最上位制約（Object Lock fail-closed�
 - **[P1] NCVE が Tag/Size フィルタを無視 → 修正済み**: `noncurrentRule` は prefix のみ判定していたため、Tag/Size 付きルールで非該当の noncurrent バージョンまで削除しうる過剰削除バグだった。`noncurrentExpiryCandidates` に match 述語を追加し、エンジン側で各 noncurrent バージョンに対し size + バージョン別タグでフィルタを評価してから削除するよう修正。`NewerNoncurrentVersions` の保護件数もフィルタ一致バージョンに対して数える。ユニット（filter-scopes-and-protects-only-matching）+ E2E（タグ付与前後の挙動）で固定。
 - **[P1] `NewerNoncurrentVersions` 単独で `NoncurrentDays` なし → 意図的挙動として維持**: S3 仕様上 `NewerNoncurrentVersions` 単独でも超過分は失効対象。本実装は `days=0`（翌日 0:00 丸めにより約 1 日の猶予あり）で S3 準拠。`NoncurrentDays`・`NewerNoncurrentVersions` の双方が無いルールのみ skip（不完全ルール）。
 - **[P2] 複数 AIMU / NCVE ルール → v1 既知の制限（過少削除＝安全側）**: 同一キー/アップロードに複数ルールが重なる場合、現状は prefix 一致の最初のルールのみ適用（マージしない）。安全側に倒れるため v1 では許容し、複数ルールマージは別 Issue 候補。`noncurrentRule` / `abortMPURule` のコメントに明記。
+
+---
+
+## 9. ベンチマークと WAL/busy_timeout 修正（実装後調査）
+
+PR #51 の性能影響を in-process Go ベンチで測定（Apple M2）。
+
+- ガード付き削除 `ExpireObjectVersionGuarded`（455µs/op）は既存の非ガード削除 `DeleteObjectVersioned`（505µs/op）より高速。`withImmediateTx` の固定オーバーヘッドは約 8µs/op。エンジンのアイドル時オーバーヘッドは ticker のみ（ほぼゼロ）。性能リグレッションなし。
+- `RunOnce` のスキャンは 2000 キー（4000 バージョン行・該当なし）で約 167ms（≒83µs/キー）。毎時実行の定常コスト。
+- **重大な既存バグを発見・修正**: SQLite DSN の `_journal_mode=WAL` / `_busy_timeout=5000` が modernc では無視されており（実測 `journal_mode=delete`・`busy_timeout=0`）、本設計が前提とする「WAL snapshot isolation」「busy_timeout が競合を吸収」がいずれも成立していなかった。`_pragma=journal_mode(WAL)` / `_pragma=busy_timeout(5000)` に修正。エンジン用コネクションは `withImmediateTx` 内で busy_timeout(100ms) に絞り、競合時に速やかに skip（fail-closed）を維持。修正後のベンチでエンジン競合下の Put が 22.8ms→4.3ms、BUSY リトライ 13.5/op→0/op に改善。Litestream（WAL 必須）も実際に機能するようになった。
+- **残課題（別 Issue 候補）**: スキャン時、タグフィルタを持つルールが無くても current オブジェクトのタグを毎回取得しており、大規模バケットでスキャンコストが約2倍になる。ルールがタグを使う時だけ取得する最適化が可能。

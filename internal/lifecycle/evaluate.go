@@ -90,6 +90,18 @@ func hasTag(tags []storage.Tag, k, v string) bool {
 	return false
 }
 
+// expirationRulesUseTags reports whether any enabled rule filters an Expiration
+// on an object tag. When false, the scan can skip the per-object tag fetch used
+// for current-object Expiration matching (a measurable cost on large buckets).
+func expirationRulesUseTags(rules []storage.LifecycleRule) bool {
+	for _, r := range rules {
+		if r.Expiration != nil && r.Filter != nil && r.Filter.Tag != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // currentExpirationRule returns the first enabled rule whose Expiration applies
 // to a current object (filter matches and Days/Date has elapsed). The returned
 // rule's Expiration is guaranteed non-nil. ok is false when no rule applies.

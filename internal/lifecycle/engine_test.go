@@ -168,6 +168,41 @@ func TestEngine_NoncurrentExpirationRespectsTagFilter(t *testing.T) {
 	}
 }
 
+// TestEngine_ExpirationRespectsTagFilter exercises the needTags=true scan path:
+// an Expiration rule with a tag filter must only act on objects carrying the
+// tag (the tag-fetch optimization must not break correctness).
+func TestEngine_ExpirationRespectsTagFilter(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Add(100 * 24 * time.Hour)
+	st, eng := newEngineFixture(t, false, now)
+	enabledBucket(t, st, "b")
+
+	tagged := putV(t, st, "b", "tagged", "x")
+	if err := st.PutObjectTagging(ctx, "b", "tagged", tagged, []storage.Tag{{Key: "expire", Value: "yes"}}); err != nil {
+		t.Fatalf("PutObjectTagging: %v", err)
+	}
+	putV(t, st, "b", "untagged", "y")
+
+	setLifecycle(t, st, "b", storage.LifecycleRule{
+		ID:         "exp-tagged",
+		Status:     "Enabled",
+		Filter:     &storage.LifecycleRuleFilter{Tag: &storage.Tag{Key: "expire", Value: "yes"}},
+		Expiration: &storage.LifecycleExpiration{Days: i32(1)},
+	})
+
+	if _, err := eng.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Tagged object: hidden by a delete marker.
+	if obj, _ := st.HeadObject(ctx, "b", "tagged"); obj != nil {
+		t.Error("tagged object should have received an expiration delete marker")
+	}
+	// Untagged object: untouched.
+	if obj, _ := st.HeadObject(ctx, "b", "untagged"); obj == nil {
+		t.Error("untagged object must not be expired by a tag-filtered rule")
+	}
+}
+
 func TestEngine_DryRunHasNoSideEffects(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Add(100 * 24 * time.Hour)

@@ -28,7 +28,15 @@ func NewMetadata(dbPath string) (*Metadata, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_pragma=foreign_keys(1)")
+	// NOTE: modernc.org/sqlite only honors the `_pragma=name(value)` query form.
+	// The previous DSN used the mattn/go-sqlite3 spellings `_journal_mode=WAL`
+	// and `_busy_timeout=5000`, which modernc silently ignored — leaving the DB
+	// in rollback-journal mode with no busy timeout (so any write contention
+	// failed immediately with SQLITE_BUSY). WAL is also required by the
+	// Litestream deployment (docs/DEPLOYMENT.md) and by the lifecycle engine's
+	// concurrency design.
+	dsn := fmt.Sprintf("%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(%d)&_pragma=foreign_keys(1)", dbPath, defaultBusyTimeoutMS)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -47,6 +55,18 @@ func NewMetadata(dbPath string) (*Metadata, error) {
 // fail-closed skip ("re-evaluate next cycle"), never as "proceed without the
 // guard".
 var ErrBusy = errors.New("database is busy")
+
+const (
+	// defaultBusyTimeoutMS is the connection busy timeout applied to every
+	// pooled connection via the DSN. Request-path writes wait this long for a
+	// momentarily-held write lock instead of failing fast with SQLITE_BUSY.
+	defaultBusyTimeoutMS = 5000
+	// engineBusyTimeoutMS is the shorter busy timeout used only inside
+	// withImmediateTx, so the background lifecycle engine skips a contended
+	// version quickly (fail-closed) rather than blocking a whole cycle behind
+	// request-path writes.
+	engineBusyTimeoutMS = 100
+)
 
 // isSQLiteBusy reports whether err is (or wraps) a SQLITE_BUSY result code.
 // Extended busy codes (BUSY_SNAPSHOT, BUSY_RECOVERY, BUSY_TIMEOUT) all share
@@ -86,6 +106,18 @@ func (m *Metadata) withImmediateTx(ctx context.Context, fn func(conn *sql.Conn) 
 		return err
 	}
 	defer conn.Close()
+
+	// Shorten busy_timeout for the duration of this guarded operation so a
+	// contended BEGIN IMMEDIATE returns ErrBusy quickly (engine skips, fail-
+	// closed) instead of blocking the cycle. Restore the pool default before
+	// the connection is reused by a request-path write, which wants the full
+	// timeout. busy_timeout is per-connection and is NOT reset by the pool.
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", engineBusyTimeoutMS)); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout=%d", defaultBusyTimeoutMS))
+	}()
 
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return wrapBusy(err)

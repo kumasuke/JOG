@@ -70,7 +70,8 @@ type Engine struct {
 	now     func() time.Time
 	log     zerolog.Logger
 
-	actions int // per-cycle action counter (reset at the start of RunOnce)
+	actions  int  // per-cycle action counter (reset at the start of RunOnce)
+	needTags bool // per-bucket: do any Expiration rules use a tag filter?
 }
 
 // NewEngine constructs an engine. now may be nil (defaults to time.Now); tests
@@ -229,6 +230,12 @@ func (e *Engine) RunOnce(ctx context.Context) (Report, error) {
 }
 
 func (e *Engine) processBucket(ctx context.Context, bucket string, versioning storage.VersioningStatus, rules []storage.LifecycleRule, now time.Time, br *BucketReport) error {
+	// Only fetch current-object tags during the scan when an Expiration rule
+	// actually filters on a tag — otherwise the per-object tag query doubles the
+	// scan cost for nothing (NCVE tag filters are handled separately per
+	// version in versionMatchesFilter).
+	e.needTags = expirationRulesUseTags(rules)
+
 	if err := e.runAIMU(ctx, bucket, rules, now, br); err != nil {
 		return err
 	}
@@ -338,7 +345,7 @@ func (e *Engine) scanNonVersioned(ctx context.Context, bucket string, rules []st
 				continue
 			}
 			br.Evaluated++
-			tags := e.objectTags(ctx, bucket, key, "")
+			tags := e.currentTags(ctx, bucket, key, "")
 			if _, ok := currentExpirationRule(rules, now, obj.LastModified, key, obj.Size, tags); !ok {
 				continue
 			}
@@ -440,14 +447,22 @@ func (e *Engine) currentExpiryContext(ctx context.Context, bucket, key string, v
 		if vs[0].IsDeleteMarker {
 			return time.Time{}, 0, "", nil, false
 		}
-		return vs[0].LastModified, vs[0].Size, vs[0].VersionID, e.objectTags(ctx, bucket, key, vs[0].VersionID), true
+		return vs[0].LastModified, vs[0].Size, vs[0].VersionID, e.currentTags(ctx, bucket, key, vs[0].VersionID), true
 	}
 	// Pre-versioning object: only an objects row exists.
 	obj, err := e.storage.HeadObject(ctx, bucket, key)
 	if err != nil || obj == nil {
 		return time.Time{}, 0, "", nil, false
 	}
-	return obj.LastModified, obj.Size, "", e.objectTags(ctx, bucket, key, ""), true
+	return obj.LastModified, obj.Size, "", e.currentTags(ctx, bucket, key, ""), true
+}
+
+// currentTags fetches an object's tags only when an Expiration rule needs them.
+func (e *Engine) currentTags(ctx context.Context, bucket, key, versionID string) []storage.Tag {
+	if !e.needTags {
+		return nil
+	}
+	return e.objectTags(ctx, bucket, key, versionID)
 }
 
 func (e *Engine) maybeExpireCurrentDM(ctx context.Context, bucket string, rules []storage.LifecycleRule, key string, vs []storage.ObjectVersion, now time.Time, br *BucketReport) error {

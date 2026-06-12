@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `GetLatestObjectVersion`: 同一 `last_modified` の複数バージョンで latest 判定が非決定的になる問題を `version_id DESC` タイブレークで修正（current を noncurrent と誤判定して消しすぎる経路を防ぐ）。
+- **SQLite DSN の WAL / busy_timeout が無効だった問題を修正**: 接続文字列が mattn/go-sqlite3 形式の `_journal_mode=WAL` / `_busy_timeout=5000` を使っており、modernc.org/sqlite ではこれらが黙って無視されていた（実測で `journal_mode=delete`・`busy_timeout=0`）。正しい `_pragma=journal_mode(WAL)` / `_pragma=busy_timeout(5000)` 形式に修正。これにより (1) 読み取りが書き込みをブロックしなくなり並行性が改善、(2) 書き込み競合が即 `SQLITE_BUSY` 失敗せず待機するようになり、(3) `docs/DEPLOYMENT.md` の Litestream レプリケーション（WAL 必須）が実際に機能する。ライフサイクルエンジンの `withImmediateTx` はエンジン用コネクションにのみ短い busy_timeout(100ms) を設定し、競合時に速やかに skip（fail-closed）する挙動を維持。ベンチ実測でエンジン競合下の Put レイテンシ悪化が約4.6倍→約1.13倍に改善（BUSY リトライ 13.5/op → 0/op）。
 
 ### 互換性
 
