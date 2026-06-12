@@ -30,17 +30,20 @@
 ```bash
 cd benchmark   # 以降パスは worktree ルート基準でも可
 
+# 0. イメージを明示タグでビルド（リポジトリルートで一度だけ）
+docker build -t jog:local .
+
 # 1. データ投入（20万キー × 2版 → 20万 noncurrent が削除対象）
 HOST_DATA=/tmp/jog-soak
 rm -rf "$HOST_DATA"; mkdir -p "$HOST_DATA"; chmod 777 "$HOST_DATA"
 go run ./benchmark/soak/seed --data-dir "$HOST_DATA" --keys 200000 --versions 2 --age-days 10 --noncurrent-days 1
 
-# 2. 短周期・有界アクションで JOG を起動（イメージは docker compose build 済みのものを使用）
+# 2. 短周期・有界アクションで JOG を起動
 docker run -d --name jog-soak -p 9000:9000 \
   -v "$HOST_DATA":/data \
   -e JOG_AUTH_ACCESS_KEY=minioadmin -e JOG_AUTH_SECRET_KEY=minioadmin \
   -e JOG_LIFECYCLE_INTERVAL=30s -e JOG_LIFECYCLE_MAX_ACTIONS=2000 \
-  rustling-puzzling-naur-jog
+  jog:local
 # 初回サイクルは起動約1分後。30s 間隔・2000件/サイクル → 20万件を約100サイクル(≈50分)で処理
 
 # 3. 並行リクエスト負荷（別ターミナル）。エンジンと書き込みの競合を作る
@@ -99,7 +102,7 @@ docker run -d --name jog-soak24 -p 9000:9000 \
   -e JOG_AUTH_ACCESS_KEY=minioadmin -e JOG_AUTH_SECRET_KEY=minioadmin \
   -e JOG_LIFECYCLE_INTERVAL=60s -e JOG_LIFECYCLE_MAX_ACTIONS=1000 \
   --restart=no \
-  rustling-puzzling-naur-jog
+  jog:local   # docker build -t jog:local . で作成（前提0参照）
 
 # 負荷（バックグラウンド or 別セッション、24h）
 nohup ./benchmark/bin/warp mixed --host=localhost:9000 \
