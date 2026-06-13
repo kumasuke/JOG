@@ -682,6 +682,14 @@ func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request) {
 					errInfos = append(errInfos, DeleteObjectsError{Key: obj.Key, Code: "InvalidArgument", Message: "Invalid object key"})
 					continue
 				}
+				if errors.Is(err, storage.ErrBusy) {
+					// DeleteObjectVersioned routes through the engine's
+					// fail-fast transaction (short busy_timeout), so ErrBusy is a
+					// routine contention outcome. Surface the retryable SlowDown
+					// per key instead of the non-canonical InternalError (#54).
+					errInfos = append(errInfos, DeleteObjectsError{Key: obj.Key, Code: ErrSlowDown.Code, Message: ErrSlowDown.Message})
+					continue
+				}
 				errInfos = append(errInfos, DeleteObjectsError{Key: obj.Key, Code: "InternalError", Message: "Internal error"})
 				continue
 			}
@@ -701,6 +709,14 @@ func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request) {
 		if err := h.storage.DeleteObject(r.Context(), bucket, obj.Key); err != nil {
 			if errors.Is(err, storage.ErrInvalidKey) {
 				errInfos = append(errInfos, DeleteObjectsError{Key: obj.Key, Code: "InvalidArgument", Message: "Invalid object key"})
+				continue
+			}
+			if errors.Is(err, storage.ErrBusy) {
+				// DeleteObject routes through the engine's fail-fast transaction
+				// (short busy_timeout), so ErrBusy is a routine contention
+				// outcome. Surface the retryable SlowDown per key instead of the
+				// non-canonical InternalError (#54).
+				errInfos = append(errInfos, DeleteObjectsError{Key: obj.Key, Code: ErrSlowDown.Code, Message: ErrSlowDown.Message})
 				continue
 			}
 			// S3 reports success even if the object did not exist; only a true

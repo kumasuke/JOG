@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"encoding/xml"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/kumasuke/jog/internal/storage"
@@ -33,6 +35,26 @@ func (s *deleteBusyStorage) DeleteObjectVersioned(ctx context.Context, bucket, k
 	return "", false, storage.ErrBusy
 }
 
+// HeadBucket lets the batch DeleteObjects up-front bucket-existence check pass
+// so the per-entry delete loop is the path under test. The handler discards
+// the returned *storage.Bucket (it only inspects the error), so nil is fine.
+func (s *deleteBusyStorage) HeadBucket(ctx context.Context, bucket string) (*storage.Bucket, error) {
+	return nil, nil
+}
+
+// parseDeleteResult unmarshals a DeleteObjects (POST ?delete) response body.
+// Unlike single-object deletes, the batch endpoint replies HTTP 200 with a
+// <DeleteResult> envelope whose per-key failures are nested <Error> elements,
+// so the top-level parseS3ErrorCode helper does not apply here.
+func parseDeleteResult(t *testing.T, body string) DeleteResult {
+	t.Helper()
+	var result DeleteResult
+	if err := xml.Unmarshal([]byte(body), &result); err != nil {
+		t.Fatalf("failed to parse DeleteResult XML: %v\nbody: %s", err, body)
+	}
+	return result
+}
+
 // TestDeleteObject_BusyMapsToSlowDown covers finding (1): the non-versioned
 // DeleteObject path must not swallow storage.ErrBusy as a phantom 204 success.
 func TestDeleteObject_BusyMapsToSlowDown(t *testing.T) {
@@ -51,6 +73,68 @@ func TestDeleteObject_BusyMapsToSlowDown(t *testing.T) {
 	code := parseS3ErrorCode(t, rr.Body.String())
 	if code != "SlowDown" {
 		t.Fatalf("error code = %q, want %q", code, "SlowDown")
+	}
+}
+
+// newDeleteObjectsRequest builds a POST /{bucket}?delete request for a single
+// key (no VersionId) with the bucket/key routing context the handler reads.
+func newDeleteObjectsRequest(bucket, key string) *http.Request {
+	body := "<Delete><Object><Key>" + key + "</Key></Object></Delete>"
+	req := httptest.NewRequest(http.MethodPost, "/"+bucket+"?delete", strings.NewReader(body))
+	return setContext(req, bucket, "")
+}
+
+// TestDeleteObjectsBatch_NonVersioned_BusyMapsToSlowDown covers finding (2) for
+// the batch DeleteObjects non-versioned branch (object.go:709). DeleteObject
+// now routes through the engine's fail-fast transaction, so storage.ErrBusy is
+// a routine contention outcome and must surface as the retryable per-key
+// SlowDown code, not the non-canonical InternalError.
+func TestDeleteObjectsBatch_NonVersioned_BusyMapsToSlowDown(t *testing.T) {
+	store := &deleteBusyStorage{versioning: storage.VersioningStatusDisabled}
+	h := &Handler{storage: store}
+
+	rr := httptest.NewRecorder()
+	h.DeleteObjects(rr, newDeleteObjectsRequest("test-bucket", "test-key"))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	result := parseDeleteResult(t, rr.Body.String())
+	if len(result.Deleted) != 0 {
+		t.Fatalf("Deleted = %v, want empty (busy key must not report phantom success)", result.Deleted)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("Errors length = %d, want 1; body: %s", len(result.Errors), rr.Body.String())
+	}
+	if result.Errors[0].Code != ErrSlowDown.Code {
+		t.Fatalf("error code = %q, want %q", result.Errors[0].Code, ErrSlowDown.Code)
+	}
+}
+
+// TestDeleteObjectsBatch_Versioned_BusyMapsToSlowDown covers finding (1) for
+// the batch DeleteObjects versioned branch (object.go:685). An unspecified
+// versionId on a versioning-Enabled bucket is the delete-marker-creation path,
+// which skips lock evaluation and reaches DeleteObjectVersioned directly; its
+// storage.ErrBusy must map to the retryable per-key SlowDown code.
+func TestDeleteObjectsBatch_Versioned_BusyMapsToSlowDown(t *testing.T) {
+	store := &deleteBusyStorage{versioning: storage.VersioningStatusEnabled}
+	h := &Handler{storage: store}
+
+	rr := httptest.NewRecorder()
+	h.DeleteObjects(rr, newDeleteObjectsRequest("test-bucket", "test-key"))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	result := parseDeleteResult(t, rr.Body.String())
+	if len(result.Deleted) != 0 {
+		t.Fatalf("Deleted = %v, want empty (busy key must not report phantom success)", result.Deleted)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("Errors length = %d, want 1; body: %s", len(result.Errors), rr.Body.String())
+	}
+	if result.Errors[0].Code != ErrSlowDown.Code {
+		t.Fatalf("error code = %q, want %q", result.Errors[0].Code, ErrSlowDown.Code)
 	}
 }
 
