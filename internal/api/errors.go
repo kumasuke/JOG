@@ -93,6 +93,12 @@ var (
 		HTTPStatus: http.StatusBadRequest,
 	}
 
+	ErrLifecycleEODMWithDaysOrDate = &S3Error{
+		Code:       "InvalidRequest",
+		Message:    "'Date' and 'Days' and 'ExpiredObjectDeleteMarker' cannot be used in combination",
+		HTTPStatus: http.StatusBadRequest,
+	}
+
 	ErrMethodNotAllowed = &S3Error{
 		Code:       "MethodNotAllowed",
 		Message:    "The specified method is not allowed against this resource.",

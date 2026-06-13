@@ -3,6 +3,7 @@ package s3compat
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -351,4 +352,114 @@ func TestPutBucketLifecycleConfigurationWithAbortIncompleteMultipartUpload(t *te
 	rule := result.Rules[0]
 	assert.NotNil(t, rule.AbortIncompleteMultipartUpload)
 	assert.Equal(t, int32(7), *rule.AbortIncompleteMultipartUpload.DaysAfterInitiation)
+}
+
+// TestPutBucketLifecycleConfigurationEODMWithDaysRejected verifies that S3
+// rejects a rule combining Expiration.ExpiredObjectDeleteMarker with
+// Expiration.Days (InvalidRequest, HTTP 400). See Issue #55.
+func TestPutBucketLifecycleConfigurationEODMWithDaysRejected(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	_, err := client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+		Bucket: aws.String(bucketName),
+		LifecycleConfiguration: &types.BucketLifecycleConfiguration{
+			Rules: []types.LifecycleRule{
+				{
+					ID:     aws.String("eodm-with-days"),
+					Status: types.ExpirationStatusEnabled,
+					Filter: &types.LifecycleRuleFilter{
+						Prefix: aws.String(""),
+					},
+					Expiration: &types.LifecycleExpiration{
+						Days:                      aws.Int32(30),
+						ExpiredObjectDeleteMarker: aws.Bool(true),
+					},
+				},
+			},
+		},
+	})
+	require.Error(t, err)
+	var apiErr smithy.APIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "InvalidRequest", apiErr.ErrorCode())
+}
+
+// TestPutBucketLifecycleConfigurationEODMWithDateRejected verifies that S3
+// rejects a rule combining Expiration.ExpiredObjectDeleteMarker with
+// Expiration.Date (InvalidRequest, HTTP 400). See Issue #55.
+func TestPutBucketLifecycleConfigurationEODMWithDateRejected(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	_, err := client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+		Bucket: aws.String(bucketName),
+		LifecycleConfiguration: &types.BucketLifecycleConfiguration{
+			Rules: []types.LifecycleRule{
+				{
+					ID:     aws.String("eodm-with-date"),
+					Status: types.ExpirationStatusEnabled,
+					Filter: &types.LifecycleRuleFilter{
+						Prefix: aws.String(""),
+					},
+					Expiration: &types.LifecycleExpiration{
+						Date:                      aws.Time(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)),
+						ExpiredObjectDeleteMarker: aws.Bool(true),
+					},
+				},
+			},
+		},
+	})
+	require.Error(t, err)
+	var apiErr smithy.APIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "InvalidRequest", apiErr.ErrorCode())
+}
+
+// TestPutBucketLifecycleConfigurationEODMOnlyAccepted verifies that a rule
+// specifying only Expiration.ExpiredObjectDeleteMarker (without Days/Date) is
+// still accepted, ensuring the validation is not overly broad. See Issue #55.
+func TestPutBucketLifecycleConfigurationEODMOnlyAccepted(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	_, err := client.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+		Bucket: aws.String(bucketName),
+		LifecycleConfiguration: &types.BucketLifecycleConfiguration{
+			Rules: []types.LifecycleRule{
+				{
+					ID:     aws.String("eodm-only"),
+					Status: types.ExpirationStatusEnabled,
+					Filter: &types.LifecycleRuleFilter{
+						Prefix: aws.String(""),
+					},
+					Expiration: &types.LifecycleExpiration{
+						ExpiredObjectDeleteMarker: aws.Bool(true),
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
 }

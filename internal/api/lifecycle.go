@@ -75,6 +75,24 @@ type AbortIncompleteMultipartUpload struct {
 	DaysAfterInitiation *int32 `xml:"DaysAfterInitiation,omitempty"`
 }
 
+// validateLifecycleConfiguration checks the lifecycle configuration for
+// combinations that S3 rejects. It returns an *S3Error (InvalidRequest, HTTP
+// 400) on the first violation, or nil if the configuration is acceptable.
+func validateLifecycleConfiguration(config *BucketLifecycleConfiguration) *S3Error {
+	for _, rule := range config.Rules {
+		exp := rule.Expiration
+		if exp == nil {
+			continue
+		}
+		// S3 forbids combining ExpiredObjectDeleteMarker with Days or Date
+		// within the same Expiration element.
+		if exp.ExpiredObjectDeleteMarker != nil && (exp.Days != nil || exp.Date != nil) {
+			return ErrLifecycleEODMWithDaysOrDate
+		}
+	}
+	return nil
+}
+
 // PutBucketLifecycleConfiguration handles PUT /{bucket}?lifecycle - PutBucketLifecycleConfiguration.
 func (h *Handler) PutBucketLifecycleConfiguration(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
@@ -94,6 +112,13 @@ func (h *Handler) PutBucketLifecycleConfiguration(w http.ResponseWriter, r *http
 	var lifecycleConfig BucketLifecycleConfiguration
 	if err := xml.Unmarshal(body, &lifecycleConfig); err != nil {
 		WriteErrorWithResource(w, ErrMalformedXML, "/"+bucket)
+		return
+	}
+
+	// Validate the configuration before persisting. S3 rejects certain
+	// combinations with InvalidRequest (HTTP 400).
+	if err := validateLifecycleConfiguration(&lifecycleConfig); err != nil {
+		WriteErrorWithResource(w, err, "/"+bucket)
 		return
 	}
 
