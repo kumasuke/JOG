@@ -525,6 +525,22 @@ func deleteLockACLTagRowsTx(ctx context.Context, conn *sql.Conn, bucket, key, ve
 	return nil
 }
 
+// deleteACLTagRowsTx removes only the acl/tag rows for a version inside the
+// current transaction (mirrors DeleteObjectACLTagRows on the pinned conn).
+// Used by the non-versioned user delete path (issue #54), which historically
+// cleared acl/tag rows only.
+func deleteACLTagRowsTx(ctx context.Context, conn *sql.Conn, bucket, key, versionID string) error {
+	for _, q := range []string{
+		`DELETE FROM object_acls WHERE bucket = ? AND key = ? AND version_id = ?`,
+		`DELETE FROM object_tags WHERE bucket = ? AND key = ? AND version_id = ?`,
+	} {
+		if _, err := conn.ExecContext(ctx, q, bucket, key, versionID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // guardVersion is the minimal projection needed for the in-transaction state
 // guards.
 type guardVersion struct {
