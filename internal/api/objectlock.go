@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/xml"
 	"errors"
-	"io"
 	"net/http"
 	"time"
 
@@ -49,16 +48,11 @@ type ObjectLockLegalHold struct {
 // PutObjectLockConfiguration handles PUT /{bucket}?object-lock - PutObjectLockConfiguration.
 func (h *Handler) PutObjectLockConfiguration(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
-	limitBody(w, r, MaxObjectLockBodySize)
 
-	// Parse request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if isBodyTooLarge(err) {
-			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
-			return
-		}
-		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket)
+	// Parse request body (size-capped; see readXMLBody / MaxObjectLockBodySize).
+	body, s3err := readXMLBody(w, r, MaxObjectLockBodySize)
+	if s3err != nil {
+		WriteErrorWithResource(w, s3err, "/"+bucket)
 		return
 	}
 
@@ -84,7 +78,7 @@ func (h *Handler) PutObjectLockConfiguration(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Store object lock configuration
-	err = h.storage.PutObjectLockConfiguration(r.Context(), bucket, storageConfig)
+	err := h.storage.PutObjectLockConfiguration(r.Context(), bucket, storageConfig)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
@@ -151,16 +145,11 @@ func (h *Handler) GetObjectLockConfiguration(w http.ResponseWriter, r *http.Requ
 func (h *Handler) PutObjectRetention(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
-	limitBody(w, r, MaxObjectLockBodySize)
 
-	// Parse request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if isBodyTooLarge(err) {
-			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket+"/"+key)
-			return
-		}
-		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket+"/"+key)
+	// Parse request body (size-capped; see readXMLBody / MaxObjectLockBodySize).
+	body, s3err := readXMLBody(w, r, MaxObjectLockBodySize)
+	if s3err != nil {
+		WriteErrorWithResource(w, s3err, "/"+bucket+"/"+key)
 		return
 	}
 
@@ -196,7 +185,7 @@ func (h *Handler) PutObjectRetention(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store object retention
-	err = h.storage.PutObjectRetention(r.Context(), bucket, key, versionID, storageRetention)
+	err := h.storage.PutObjectRetention(r.Context(), bucket, key, versionID, storageRetention)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket+"/"+key)
@@ -266,16 +255,11 @@ func (h *Handler) GetObjectRetention(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) PutObjectLegalHold(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
-	limitBody(w, r, MaxObjectLockBodySize)
 
-	// Parse request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if isBodyTooLarge(err) {
-			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket+"/"+key)
-			return
-		}
-		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket+"/"+key)
+	// Parse request body (size-capped; see readXMLBody / MaxObjectLockBodySize).
+	body, s3err := readXMLBody(w, r, MaxObjectLockBodySize)
+	if s3err != nil {
+		WriteErrorWithResource(w, s3err, "/"+bucket+"/"+key)
 		return
 	}
 
@@ -297,7 +281,7 @@ func (h *Handler) PutObjectLegalHold(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store object legal hold
-	err = h.storage.PutObjectLegalHold(r.Context(), bucket, key, versionID, storageLegalHold)
+	err := h.storage.PutObjectLegalHold(r.Context(), bucket, key, versionID, storageLegalHold)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket+"/"+key)

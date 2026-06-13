@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/xml"
 	"errors"
-	"io"
 	"net/http"
 
 	"github.com/kumasuke/jog/internal/storage"
@@ -32,16 +31,11 @@ type ServerSideEncryptionByDefault struct {
 // PutBucketEncryption handles PUT /{bucket}?encryption - PutBucketEncryption.
 func (h *Handler) PutBucketEncryption(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
-	limitBody(w, r, MaxEncryptionBodySize)
 
-	// Parse request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if isBodyTooLarge(err) {
-			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
-			return
-		}
-		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket)
+	// Parse request body (size-capped; see readXMLBody / MaxEncryptionBodySize).
+	body, s3err := readXMLBody(w, r, MaxEncryptionBodySize)
+	if s3err != nil {
+		WriteErrorWithResource(w, s3err, "/"+bucket)
 		return
 	}
 
@@ -72,7 +66,7 @@ func (h *Handler) PutBucketEncryption(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store encryption configuration
-	err = h.storage.PutBucketEncryption(r.Context(), bucket, storageConfig)
+	err := h.storage.PutBucketEncryption(r.Context(), bucket, storageConfig)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)

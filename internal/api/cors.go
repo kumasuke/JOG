@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/xml"
 	"errors"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -32,16 +31,11 @@ type CORSRule struct {
 // PutBucketCors handles PUT /{bucket}?cors - PutBucketCors.
 func (h *Handler) PutBucketCors(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
-	limitBody(w, r, MaxCORSBodySize)
 
-	// Parse request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if isBodyTooLarge(err) {
-			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
-			return
-		}
-		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket)
+	// Parse request body (size-capped; see readXMLBody / MaxCORSBodySize).
+	body, s3err := readXMLBody(w, r, MaxCORSBodySize)
+	if s3err != nil {
+		WriteErrorWithResource(w, s3err, "/"+bucket)
 		return
 	}
 
@@ -68,7 +62,7 @@ func (h *Handler) PutBucketCors(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store CORS configuration
-	err = h.storage.PutBucketCors(r.Context(), bucket, storageCors)
+	err := h.storage.PutBucketCors(r.Context(), bucket, storageCors)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
