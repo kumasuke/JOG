@@ -105,6 +105,19 @@ var (
 		HTTPStatus: http.StatusInternalServerError,
 	}
 
+	// ErrSlowDown is the S3-canonical "server is busy, retry with backoff"
+	// response (503). The synchronous delete paths route through the storage
+	// engine's fail-fast transaction (BEGIN IMMEDIATE with a short
+	// busy_timeout), which surfaces storage.ErrBusy under write contention or a
+	// COMMIT-time WAL snapshot conflict. Mapping that to SlowDown lets the
+	// client (e.g. AWS SDK Go v2's default retryer) retry instead of being told
+	// the delete succeeded (204) or failed permanently (500).
+	ErrSlowDown = &S3Error{
+		Code:       "SlowDown",
+		Message:    "Please reduce your request rate.",
+		HTTPStatus: http.StatusServiceUnavailable,
+	}
+
 	ErrInvalidRange = &S3Error{
 		Code:       "InvalidRange",
 		Message:    "The requested range is not satisfiable.",
