@@ -238,6 +238,71 @@ func TestObjectLockMigration_LegacyToV2(t *testing.T) {
 	}
 }
 
+// TestObjectLockMigration_IdempotentReopen verifies that re-opening an
+// already-migrated DB is a no-op: the user_version gate short-circuits the
+// migration, the renamed v2 tables are not migrated a second time, and the
+// migrated rows survive untouched. This guards the withImmediateTx-based
+// migration (issue #57) against accidentally re-running on a current-gen DB.
+func TestObjectLockMigration_IdempotentReopen(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/metadata.db"
+	openLegacyDB(t, dbPath)
+
+	// First open performs the legacy -> v2 migration.
+	m1, err := NewMetadata(dbPath)
+	if err != nil {
+		t.Fatalf("NewMetadata (first open): %v", err)
+	}
+	if err := m1.Close(); err != nil {
+		t.Fatalf("close first metadata: %v", err)
+	}
+
+	// Second open must be idempotent: the dispatcher sees a current-generation
+	// user_version and runs no migration.
+	m2, err := NewMetadata(dbPath)
+	if err != nil {
+		t.Fatalf("NewMetadata (reopen): %v", err)
+	}
+	defer m2.Close()
+
+	var uv int
+	if err := m2.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&uv); err != nil {
+		t.Fatalf("read user_version after reopen: %v", err)
+	}
+	if uv != aclTagsSchemaVersion {
+		t.Errorf("user_version after reopen = %d, want %d", uv, aclTagsSchemaVersion)
+	}
+
+	// Migrated rows must still be readable and unchanged after the no-op reopen.
+	mode, until, err := m2.GetObjectRetention(ctx, "b", "gov-key", "ver-1")
+	if err != nil {
+		t.Fatalf("GetObjectRetention after reopen: %v", err)
+	}
+	if mode != "GOVERNANCE" || until == nil {
+		t.Errorf("gov-key retention lost after idempotent reopen: mode=%q until=%v", mode, until)
+	}
+	status, err := m2.GetObjectLegalHold(ctx, "b", "hold-key", "")
+	if err != nil {
+		t.Fatalf("GetObjectLegalHold after reopen: %v", err)
+	}
+	if status != "ON" {
+		t.Errorf("hold-key legal hold lost after idempotent reopen: status=%q", status)
+	}
+
+	// The reopen must NOT create a second-generation legacy table (e.g.
+	// object_retention_legacy_v1_legacy_v1), which would prove the migration
+	// re-ran against the already-promoted tables.
+	var doubleMigrated int
+	if err := m2.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE '%legacy_v1_legacy_v1'`).
+		Scan(&doubleMigrated); err != nil {
+		t.Fatalf("inspect for double-migrated tables: %v", err)
+	}
+	if doubleMigrated != 0 {
+		t.Errorf("idempotent reopen re-ran the migration: %d double-migrated tables present", doubleMigrated)
+	}
+}
+
 // TestObjectLockMigration_FailsOnInvalidLegacyMode verifies the migration is
 // fail-closed: a legacy retention row with an invalid mode aborts startup
 // rather than silently dropping data.
