@@ -286,19 +286,17 @@ func (m *Middleware) canonicalQueryString(r *http.Request) string {
 
 	var parts []string
 	for _, k := range keys {
-		// AWS SigV4 sorts multi-value parameters by their percent-encoded
-		// representation, so encode each value first and sort the encoded
-		// forms. Sorting the decoded values (as before) diverges whenever
-		// encoding changes the byte order (e.g. "@" -> "%40" sorts before
-		// "."). See issue #65.
-		encKey := uriEncode(k)
-		encValues := make([]string, 0, len(query[k]))
-		for _, v := range query[k] {
-			encValues = append(encValues, uriEncode(v))
-		}
-		sort.Strings(encValues)
-		for _, encV := range encValues {
-			parts = append(parts, encKey+"="+encV)
+		// aws-sdk-go-v2 (aws/signer/v4/v4.go) sorts multi-value parameters
+		// with sort.Strings(query[key]) — on the raw (decoded) values —
+		// and then percent-encodes them via query.Encode(). JOG must follow
+		// the same order so the canonical query strings match. issue #65
+		// initially proposed encoding first and sorting the encoded forms,
+		// but that diverges from the SDK whenever encoding changes the sort
+		// order (e.g. "." < "@" in raw, but "." > "%40" in encoded).
+		values := query[k]
+		sort.Strings(values)
+		for _, v := range values {
+			parts = append(parts, uriEncode(k)+"="+uriEncode(v))
 		}
 	}
 

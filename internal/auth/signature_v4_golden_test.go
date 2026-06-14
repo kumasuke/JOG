@@ -119,29 +119,25 @@ func TestSigV4Golden(t *testing.T) {
 	}
 }
 
-// TestSigV4CanonicalQuery_MultiValueSort pins the AWS rule that, when a single
-// query key carries multiple values, the values are sorted by their
-// PERCENT-ENCODED representation (not by their decoded form).
+// TestSigV4CanonicalQuery_MultiValueSort pins the correct multi-value sort
+// order for the JOG canonical query string: values are sorted by their raw
+// (decoded) form, matching the behaviour of aws-sdk-go-v2.
 //
-// Source of the expected value: this is the AWS-documented canonicalization
-// rule ("the query string values must be sorted by their URI-encoded value"),
-// applied by hand below — NOT a signature produced by this implementation, and
-// NOT a tautological re-signing of crafted input. No signature is asserted for
-// this case; only the canonical query ordering is checked, which is exactly the
-// behaviour issue #65 targets.
+// Background (issue #65 regression): the initial fix for #65 sorted by
+// percent-encoded representation. While one reading of the AWS SigV4
+// specification ("the query string values must be sorted by their URI-encoded
+// value") supports that interpretation, aws-sdk-go-v2 v1.32.8 implements the
+// opposite: it calls sort.Strings(query[key]) on the decoded values and only
+// encodes them afterwards (aws/signer/v4/v4.go:153). JOG must agree with the
+// SDK or it will reject valid SDK-signed requests with 403.
 //
-// Why this specific input: the AWS test-suite's own multi-value vector
-// (get-vanilla-query-order-value, Param1=value1/value2) cannot detect the bug,
-// because "value1"/"value2" are unreserved and encode to themselves, so a
-// decoded sort and an encoded sort yield the identical string. To force the two
-// sort orders apart we need a value that percent-encodes to a byte that sorts
-// BEFORE an unreserved byte: every "%XX" escape begins with '%' (0x25), which is
-// below all unreserved bytes (>= 0x2D). Using values "@" and ".":
-//   - decoded sort: '.'(0x2E) < '@'(0x40)            => ".", "@"
-//   - encoded sort: "%40"(0x25...) < "."(0x2E)       => "@", "."   <- AWS-correct
+// Using values "@" and "." to detect the divergence:
 //
-// So the AWS-correct canonical query is "Param1=%40&Param1=." while the old
-// decoded-sort implementation emits "Param1=.&Param1=%40".
+//	raw-value sort:    '.'(0x2E) < '@'(0x40)   => ".", "@"   <- SDK order
+//	encoded sort:      "%40"     < "."(0x2E)   => "@", "."   <- PR #66 order (wrong)
+//
+// The SDK-correct canonical query is therefore "Param1=.&Param1=%40".
+// See also TestSigV4RoundTrip_MultiValueSort for the end-to-end verification.
 func TestSigV4CanonicalQuery_MultiValueSort(t *testing.T) {
 	m := NewMiddleware("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY")
 
@@ -149,9 +145,10 @@ func TestSigV4CanonicalQuery_MultiValueSort(t *testing.T) {
 	// pass by accident of insertion order.
 	req := httptest.NewRequest(http.MethodGet, "/?Param1=@&Param1=.", nil)
 
-	const want = "Param1=%40&Param1=."
+	// Raw-value sort: '.'(0x2E) < '@'(0x40), so "." comes first.
+	const want = "Param1=.&Param1=%40"
 	got := m.canonicalQueryString(req)
 	if got != want {
-		t.Fatalf("multi-value canonical query mismatch\n got: %q\nwant: %q\n(values must be sorted by percent-encoded representation, per AWS SigV4)", got, want)
+		t.Fatalf("multi-value canonical query mismatch\n got: %q\nwant: %q\n(values must be sorted by raw/decoded value to match aws-sdk-go-v2)", got, want)
 	}
 }
