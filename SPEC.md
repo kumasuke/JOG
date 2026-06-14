@@ -74,6 +74,7 @@ JOG (Just Object Gateway) は、Go言語で実装されたS3互換のオブジ�
 #### 2.5 バケット通知
 - [x] PutBucketNotificationConfiguration
 - [x] GetBucketNotificationConfiguration
+- [x] 通知イベント配信 (Webhook / HTTP POST) — ライフサイクル削除で `s3:LifecycleExpiration:Delete` / `s3:LifecycleExpiration:DeleteMarkerCreated` を発行（#56）
 - [ ] 通知イベント配信 (SNS/SQS/Lambda/EventBridge)
 
 ### Phase 3: 運用機能
@@ -206,6 +207,10 @@ jog/
 | `JOG_LIFECYCLE_ENABLED` | ライフサイクル実行エンジンの有効化 | `true` |
 | `JOG_LIFECYCLE_INTERVAL` | 実行周期 (Go duration) | `1h` |
 | `JOG_LIFECYCLE_MAX_ACTIONS` | 1サイクルの最大アクション数 | `10000` |
+| `JOG_NOTIFICATION_REGION` | 通知イベントの `awsRegion` に刻む値 | `us-east-1` |
+| `JOG_NOTIFICATION_DELIVERY_TIMEOUT` | Webhook 1 配信のタイムアウト (Go duration) | `10s` |
+
+> 通知の配信先（ARN → Webhook URL のマッピング）は環境変数では設定できず、`config.yaml` の `notification.targets` でのみ指定する。
 
 ### 設定ファイル (config.yaml)
 
@@ -230,6 +235,14 @@ lifecycle:
   enabled: true              # ライフサイクル実行エンジン (JOG_LIFECYCLE_ENABLED)
   interval: 1h               # 実行周期 (JOG_LIFECYCLE_INTERVAL, Go duration)
   max_actions_per_cycle: 10000  # 1サイクルの最大アクション数 (JOG_LIFECYCLE_MAX_ACTIONS)
+
+notification:
+  region: "us-east-1"        # 通知イベントの awsRegion (JOG_NOTIFICATION_REGION)
+  delivery_timeout: 10s      # Webhook 1 配信のタイムアウト (JOG_NOTIFICATION_DELIVERY_TIMEOUT)
+  # targets はバケット通知設定の ARN を実際の Webhook URL に対応付ける。
+  # 1 つ以上設定されたときだけライフサイクル期限切れ通知が有効になる。
+  targets:
+    "arn:aws:sns:us-east-1:123456789012:lifecycle-events": "https://example.com/webhook"
 ```
 
 ## 使用例

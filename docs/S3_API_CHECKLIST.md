@@ -121,6 +121,13 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 | GetBucketNotificationConfiguration | [x] | Get notification configuration |
 | PutBucketNotificationConfiguration | [x] | Set notification configuration |
 
+Event delivery (beyond the configuration API above):
+
+| Event delivery | Status | Description |
+|----------------|--------|-------------|
+| Webhook (HTTP POST) | [x] | Lifecycle expiration events `s3:LifecycleExpiration:Delete` / `:DeleteMarkerCreated` (#56) |
+| SNS / SQS / Lambda / EventBridge | [ ] | Not yet implemented |
+
 ### Replication
 
 | Operation | Status | Description |
