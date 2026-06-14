@@ -16,6 +16,7 @@ const (
 	MaxEncryptionBodySize    int64 = 16 * 1024       // 16 KiB
 	MaxObjectLockBodySize    int64 = 16 * 1024       // 16 KiB
 	MaxNotificationBodySize  int64 = 64 * 1024       // 64 KiB
+	MaxSelectRequestBodySize int64 = 256 * 1024      // 256 KiB (SelectObjectContent SQL request)
 	MaxWebsiteBodySize       int64 = 16 * 1024       // 16 KiB
 	MaxMultipartCompleteSize int64 = 1 * 1024 * 1024 // 1 MiB (10001 parts * ~100 B)
 	MaxDeleteObjectsSize     int64 = 2 * 1024 * 1024 // 2 MiB (1000 keys * ~2 KB)

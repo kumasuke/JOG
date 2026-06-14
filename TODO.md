@@ -154,7 +154,7 @@ Each feature follows TDD (Test-Driven Development):
 - [x] Bucket Notification configuration API (GetBucketNotification / PutBucketNotification)
 - [x] Bucket Notification event delivery (Webhook / HTTP POST) — lifecycle expiration events `s3:LifecycleExpiration:Delete` / `:DeleteMarkerCreated` (#56)
 - [ ] Bucket Notification event delivery (SNS/SQS/Lambda/EventBridge)
-- [ ] Object Select (SelectObjectContent)
+- [x] Object Select (SelectObjectContent) — CSV/JSON 入力、射影+WHERE+LIMIT、eventstream 出力。Parquet・gzip等圧縮・集約関数は未対応
 
 ---
 
