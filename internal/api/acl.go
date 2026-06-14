@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/xml"
 	"errors"
-	"io"
 	"net/http"
 
 	"github.com/kumasuke/jog/internal/storage"
@@ -79,7 +78,6 @@ func (h *Handler) GetBucketAcl(w http.ResponseWriter, r *http.Request) {
 // PutBucketAcl handles PUT /{bucket}?acl - PutBucketAcl.
 func (h *Handler) PutBucketAcl(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
-	limitBody(w, r, MaxACLBodySize)
 
 	// Check for canned ACL header
 	cannedACL := r.Header.Get("x-amz-acl")
@@ -101,14 +99,10 @@ func (h *Handler) PutBucketAcl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse request body for explicit ACL
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if isBodyTooLarge(err) {
-			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
-			return
-		}
-		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket)
+	// Parse request body for explicit ACL (size-capped; see readXMLBody / MaxACLBodySize).
+	body, s3err := readXMLBody(w, r, MaxACLBodySize)
+	if s3err != nil {
+		WriteErrorWithResource(w, s3err, "/"+bucket)
 		return
 	}
 
@@ -175,7 +169,6 @@ func (h *Handler) GetObjectAcl(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) PutObjectAcl(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
-	limitBody(w, r, MaxACLBodySize)
 
 	// Resolve the targeted version (issue #41): "null" → "", unspecified →
 	// current version, missing → NoSuchVersion, delete-marker → MethodNotAllowed.
@@ -211,14 +204,10 @@ func (h *Handler) PutObjectAcl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse request body for explicit ACL
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if isBodyTooLarge(err) {
-			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket+"/"+key)
-			return
-		}
-		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket+"/"+key)
+	// Parse request body for explicit ACL (size-capped; see readXMLBody / MaxACLBodySize).
+	body, s3err := readXMLBody(w, r, MaxACLBodySize)
+	if s3err != nil {
+		WriteErrorWithResource(w, s3err, "/"+bucket+"/"+key)
 		return
 	}
 

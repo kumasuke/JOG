@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"io"
 	"net/http"
 )
 
@@ -39,4 +40,25 @@ func limitBody(w http.ResponseWriter, r *http.Request, n int64) {
 func isBodyTooLarge(err error) bool {
 	var mbe *http.MaxBytesError
 	return errors.As(err, &mbe)
+}
+
+// readXMLBody caps r.Body at maxBytes and reads it fully, returning the bytes
+// for the caller to unmarshal. It consolidates the limit-then-read-then-classify
+// boilerplate that every XML subresource handler (ACL/CORS/encryption/lifecycle/
+// notification/object-lock/tagging/versioning) previously duplicated.
+//
+// On success it returns the body and a nil error. When the body exceeds maxBytes
+// it returns ErrEntityTooLarge; any other read failure returns ErrInvalidRequest.
+// The S3Error is returned (not written) so each caller can attach its own
+// resource path (e.g. "/"+bucket vs "/"+bucket+"/"+key) when responding.
+func readXMLBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, *S3Error) {
+	limitBody(w, r, maxBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		if isBodyTooLarge(err) {
+			return nil, ErrEntityTooLarge
+		}
+		return nil, ErrInvalidRequest
+	}
+	return body, nil
 }

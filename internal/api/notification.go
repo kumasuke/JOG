@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/xml"
 	"errors"
-	"io"
 	"net/http"
 
 	"github.com/kumasuke/jog/internal/storage"
@@ -66,15 +65,11 @@ type FilterRule struct {
 // PutBucketNotification handles PUT /{bucket}?notification.
 func (h *Handler) PutBucketNotification(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
-	limitBody(w, r, MaxNotificationBodySize)
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if isBodyTooLarge(err) {
-			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
-			return
-		}
-		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket)
+	// Parse request body (size-capped; see readXMLBody / MaxNotificationBodySize).
+	body, s3err := readXMLBody(w, r, MaxNotificationBodySize)
+	if s3err != nil {
+		WriteErrorWithResource(w, s3err, "/"+bucket)
 		return
 	}
 

@@ -4,7 +4,6 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -57,16 +56,11 @@ type TagXML struct {
 func (h *Handler) PutObjectTagging(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
 	key := GetKey(r)
-	limitBody(w, r, MaxTaggingBodySize)
 
-	// Parse request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if isBodyTooLarge(err) {
-			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket+"/"+key)
-			return
-		}
-		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket+"/"+key)
+	// Parse request body (size-capped; see readXMLBody / MaxTaggingBodySize).
+	body, s3err := readXMLBody(w, r, MaxTaggingBodySize)
+	if s3err != nil {
+		WriteErrorWithResource(w, s3err, "/"+bucket+"/"+key)
 		return
 	}
 
@@ -98,7 +92,7 @@ func (h *Handler) PutObjectTagging(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store tags
-	err = h.storage.PutObjectTagging(r.Context(), bucket, key, versionID, tags)
+	err := h.storage.PutObjectTagging(r.Context(), bucket, key, versionID, tags)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
@@ -198,16 +192,11 @@ func (h *Handler) DeleteObjectTagging(w http.ResponseWriter, r *http.Request) {
 // PutBucketTagging handles PUT /{bucket}?tagging - PutBucketTagging.
 func (h *Handler) PutBucketTagging(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
-	limitBody(w, r, MaxTaggingBodySize)
 
-	// Parse request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if isBodyTooLarge(err) {
-			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
-			return
-		}
-		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket)
+	// Parse request body (size-capped; see readXMLBody / MaxTaggingBodySize).
+	body, s3err := readXMLBody(w, r, MaxTaggingBodySize)
+	if s3err != nil {
+		WriteErrorWithResource(w, s3err, "/"+bucket)
 		return
 	}
 
@@ -230,7 +219,7 @@ func (h *Handler) PutBucketTagging(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store tags
-	err = h.storage.PutBucketTagging(r.Context(), bucket, tags)
+	err := h.storage.PutBucketTagging(r.Context(), bucket, tags)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)

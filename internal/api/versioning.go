@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/xml"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -58,16 +57,11 @@ type DeleteMarkerInfo struct {
 // PutBucketVersioning handles PUT /{bucket}?versioning - PutBucketVersioning.
 func (h *Handler) PutBucketVersioning(w http.ResponseWriter, r *http.Request) {
 	bucket := GetBucket(r)
-	limitBody(w, r, MaxVersioningBodySize)
 
-	// Parse request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		if isBodyTooLarge(err) {
-			WriteErrorWithResource(w, ErrEntityTooLarge, "/"+bucket)
-			return
-		}
-		WriteErrorWithResource(w, ErrInvalidRequest, "/"+bucket)
+	// Parse request body (size-capped; see readXMLBody / MaxVersioningBodySize).
+	body, s3err := readXMLBody(w, r, MaxVersioningBodySize)
+	if s3err != nil {
+		WriteErrorWithResource(w, s3err, "/"+bucket)
 		return
 	}
 
@@ -103,7 +97,7 @@ func (h *Handler) PutBucketVersioning(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	err = h.storage.PutBucketVersioning(r.Context(), bucket, status)
+	err := h.storage.PutBucketVersioning(r.Context(), bucket, status)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)

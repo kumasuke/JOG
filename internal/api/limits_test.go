@@ -348,6 +348,52 @@ func TestUploadPart_ContentLengthExceedsMax(t *testing.T) {
 	}
 }
 
+// TestReadXMLBody_WithinLimit verifies that readXMLBody returns the full body
+// and a nil S3Error when the body is at or below the configured limit (the
+// backward-compatible happy path used by every XML subresource handler).
+func TestReadXMLBody_WithinLimit(t *testing.T) {
+	payload := strings.Repeat("y", 1024)
+	req := httptest.NewRequest(http.MethodPut, "/test-bucket?cors", strings.NewReader(payload))
+	rr := httptest.NewRecorder()
+
+	body, s3err := readXMLBody(rr, req, MaxCORSBodySize)
+	require.Nil(t, s3err, "in-limit body must not produce an error")
+	assert.Equal(t, payload, string(body))
+}
+
+// TestReadXMLBody_TooLarge verifies that readXMLBody returns ErrEntityTooLarge
+// (and no body) when the request body exceeds the limit. The caller is then
+// responsible for writing the error with its own resource path.
+func TestReadXMLBody_TooLarge(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPut, "/test-bucket?cors", oversizedBody(MaxCORSBodySize))
+	rr := httptest.NewRecorder()
+
+	body, s3err := readXMLBody(rr, req, MaxCORSBodySize)
+	require.NotNil(t, s3err, "oversized body must produce an error")
+	assert.Equal(t, ErrEntityTooLarge, s3err)
+	assert.Nil(t, body)
+}
+
+// TestReadXMLBody_ReadError verifies that a non-MaxBytes read failure maps to
+// ErrInvalidRequest rather than ErrEntityTooLarge.
+func TestReadXMLBody_ReadError(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPut, "/test-bucket?cors", io.NopCloser(failingReader{}))
+	rr := httptest.NewRecorder()
+
+	body, s3err := readXMLBody(rr, req, MaxCORSBodySize)
+	require.NotNil(t, s3err, "read failure must produce an error")
+	assert.Equal(t, ErrInvalidRequest, s3err)
+	assert.Nil(t, body)
+}
+
+// failingReader always fails, modelling a transport-level read error that is
+// not a MaxBytesError.
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) {
+	return 0, errors.New("simulated read failure")
+}
+
 // TestIsBodyTooLarge verifies the isBodyTooLarge helper correctly identifies MaxBytesError.
 func TestIsBodyTooLarge(t *testing.T) {
 	// Simulate what MaxBytesReader returns when limit is exceeded
