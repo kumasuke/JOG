@@ -113,7 +113,8 @@ JOG (Just Object Gateway) は、Go言語で実装されたS3互換のオブジ�
     - **未対応**: 集約関数（`COUNT` / `SUM` / `AVG` / `MIN` / `MAX`）、SQL 組み込み関数、`CAST`（後続 PR で対応予定）
   - **出力形式**: `OutputSerialization` に従い CSV または JSON Lines を生成
   - **レスポンス**: AWS EventStream バイナリフレーム（`Records` イベント → `Stats` イベント → `End` イベント）
-  - **エラーコード**: バケット不在 → `NoSuchBucket`（404）、オブジェクト不在 → `NoSuchKey`（404）、不正な XML リクエスト → `MalformedXML`（400）、未対応の入力形式/不正な SQL → `InvalidArgument`（400）
+  - **エラーコード**: バケット不在 → `NoSuchBucket`（404）、オブジェクト不在 → `NoSuchKey`（404）、不正な XML リクエスト → `MalformedXML`（400）、未対応の入力形式/不正な SQL/オブジェクト本体が指定形式（CSV/JSON）としてパースできない → `InvalidArgument`（400）
+  - **versionId 非対応**: S3 の SelectObjectContent API は `versionId` パラメータを持たず（AWS SDK の `SelectObjectContentInput` に `VersionId` フィールドが存在しない）、常に現行バージョンを対象とする。JOG もこれに倣う。
   - **実装**: `internal/api/select.go`（ハンドラ）、`internal/s3select/`（SQL パーサ・評価エンジン・CSV/JSON I/O）
 
 ---
