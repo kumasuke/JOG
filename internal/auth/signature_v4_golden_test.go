@@ -118,3 +118,40 @@ func TestSigV4Golden(t *testing.T) {
 		})
 	}
 }
+
+// TestSigV4CanonicalQuery_MultiValueSort pins the AWS rule that, when a single
+// query key carries multiple values, the values are sorted by their
+// PERCENT-ENCODED representation (not by their decoded form).
+//
+// Source of the expected value: this is the AWS-documented canonicalization
+// rule ("the query string values must be sorted by their URI-encoded value"),
+// applied by hand below — NOT a signature produced by this implementation, and
+// NOT a tautological re-signing of crafted input. No signature is asserted for
+// this case; only the canonical query ordering is checked, which is exactly the
+// behaviour issue #65 targets.
+//
+// Why this specific input: the AWS test-suite's own multi-value vector
+// (get-vanilla-query-order-value, Param1=value1/value2) cannot detect the bug,
+// because "value1"/"value2" are unreserved and encode to themselves, so a
+// decoded sort and an encoded sort yield the identical string. To force the two
+// sort orders apart we need a value that percent-encodes to a byte that sorts
+// BEFORE an unreserved byte: every "%XX" escape begins with '%' (0x25), which is
+// below all unreserved bytes (>= 0x2D). Using values "@" and ".":
+//   - decoded sort: '.'(0x2E) < '@'(0x40)            => ".", "@"
+//   - encoded sort: "%40"(0x25...) < "."(0x2E)       => "@", "."   <- AWS-correct
+//
+// So the AWS-correct canonical query is "Param1=%40&Param1=." while the old
+// decoded-sort implementation emits "Param1=.&Param1=%40".
+func TestSigV4CanonicalQuery_MultiValueSort(t *testing.T) {
+	m := NewMiddleware("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY")
+
+	// Wire order deliberately differs from both sort orders so the test cannot
+	// pass by accident of insertion order.
+	req := httptest.NewRequest(http.MethodGet, "/?Param1=@&Param1=.", nil)
+
+	const want = "Param1=%40&Param1=."
+	got := m.canonicalQueryString(req)
+	if got != want {
+		t.Fatalf("multi-value canonical query mismatch\n got: %q\nwant: %q\n(values must be sorted by percent-encoded representation, per AWS SigV4)", got, want)
+	}
+}

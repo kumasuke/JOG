@@ -286,10 +286,19 @@ func (m *Middleware) canonicalQueryString(r *http.Request) string {
 
 	var parts []string
 	for _, k := range keys {
-		values := query[k]
-		sort.Strings(values)
-		for _, v := range values {
-			parts = append(parts, uriEncode(k)+"="+uriEncode(v))
+		// AWS SigV4 sorts multi-value parameters by their percent-encoded
+		// representation, so encode each value first and sort the encoded
+		// forms. Sorting the decoded values (as before) diverges whenever
+		// encoding changes the byte order (e.g. "@" -> "%40" sorts before
+		// "."). See issue #65.
+		encKey := uriEncode(k)
+		encValues := make([]string, 0, len(query[k]))
+		for _, v := range query[k] {
+			encValues = append(encValues, uriEncode(v))
+		}
+		sort.Strings(encValues)
+		for _, encV := range encValues {
+			parts = append(parts, encKey+"="+encV)
 		}
 	}
 
