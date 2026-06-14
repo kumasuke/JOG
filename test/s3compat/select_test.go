@@ -344,6 +344,31 @@ func TestSelectObjectContent_UnsupportedFormat(t *testing.T) {
 	requireAPIErrorCode(t, err, "InvalidArgument")
 }
 
+func TestSelectObjectContent_MalformedInput(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+	client := ts.S3Client(t)
+
+	bucket := newSelectBucket(t, ts, client)
+	key := testutil.RandomObjectKey()
+	// Not valid JSON: a bare token that cannot be decoded as a JSON object.
+	putSelectObject(t, client, bucket, key, "{this is not json}\n")
+
+	_, err := client.SelectObjectContent(context.Background(), &s3.SelectObjectContentInput{
+		Bucket:         aws.String(bucket),
+		Key:            aws.String(key),
+		Expression:     aws.String("SELECT * FROM S3Object[*]"),
+		ExpressionType: types.ExpressionTypeSql,
+		InputSerialization: &types.InputSerialization{
+			JSON: &types.JSONInput{Type: types.JSONTypeLines},
+		},
+		OutputSerialization: &types.OutputSerialization{JSON: &types.JSONOutput{}},
+	})
+	// Client-supplied malformed object content must not surface as a 500;
+	// it is a 4xx InvalidArgument (the input data could not be parsed).
+	requireAPIErrorCode(t, err, "InvalidArgument")
+}
+
 // requireAPIErrorCode asserts that err carries the given S3 API error code.
 func requireAPIErrorCode(t *testing.T, err error, code string) {
 	t.Helper()

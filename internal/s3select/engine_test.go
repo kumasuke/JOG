@@ -1,6 +1,7 @@
 package s3select
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -238,6 +239,55 @@ func TestRun_UnsupportedSerialization(t *testing.T) {
 	}
 	if _, _, err := Run(strings.NewReader("a\n"), q, InputCfg{CSV: &CSVInput{}}, OutputCfg{}); err == nil {
 		t.Fatal("expected error for missing output serialization")
+	}
+}
+
+// TestRun_BadInput verifies that malformed source content (a parse failure in
+// the JSON deserialiser) is reported as ErrBadInput, so the api layer can map it
+// to a 4xx instead of a 500. Run wraps every non-EOF reader error as ErrBadInput
+// uniformly (no per-error-type classification), so all three structural failure
+// modes below funnel through that single wrap. CSV is intentionally absent: with
+// LazyQuotes and ragged rows enabled, encoding/csv tolerates virtually all
+// malformed input rather than erroring, so a CSV parse failure is impractical to
+// trigger here.
+func TestRun_BadInput(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		in    InputCfg
+	}{
+		{
+			// json.SyntaxError path: a bare token that is not valid JSON.
+			name:  "json syntax error",
+			input: "{this is not json}\n",
+			in:    InputCfg{JSON: &JSONInput{Type: "LINES"}},
+		},
+		{
+			// Structural error path (json.go "expected object"): a top-level
+			// value that is valid JSON but not an object. This is a plain
+			// fmt.Errorf, not a *json.SyntaxError, so it must still be wrapped.
+			name:  "json not an object",
+			input: "[1,2,3]\n",
+			in:    InputCfg{JSON: &JSONInput{Type: "LINES"}},
+		},
+		{
+			// Structural error path (json.go "expected object key").
+			name:  "json scalar document",
+			input: "42\n",
+			in:    InputCfg{JSON: &JSONInput{Type: "LINES"}},
+		},
+	}
+	q, _ := ParseSQL("SELECT * FROM S3Object")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := Run(strings.NewReader(tt.input), q, tt.in, OutputCfg{CSV: &CSVOutput{}})
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !errors.Is(err, ErrBadInput) {
+				t.Fatalf("expected ErrBadInput, got %v", err)
+			}
+		})
 	}
 }
 

@@ -92,6 +92,9 @@ func (h *Handler) SelectObjectContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// S3 Select always runs against the current version: the SelectObjectContent
+	// API has no versionId parameter (the AWS SDK's SelectObjectContentInput has
+	// no VersionId field), so we read the current object via GetObject.
 	obj, err := h.storage.GetObject(r.Context(), bucket, key)
 	if err != nil {
 		switch {
@@ -114,7 +117,15 @@ func (h *Handler) SelectObjectContent(w http.ResponseWriter, r *http.Request) {
 	// supported subset only fails on input it has already validated.
 	payload, stats, err := s3select.Run(obj.Body, query, inCfg, outCfg)
 	if err != nil {
-		WriteError(w, ErrInternalError)
+		// Malformed source data or an unsupported serialisation is a client
+		// problem (4xx); anything else is a server fault (5xx). Both are surfaced
+		// before the 200/event-stream, so a normal XML error is still valid here.
+		switch {
+		case errors.Is(err, s3select.ErrBadInput), errors.Is(err, s3select.ErrUnsupported):
+			WriteErrorWithResource(w, ErrInvalidArgument, "/"+bucket+"/"+key)
+		default:
+			WriteError(w, ErrInternalError)
+		}
 		return
 	}
 

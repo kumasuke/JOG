@@ -11,6 +11,12 @@ import (
 // an S3 InvalidArgument 400.
 var ErrUnsupported = errors.New("unsupported serialization")
 
+// ErrBadInput is returned when the source object cannot be parsed as the
+// requested input serialisation (malformed CSV/JSON). It signals a client-supplied
+// data problem, so the api layer maps it to an S3 InvalidArgument 400 rather than
+// a 500.
+var ErrBadInput = errors.New("bad input")
+
 // InputCfg selects and configures the input deserialiser. Exactly one of CSV or
 // JSON must be non-nil.
 type InputCfg struct {
@@ -64,7 +70,10 @@ func Run(src io.Reader, q *Query, in InputCfg, out OutputCfg) ([]byte, Stats, er
 			break
 		}
 		if err != nil {
-			return nil, Stats{}, fmt.Errorf("read input: %w", err)
+			// A non-EOF error from the deserialiser means the source object could
+			// not be parsed as the requested format. This is a client data problem,
+			// so wrap it as ErrBadInput for a 4xx rather than a 5xx.
+			return nil, Stats{}, fmt.Errorf("%w: read input: %w", ErrBadInput, err)
 		}
 
 		ok, err := match(q.Where, rec)
