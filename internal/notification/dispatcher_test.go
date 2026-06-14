@@ -80,7 +80,8 @@ func TestDispatch_DeliversMatchingEvent(t *testing.T) {
 	if rec.EventVersion != "2.3" {
 		t.Errorf("eventVersion = %q, want 2.3", rec.EventVersion)
 	}
-	if rec.S3.Bucket.Name != "b" || rec.S3.Object.Key != "logs/a" || rec.S3.Object.VersionID != "v1" {
+	// Key is URL-encoded on the wire, matching S3 (here "logs/a" → "logs%2Fa").
+	if rec.S3.Bucket.Name != "b" || rec.S3.Object.Key != "logs%2Fa" || rec.S3.Object.VersionID != "v1" {
 		t.Errorf("s3 entity = %+v", rec.S3)
 	}
 	if rec.S3.Object.Size != 42 {

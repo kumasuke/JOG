@@ -9,7 +9,10 @@
 // round-trip. A failed delivery is logged, not retried in v1.
 package notification
 
-import "time"
+import (
+	"net/url"
+	"time"
+)
 
 // Event mirrors one element of the S3 event notification "Records" array.
 // JSON field names and casing match the AWS S3 event message structure
@@ -120,7 +123,11 @@ func NewLifecycleEvent(eventName, region, bucket, bucketOwner, key, etag, versio
 				ARN:           "arn:aws:s3:::" + bucket,
 			},
 			Object: S3ObjectEntity{
-				Key:       key,
+				// S3 delivers the object key URL-encoded (spaces become "+"),
+				// matching url.QueryEscape; consumers decode it on receipt. Emitting
+				// the raw key would make a key like "a+b" indistinguishable from
+				// "a b" after the consumer's decode step.
+				Key:       url.QueryEscape(key),
 				Size:      size,
 				ETag:      etag,
 				VersionID: versionID,
