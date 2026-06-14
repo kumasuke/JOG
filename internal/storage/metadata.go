@@ -61,10 +61,12 @@ const (
 	// pooled connection via the DSN. Request-path writes wait this long for a
 	// momentarily-held write lock instead of failing fast with SQLITE_BUSY.
 	defaultBusyTimeoutMS = 5000
-	// engineBusyTimeoutMS is the shorter busy timeout used only inside
-	// withImmediateTx, so the background lifecycle engine skips a contended
-	// version quickly (fail-closed) rather than blocking a whole cycle behind
-	// request-path writes.
+	// engineBusyTimeoutMS is the shorter busy timeout used by the lifecycle
+	// engine calls to withImmediateTx (no opts = this default), so a contended
+	// BEGIN IMMEDIATE returns ErrBusy quickly (fail-closed) instead of blocking
+	// the cycle. Startup migrations pass withBusyTimeout(defaultBusyTimeoutMS)
+	// to wait up to 5 s for an overlapping writer (e.g. rolling-deploy double
+	// open, Litestream checkpoint) to release the lock.
 	engineBusyTimeoutMS = 100
 )
 
@@ -88,35 +90,61 @@ func wrapBusy(err error) error {
 	return err
 }
 
+// immediateTxOption configures optional parameters for withImmediateTx.
+type immediateTxOption func(*immediateTxConfig)
+
+type immediateTxConfig struct {
+	busyTimeoutMS int
+}
+
+// withBusyTimeout returns an immediateTxOption that overrides the busy_timeout
+// used for the BEGIN IMMEDIATE attempt. Use withBusyTimeout(defaultBusyTimeoutMS)
+// for startup migrations that must survive transient external lock holders
+// (rolling-deploy double open, Litestream checkpoint, etc.).
+func withBusyTimeout(ms int) immediateTxOption {
+	return func(c *immediateTxConfig) { c.busyTimeoutMS = ms }
+}
+
 // withImmediateTx pins a single pooled connection and runs fn inside a real
 // BEGIN IMMEDIATE transaction. BEGIN IMMEDIATE acquires the write lock up
 // front, so every read fn performs sees the latest committed state and no
 // concurrent writer can interleave before COMMIT. This is the exclusion
 // primitive for the lifecycle engine's guarded deletes and for the startup
-// schema migrations (runObjectLockMigration / runACLTagsMigration), which used
-// to issue a nested `BEGIN IMMEDIATE` inside BeginTx — a no-op that never
-// acquired the write lock (issue #57).
+// schema migrations (runObjectLockMigration / runACLTagsMigration).
+//
+// The busy_timeout applied to the BEGIN IMMEDIATE attempt is caller-controlled
+// via opts (default: engineBusyTimeoutMS = 100 ms — lifecycle engine fails
+// closed fast). Startup migrations should pass withBusyTimeout(defaultBusyTimeoutMS)
+// to wait up to 5 s for an overlapping writer to release the lock.
 //
 // SQLITE_BUSY at BEGIN (after busy_timeout) is returned as ErrBusy so callers
 // can treat it as a fail-closed skip. fn returning an error rolls back; a nil
 // return commits. Errors from fn are returned verbatim (busy errors surfaced
 // by fn's own statements are also normalized to ErrBusy).
-func (m *Metadata) withImmediateTx(ctx context.Context, fn func(conn *sql.Conn) error) error {
+func (m *Metadata) withImmediateTx(ctx context.Context, fn func(conn *sql.Conn) error, opts ...immediateTxOption) error {
+	cfg := immediateTxConfig{busyTimeoutMS: engineBusyTimeoutMS}
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	conn, err := m.db.Conn(ctx)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
-	// Shorten busy_timeout for the duration of this guarded operation so a
-	// contended BEGIN IMMEDIATE returns ErrBusy quickly (engine skips, fail-
-	// closed) instead of blocking the cycle. Restore the pool default before
-	// the connection is reused by a request-path write, which wants the full
-	// timeout. busy_timeout is per-connection and is NOT reset by the pool.
-	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", engineBusyTimeoutMS)); err != nil {
+	// Set the caller-requested busy_timeout for the BEGIN IMMEDIATE attempt.
+	// Restore to defaultBusyTimeoutMS (the pool-wide default baked into the
+	// DSN) before the connection returns to the pool, so request-path writes
+	// get the full 5 s wait regardless of which timeout this call used.
+	// busy_timeout is per-connection and is NOT reset by the pool.
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", cfg.busyTimeoutMS)); err != nil {
 		return err
 	}
 	defer func() {
+		// Always restore to the pool default (5000 ms), not to cfg.busyTimeoutMS.
+		// This ensures callers that passed a shorter timeout (e.g. engine 100 ms)
+		// do not leave a short-timeout connection in the pool for request-path writes.
 		_, _ = conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout=%d", defaultBusyTimeoutMS))
 	}()
 
@@ -670,6 +698,11 @@ func (m *Metadata) runObjectLockMigration() error {
 	// nested BEGIN ran inside BeginTx's implicit deferred transaction and never
 	// upgraded the lock. The callback returns nil only on full success, in which
 	// case withImmediateTx COMMITs; any error rolls back.
+	//
+	// withBusyTimeout(defaultBusyTimeoutMS): startup migrations must tolerate a
+	// transient external writer (rolling-deploy double open, Litestream
+	// checkpoint) holding the lock briefly. 5 s gives ample headroom; the
+	// lifecycle engine uses 100 ms (fail-closed), which is too short here.
 	if err := m.withImmediateTx(ctx, func(tx *sql.Conn) error {
 		// Step 3: create the v2 tables under temporary names.
 		if _, err := tx.ExecContext(ctx, `
@@ -762,7 +795,7 @@ func (m *Metadata) runObjectLockMigration() error {
 			return fmt.Errorf("object lock migration: failed to set user_version: %w", err)
 		}
 		return nil
-	}); err != nil {
+	}, withBusyTimeout(defaultBusyTimeoutMS)); err != nil {
 		// Inner errors already carry the "object lock migration: ..." prefix;
 		// busy errors surface as ErrBusy. Return verbatim, no double-wrap.
 		return err
@@ -1057,6 +1090,8 @@ func (m *Metadata) runACLTagsMigration() error {
 	// via withImmediateTx (see runObjectLockMigration for why the former BeginTx
 	// + nested `BEGIN IMMEDIATE` was a no-op). The callback returns nil only on
 	// full success, in which case withImmediateTx COMMITs; any error rolls back.
+	// withBusyTimeout(defaultBusyTimeoutMS): same rationale as runObjectLockMigration —
+	// 5 s headroom for transient external writers at startup.
 	if err := m.withImmediateTx(ctx, func(tx *sql.Conn) error {
 		// Step 1: create the v2 tables under temporary names. The backfill binds a
 		// legacy (bucket, key) acl/tag row to the newest non-delete-marker
@@ -1152,7 +1187,7 @@ func (m *Metadata) runACLTagsMigration() error {
 			return fmt.Errorf("acl/tags migration: failed to set user_version: %w", err)
 		}
 		return nil
-	}); err != nil {
+	}, withBusyTimeout(defaultBusyTimeoutMS)); err != nil {
 		// Inner errors already carry the "acl/tags migration: ..." prefix; busy
 		// errors surface as ErrBusy. Return verbatim, no double-wrap.
 		return err

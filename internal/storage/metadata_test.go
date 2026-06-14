@@ -3,9 +3,11 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1272,5 +1274,127 @@ func TestValidateLockMigration_LegalHoldOrphanFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "legal hold rows reference a non-existent version") {
 		t.Fatalf("error = %v, want legal hold orphan message", err)
+	}
+}
+
+// TestWithImmediateTx_BusyTimeoutOption verifies that withBusyTimeout(ms) controls
+// how long withImmediateTx waits for a contended write lock, and that omitting the
+// option uses the engineBusyTimeoutMS (100 ms) default (fail-closed behaviour).
+//
+// The test pins a lock-holding connection that releases after ~300 ms. A call
+// with withBusyTimeout(defaultBusyTimeoutMS) (5000 ms) must succeed; the 100 ms
+// default would have timed out and returned ErrBusy. A separate subtest
+// confirms this by passing an artificially short timeout explicitly.
+func TestWithImmediateTx_BusyTimeoutOption(t *testing.T) {
+	ctx := context.Background()
+
+	// holdLock pins a write lock on m for holdDuration, signals ready on the
+	// returned channel when the lock is acquired, then releases it.
+	holdLock := func(t *testing.T, m *Metadata, holdDuration time.Duration) <-chan struct{} {
+		t.Helper()
+		ready := make(chan struct{})
+		go func() {
+			conn, err := m.db.Conn(ctx)
+			if err != nil {
+				t.Errorf("holdLock Conn: %v", err)
+				close(ready)
+				return
+			}
+			defer conn.Close()
+			if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+				t.Errorf("holdLock BEGIN IMMEDIATE: %v", err)
+				close(ready)
+				return
+			}
+			close(ready) // signal: lock is now held
+			time.Sleep(holdDuration)
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}()
+		return ready
+	}
+
+	t.Run("succeeds_with_long_timeout", func(t *testing.T) {
+		m := newTestMetadata(t)
+		if err := m.CreateBucket(ctx, "b", time.Now()); err != nil {
+			t.Fatalf("CreateBucket: %v", err)
+		}
+
+		// Hold the write lock for 300 ms — longer than engineBusyTimeoutMS (100 ms)
+		// but shorter than defaultBusyTimeoutMS (5000 ms).
+		ready := holdLock(t, m, 300*time.Millisecond)
+		<-ready // wait until the lock is actually held
+
+		// withBusyTimeout(defaultBusyTimeoutMS) must wait past the 300 ms hold and succeed.
+		err := m.withImmediateTx(ctx, func(conn *sql.Conn) error {
+			return nil
+		}, withBusyTimeout(defaultBusyTimeoutMS))
+		if err != nil {
+			t.Fatalf("withImmediateTx with 5000 ms timeout: want nil, got %v", err)
+		}
+	})
+
+	t.Run("fails_fast_with_short_timeout", func(t *testing.T) {
+		m := newTestMetadata(t)
+		if err := m.CreateBucket(ctx, "b", time.Now()); err != nil {
+			t.Fatalf("CreateBucket: %v", err)
+		}
+
+		// Hold the write lock for 300 ms.
+		ready := holdLock(t, m, 300*time.Millisecond)
+		<-ready
+
+		// With a 50 ms timeout the BEGIN IMMEDIATE should fail with ErrBusy.
+		var wg sync.WaitGroup
+		wg.Add(1)
+		var gotErr error
+		go func() {
+			defer wg.Done()
+			gotErr = m.withImmediateTx(ctx, func(conn *sql.Conn) error {
+				return nil
+			}, withBusyTimeout(50))
+		}()
+		wg.Wait()
+		if !errors.Is(gotErr, ErrBusy) {
+			t.Fatalf("withImmediateTx with 50 ms timeout: want ErrBusy, got %v", gotErr)
+		}
+	})
+}
+
+// TestWithImmediateTx_RestoresBusyTimeout verifies that after withImmediateTx
+// completes (regardless of which timeout was requested), the connection returned
+// to the pool has busy_timeout reset to defaultBusyTimeoutMS (5000 ms) so that
+// subsequent request-path writes get the full wait.
+func TestWithImmediateTx_RestoresBusyTimeout(t *testing.T) {
+	ctx := context.Background()
+
+	// Use a Metadata with MaxOpenConns=1 so the same physical connection is
+	// reused by both the withImmediateTx call and our follow-up PRAGMA read.
+	m := newTestMetadata(t)
+	m.db.SetMaxOpenConns(1)
+
+	// Run withImmediateTx with a non-default (short) timeout.
+	if err := m.withImmediateTx(ctx, func(conn *sql.Conn) error {
+		return nil
+	}, withBusyTimeout(42)); err != nil {
+		t.Fatalf("withImmediateTx: %v", err)
+	}
+
+	// The single connection should now be back in the pool with its timeout
+	// restored. Read busy_timeout from that same connection.
+	conn, err := m.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn after withImmediateTx: %v", err)
+	}
+	defer conn.Close()
+
+	var gotTimeout int
+	row := conn.QueryRowContext(ctx, "PRAGMA busy_timeout")
+	if err := row.Scan(&gotTimeout); err != nil {
+		t.Fatalf("PRAGMA busy_timeout scan: %v", err)
+	}
+
+	if gotTimeout != defaultBusyTimeoutMS {
+		t.Errorf("busy_timeout after withImmediateTx = %d, want %d (defaultBusyTimeoutMS)",
+			gotTimeout, defaultBusyTimeoutMS)
 	}
 }
