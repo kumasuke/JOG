@@ -1725,8 +1725,17 @@ func (fs *FileSystem) PutObjectVersioned(ctx context.Context, bucket, key string
 	// Preserve the current file as the null version ('') before writing the new
 	// version, so it remains retrievable via ListObjectVersions and is covered
 	// by the existing null-version lock rows.
-	if err := fs.snapshotNullVersionIfNeeded(ctx, bucket, key); err != nil {
-		return nil, "", err
+	//
+	// Serialize the null-version snapshot (copyFile + null row insert) against a
+	// concurrent targeted null delete on the same key, so DELETE cannot remove the
+	// null file between the copy and the row insert (issue #67). Use an explicit
+	// lock/unlock here — NOT defer — because the publish step below re-locks the
+	// same (non-reentrant) stripe mutex; deferring would self-deadlock.
+	unlock := fs.lockKey(bucket, key)
+	snapErr := fs.snapshotNullVersionIfNeeded(ctx, bucket, key)
+	unlock()
+	if snapErr != nil {
+		return nil, "", snapErr
 	}
 
 	// Generate version ID
