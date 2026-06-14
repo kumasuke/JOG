@@ -162,9 +162,14 @@ GitHub Actions will automatically build binaries for all platforms and create a 
 ## Documentation Updates
 
 After implementing a new feature, update the following documentation:
+- `SPEC.md` - Document the new operation in the specification
 - `TODO.md` - Mark the implemented feature as completed
 - `docs/S3_API_CHECKLIST.md` - Update the implementation status and summary statistics
 - `README.md` - Update the S3 API coverage badge percentage and color (see badge color guide below)
+
+For new S3 subresource APIs, follow the end-to-end checklist in
+[`docs/conventions.md`](docs/conventions.md), which sequences handler, router,
+storage, SQLite (`ON DELETE CASCADE`), tests, and these documentation updates.
 
 ### Badge Color Guide
 
@@ -210,5 +215,6 @@ Test:
 
 - `SPEC.md` - Detailed specification and architecture
 - `TODO.md` - Implementation task list
+- `docs/conventions.md` - Development conventions (new S3 subresource API checklist)
 - `docs/DEPLOYMENT.md` - Production deployment guide with Litestream
 - `docs/S3_API_CHECKLIST.md` - S3 API implementation status
