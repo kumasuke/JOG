@@ -103,6 +103,17 @@ Each feature follows TDD (Test-Driven Development):
   matching S3's shortest-expiration semantics — replacing the prior first-match
   behavior. (Current-object `Expiration` overlap is still first-match; tracked
   separately.)
+- **EODM validation at PUT time** (#55): `PutBucketLifecycleConfiguration`
+  rejects a rule combining `ExpiredObjectDeleteMarker` with
+  `Expiration.Days` / `Expiration.Date` (400 `InvalidRequest`).
+
+**Request Limits & Hardening**
+- **XML / object body size limits** (#34): all XML subresource endpoints plus
+  `DeleteObjects` / `CompleteMultipartUpload` cap the request body (AWS-aligned
+  sizes) and return 413 `EntityTooLarge`; object data capped at 5 GiB per PUT /
+  UploadPart.
+- **Delete-path contention** (#54): write-contended deletes return 503
+  `SlowDown` for client backoff/retry instead of a misleading 204/500.
 
 ---
 

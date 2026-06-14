@@ -337,6 +337,67 @@ func TestLifecycleConfig_InvalidBoolEnv_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 }
 
+// ----- NotificationConfig tests -----
+
+func TestDefaultConfig_NotificationDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	assert.Equal(t, "us-east-1", cfg.Notification.Region)
+	assert.Equal(t, Duration(10*time.Second), cfg.Notification.DeliveryTimeout)
+	assert.False(t, cfg.Notification.BlockPrivateTargets)
+	assert.NotNil(t, cfg.Notification.Targets)
+	assert.Empty(t, cfg.Notification.Targets)
+}
+
+func TestNotificationConfig_YAMLUnmarshal(t *testing.T) {
+	raw := []byte(`
+notification:
+  region: eu-west-1
+  delivery_timeout: 3s
+  block_private_targets: true
+  targets:
+    "arn:aws:sns:eu-west-1:000000000000:hook": https://example.test/webhook
+    "arn:aws:sqs:eu-west-1:000000000000:q": https://example.test/queue
+`)
+	cfg := DefaultConfig()
+	require.NoError(t, yaml.Unmarshal(raw, cfg))
+	assert.Equal(t, "eu-west-1", cfg.Notification.Region)
+	assert.Equal(t, Duration(3*time.Second), cfg.Notification.DeliveryTimeout)
+	assert.True(t, cfg.Notification.BlockPrivateTargets)
+	assert.Equal(t, map[string]string{
+		"arn:aws:sns:eu-west-1:000000000000:hook": "https://example.test/webhook",
+		"arn:aws:sqs:eu-west-1:000000000000:q":    "https://example.test/queue",
+	}, cfg.Notification.Targets)
+}
+
+func TestNotificationConfig_EnvOverlay(t *testing.T) {
+	chdirTemp(t)
+	t.Setenv("JOG_NOTIFICATION_REGION", "ap-northeast-1")
+	t.Setenv("JOG_NOTIFICATION_DELIVERY_TIMEOUT", "15s")
+	t.Setenv("JOG_NOTIFICATION_BLOCK_PRIVATE_TARGETS", "true")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "ap-northeast-1", cfg.Notification.Region)
+	assert.Equal(t, Duration(15*time.Second), cfg.Notification.DeliveryTimeout)
+	assert.True(t, cfg.Notification.BlockPrivateTargets)
+}
+
+func TestNotificationConfig_InvalidDurationEnv_ReturnsError(t *testing.T) {
+	chdirTemp(t)
+	t.Setenv("JOG_NOTIFICATION_DELIVERY_TIMEOUT", "not-a-duration")
+
+	_, err := Load()
+	require.Error(t, err)
+}
+
+func TestNotificationConfig_InvalidBlockPrivateEnv_ReturnsError(t *testing.T) {
+	chdirTemp(t)
+	t.Setenv("JOG_NOTIFICATION_BLOCK_PRIVATE_TARGETS", "not-a-bool")
+
+	_, err := Load()
+	require.Error(t, err)
+}
+
 func TestLoadFromFile_EnvDoesNotOverride(t *testing.T) {
 	// LoadFromFile is the explicit "use this file" path; the historical
 	// behavior (viper SetConfigFile + Unmarshal) did not consult env vars,

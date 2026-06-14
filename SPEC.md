@@ -97,6 +97,12 @@ JOG (Just Object Gateway) は、Go言語で実装されたS3互換のオブジ�
 - [ ] ARM対応
 - [ ] レプリケーション機能
 
+### API制限・入力バリデーション
+
+- **リクエストボディサイズ上限**（#34）: XML系サブリソース API（ACL / CORS / 暗号化 / ライフサイクル / 通知 / オブジェクトロック / タグ付け / バージョニング / Website）と一括削除（DeleteObjects）・マルチパート完了は、AWS S3 に倣ったボディサイズ上限を持つ。上限超過時は HTTP 413 `EntityTooLarge` を返す。オブジェクト本体は単一 PUT / UploadPart ともに 5 GiB が上限。
+- **ライフサイクル EODM バリデーション**（#55）: `PutBucketLifecycleConfiguration` で `ExpiredObjectDeleteMarker` を `Expiration.Days` / `Expiration.Date` と同時指定したルールは HTTP 400 `InvalidRequest` で拒否する。
+- **削除パスの輻輳**（#54）: 書き込み競合で削除トランザクションが失敗した場合、HTTP 503 `SlowDown` を返してクライアントにバックオフ再試行を促す。
+
 ---
 
 ## アーキテクチャ
@@ -209,6 +215,7 @@ jog/
 | `JOG_LIFECYCLE_MAX_ACTIONS` | 1サイクルの最大アクション数 | `10000` |
 | `JOG_NOTIFICATION_REGION` | 通知イベントの `awsRegion` に刻む値 | `us-east-1` |
 | `JOG_NOTIFICATION_DELIVERY_TIMEOUT` | Webhook 1 配信のタイムアウト (Go duration) | `10s` |
+| `JOG_NOTIFICATION_BLOCK_PRIVATE_TARGETS` | loopback/link-local/private/unspecified 宛の Webhook 配信を拒否 (SSRF対策) | `false` |
 
 > 通知の配信先（ARN → Webhook URL のマッピング）は環境変数では設定できず、`config.yaml` の `notification.targets` でのみ指定する。
 
@@ -239,11 +246,14 @@ lifecycle:
 notification:
   region: "us-east-1"        # 通知イベントの awsRegion (JOG_NOTIFICATION_REGION)
   delivery_timeout: 10s      # Webhook 1 配信のタイムアウト (JOG_NOTIFICATION_DELIVERY_TIMEOUT)
+  block_private_targets: false  # loopback/private 宛の配信を拒否 (JOG_NOTIFICATION_BLOCK_PRIVATE_TARGETS)
   # targets はバケット通知設定の ARN を実際の Webhook URL に対応付ける。
   # 1 つ以上設定されたときだけライフサイクル期限切れ通知が有効になる。
   targets:
     "arn:aws:sns:us-east-1:123456789012:lifecycle-events": "https://example.com/webhook"
 ```
+
+> **Webhook配信のSSRF対策**: 配信用 HTTP クライアントはリダイレクト（3xx）を一切追従しない。外部 Webhook 受信側が `169.254.169.254`（メタデータ）や内部アドレスへ 302 誘導しても追従せず、非2xx として best-effort 失敗にマップされる。さらに `block_private_targets: true`（デフォルト false）で loopback/link-local/private/unspecified 宛の配信を接続時に拒否できる。`http`/`https` 以外のスキームの URL は常に拒否される。
 
 ## 使用例
 

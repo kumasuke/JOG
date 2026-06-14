@@ -87,6 +87,7 @@ func runLifecycle(cmd *cobra.Command, args []string) error {
 		cfg.Notification.Targets,
 		cfg.Notification.Region,
 		cfg.Notification.DeliveryTimeout.Std(),
+		cfg.Notification.BlockPrivateTargets,
 	)
 	if disp != nil {
 		eng.SetNotifier(disp)

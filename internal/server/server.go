@@ -71,6 +71,7 @@ func New(cfg *config.Config) (*Server, error) {
 		cfg.Notification.Targets,
 		cfg.Notification.Region,
 		cfg.Notification.DeliveryTimeout.Std(),
+		cfg.Notification.BlockPrivateTargets,
 	)
 	if disp != nil {
 		lcEngine.SetNotifier(disp)

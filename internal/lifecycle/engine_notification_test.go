@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -258,6 +259,57 @@ func TestEngine_Notification_SubscribedDeliversWebhook(t *testing.T) {
 	disp.Wait()
 	if n := rcv.count(); n != 1 {
 		t.Fatalf("subscribed bucket should receive 1 webhook, got %d", n)
+	}
+}
+
+// notifConfigErrStore wraps a real Storage but fails GetBucketNotification, to
+// exercise the engine's best-effort branch: a config read error disables events
+// for the cycle yet must NOT block the deletions themselves.
+type notifConfigErrStore struct {
+	storage.Storage
+}
+
+func (notifConfigErrStore) GetBucketNotification(context.Context, string) (*storage.NotificationConfiguration, error) {
+	return nil, errors.New("boom: notification config unreadable")
+}
+
+func TestEngine_Notification_ConfigReadErrorDisablesEventsButDeletes(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Add(100 * 24 * time.Hour)
+
+	dir := t.TempDir()
+	real, err := storage.NewFileSystem(dir, dir+"/metadata.db")
+	if err != nil {
+		t.Fatalf("NewFileSystem: %v", err)
+	}
+	t.Cleanup(func() { _ = real.Close() })
+	st := notifConfigErrStore{real}
+
+	eng := NewEngine(st, Config{ThrottleEvery: 1 << 30, GCGracePeriod: time.Hour}, func() time.Time { return now })
+	fn := &fakeNotifier{}
+	eng.SetNotifier(fn)
+
+	enabledBucket(t, st, "b")
+	subscribeAllLifecycle(t, st, "b") // stored fine; only the READ back fails
+	putV(t, st, "b", "k", "1")        // oldest noncurrent → expired
+	putV(t, st, "b", "k", "2")
+	putV(t, st, "b", "k", "3")
+	setLifecycle(t, st, "b", storage.LifecycleRule{
+		ID: "ncve", Status: "Enabled",
+		NoncurrentVersionExpiration: &storage.NoncurrentVersionExpiration{
+			NoncurrentDays: i32(1), NewerNoncurrentVersions: i32(1),
+		},
+	})
+
+	r, err := eng.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if r.Buckets["b"].Actions == 0 {
+		t.Fatal("a config read error must not block deletions; expected at least one action")
+	}
+	if len(fn.events) != 0 {
+		t.Fatalf("events must be disabled when the notification config read fails, got %d", len(fn.events))
 	}
 }
 

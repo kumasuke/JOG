@@ -74,6 +74,10 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 > ExpiredObjectDeleteMarker, and AbortIncompleteMultipartUpload. Transition is a
 > no-op on single-node storage. Versions under COMPLIANCE/GOVERNANCE retention
 > or legal hold are never deleted (fail-closed).
+>
+> **Validation**: `PutBucketLifecycleConfiguration` rejects a rule that combines
+> `ExpiredObjectDeleteMarker` with `Expiration.Days` / `Expiration.Date`
+> (400 `InvalidRequest`, #55).
 
 ### Encryption
 
@@ -310,6 +314,15 @@ The following operations are specific to AWS infrastructure and are not planned:
 - JOG uses path-style URLs only (e.g., `http://localhost:9000/bucket/key`)
 - Virtual-hosted style URLs are not supported
 - AWS Signature V4 authentication is supported
+
+### Request Limits (#34)
+- XML subresource endpoints (ACL, CORS, encryption, lifecycle, notification,
+  object lock, tagging, versioning, website) and `DeleteObjects` /
+  `CompleteMultipartUpload` cap the request body at AWS-S3-aligned sizes;
+  exceeding the cap returns HTTP 413 `EntityTooLarge`.
+- Object data is capped at 5 GiB per single `PutObject` and per `UploadPart`.
+- Under write contention a delete may return HTTP 503 `SlowDown` so the client
+  retries with backoff (#54).
 
 ### Security Limitations
 
