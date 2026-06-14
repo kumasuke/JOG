@@ -346,6 +346,117 @@ func TestEngine_AbortIncompleteMultipartUpload(t *testing.T) {
 	})
 }
 
+// TestEngine_NoncurrentVersionExpiration_OverlappingRules verifies the #53 fix:
+// when two NCVE rules overlap a key the engine unions their per-rule verdicts (a
+// version is expired when ANY rule expires it), matching S3's independent-rule /
+// shortest-expiration semantics.
+//
+// This case is constructed to FAIL under a naive field-merge (taking the minimum
+// keep and minimum days across rules as one synthetic rule), which is the
+// over-delete trap the implementation must avoid:
+//
+//	noncurrent versions: v1 (oldest), v2, v3   (v4 = current)
+//	Rule A (broad, prefix=""):    keep=2, days=1   → protects v3,v2; expires {v1}
+//	Rule B (narrow, prefix=logs/): keep=0, days=365 → 365d not elapsed → expires {}
+//	correct union:        {v1}
+//	field-merge(min keep=0, min days=1): would expire {v1,v2,v3}  ← WRONG
+//
+// So the assertions (v1 gone, v2/v3/v4 kept) are green only for the union and red
+// for both the old first-match logic AND a field-merge.
+func TestEngine_NoncurrentVersionExpiration_OverlappingRules(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Add(100 * 24 * time.Hour)
+	st, eng := newEngineFixture(t, false, now)
+	enabledBucket(t, st, "b")
+	v1 := putV(t, st, "b", "logs/k", "1") // oldest noncurrent
+	v2 := putV(t, st, "b", "logs/k", "2") // noncurrent
+	v3 := putV(t, st, "b", "logs/k", "3") // noncurrent
+	v4 := putV(t, st, "b", "logs/k", "4") // current
+	setLifecycle(t, st, "b",
+		// Broad rule: keep newest 2 noncurrent (v3,v2), expire the rest (v1).
+		storage.LifecycleRule{
+			ID: "keep-2-all", Status: "Enabled",
+			NoncurrentVersionExpiration: &storage.NoncurrentVersionExpiration{
+				NoncurrentDays: i32(1), NewerNoncurrentVersions: i32(2),
+			},
+		},
+		// Narrow rule: keep none but require 365 days — not elapsed, so it expires
+		// nothing here. A field-merge would borrow its keep=0 and the broad rule's
+		// days=1 and wrongly expire v2 and v3.
+		storage.LifecycleRule{
+			ID: "keep-0-logs-365d", Status: "Enabled",
+			Filter:                      &storage.LifecycleRuleFilter{Prefix: "logs/"},
+			NoncurrentVersionExpiration: &storage.NoncurrentVersionExpiration{NoncurrentDays: i32(365)},
+		},
+	)
+
+	if _, err := eng.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	present := func(vid string) bool {
+		_, err := st.GetObjectVersioned(ctx, "b", "logs/k", vid)
+		return err == nil
+	}
+	if present(v1) {
+		t.Error("v1 (beyond keep=2 of the broad rule) should be expired")
+	}
+	if !present(v2) {
+		t.Error("v2 should survive: the broad rule protects it (keep=2) and the narrow rule's 365d has not elapsed; a field-merge would wrongly delete it")
+	}
+	if !present(v3) {
+		t.Error("v3 should survive: same as v2; a field-merge would wrongly delete it")
+	}
+	if !present(v4) {
+		t.Error("v4 (current) must never be expired by NCVE")
+	}
+}
+
+// TestEngine_AbortIncompleteMultipartUpload_OverlappingRules verifies the #53
+// fix for AIMU: each upload is evaluated against every AIMU rule and aborted
+// when any rule's prefix matches and its DaysAfterInitiation has elapsed. The
+// old first-match logic listed uploads under one rule's prefix only, so a
+// second rule with a different prefix was silently ignored.
+func TestEngine_AbortIncompleteMultipartUpload_OverlappingRules(t *testing.T) {
+	ctx := context.Background()
+	// 5 days after creation: a 3-day rule fires, a 30-day rule does not.
+	now := time.Now().Add(5 * 24 * time.Hour)
+	st, eng := newEngineFixture(t, false, now)
+	if err := st.CreateBucket(ctx, "b"); err != nil {
+		t.Fatal(err)
+	}
+	logsUp, err := st.CreateMultipartUpload(ctx, "b", "logs/a", "text/plain", nil, "", nil, nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataUp, err := st.CreateMultipartUpload(ctx, "b", "data/a", "text/plain", nil, "", nil, nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setLifecycle(t, st, "b",
+		// Broad rule (all keys) at 30 days: does not fire at +5d.
+		storage.LifecycleRule{
+			ID: "all-30", Status: "Enabled",
+			AbortIncompleteMultipartUpload: &storage.AbortIncompleteMultipartUpload{DaysAfterInitiation: i32(30)},
+		},
+		// Narrow rule (logs/) at 3 days: fires at +5d for the logs/ upload only.
+		storage.LifecycleRule{
+			ID: "logs-3", Status: "Enabled",
+			Filter:                         &storage.LifecycleRuleFilter{Prefix: "logs/"},
+			AbortIncompleteMultipartUpload: &storage.AbortIncompleteMultipartUpload{DaysAfterInitiation: i32(3)},
+		},
+	)
+
+	if _, err := eng.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := st.GetMultipartUpload(ctx, logsUp.UploadID); got != nil {
+		t.Error("logs/ upload should be aborted by the 3-day rule (overlapping evaluation)")
+	}
+	if got, _ := st.GetMultipartUpload(ctx, dataUp.UploadID); got == nil {
+		t.Error("data/ upload should survive: only the 30-day rule applies and it has not elapsed")
+	}
+}
+
 func TestEngine_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Add(100 * 24 * time.Hour)

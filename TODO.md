@@ -96,6 +96,13 @@ Each feature follows TDD (Test-Driven Development):
   non-versioned), NoncurrentVersionExpiration, ExpiredObjectDeleteMarker, and
   AbortIncompleteMultipartUpload. Fail-closed against retention / legal hold via
   guarded `BEGIN IMMEDIATE` transactions. Transition is a no-op on single-node.
+- **Overlapping lifecycle rules (NCVE / AIMU) merge evaluation** (#53): when
+  multiple NoncurrentVersionExpiration or AbortIncompleteMultipartUpload rules
+  overlap the same key/upload, the engine now evaluates each rule independently
+  and unions the verdicts (a version/upload is acted on when ANY rule applies),
+  matching S3's shortest-expiration semantics — replacing the prior first-match
+  behavior. (Current-object `Expiration` overlap is still first-match; tracked
+  separately.)
 
 ---
 

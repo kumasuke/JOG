@@ -11,7 +11,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/kumasuke/jog/internal/notification"
@@ -280,17 +279,15 @@ func (e *Engine) processBucket(ctx context.Context, bucket string, versioning st
 // --- AbortIncompleteMultipartUpload ---------------------------------------
 
 func (e *Engine) runAIMU(ctx context.Context, bucket string, rules []storage.LifecycleRule, now time.Time, br *BucketReport) error {
-	rule, ok := abortMPURule(rules)
-	if !ok {
+	aimuRules := abortMPURules(rules)
+	if len(aimuRules) == 0 {
 		return nil
 	}
-	days := *rule.AbortIncompleteMultipartUpload.DaysAfterInitiation
-	prefix := ""
-	if rule.Filter != nil {
-		prefix = rule.Filter.Prefix
-	}
 
-	uploads, err := e.listAllUploads(ctx, bucket, prefix)
+	// Overlapping AIMU rules may carry disjoint prefixes, so list every upload
+	// once (prefix="") and evaluate each against all rules; an upload is aborted
+	// when any rule's prefix matches and its DaysAfterInitiation has elapsed.
+	uploads, err := e.listAllUploads(ctx, bucket, "")
 	if err != nil {
 		return err
 	}
@@ -298,10 +295,7 @@ func (e *Engine) runAIMU(ctx context.Context, bucket string, rules []storage.Lif
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if prefix != "" && !strings.HasPrefix(u.Key, prefix) {
-			continue
-		}
-		if !eligibleByDays(now, u.Initiated, days) {
+		if !aimuUploadEligible(aimuRules, u.Key, u.Initiated, now) {
 			continue
 		}
 		br.Evaluated++
@@ -544,31 +538,48 @@ func (e *Engine) maybeExpireCurrentDM(ctx context.Context, bucket string, rules 
 }
 
 func (e *Engine) expireNoncurrent(ctx context.Context, bucket string, rules []storage.LifecycleRule, key string, vs []storage.ObjectVersion, now time.Time, br *BucketReport) error {
-	rule, ok := noncurrentRule(rules, key)
-	if !ok {
+	matching := noncurrentRules(rules, key)
+	if len(matching) == 0 {
 		return nil
 	}
-	ncve := rule.NoncurrentVersionExpiration
-	if ncve.NoncurrentDays == nil && ncve.NewerNoncurrentVersions == nil {
-		return nil // invalid rule, nothing to do
-	}
-	keep := 0
-	if ncve.NewerNoncurrentVersions != nil {
-		keep = int(*ncve.NewerNoncurrentVersions)
-	}
-	days := int32(0)
-	if ncve.NoncurrentDays != nil {
-		days = *ncve.NoncurrentDays
+
+	// Evaluate each matching NCVE rule independently and union the verdicts: a
+	// version is expired when ANY rule expires it (S3's overlapping-rule
+	// semantics — see noncurrentRules). dedup preserves the
+	// noncurrentExpiryCandidates ordering (oldest-first within a rule, rules in
+	// config order) so the action sequence and tests stay deterministic.
+	var candidates []string
+	seen := make(map[string]struct{})
+	for _, rule := range matching {
+		ncve := rule.NoncurrentVersionExpiration
+		if ncve.NoncurrentDays == nil && ncve.NewerNoncurrentVersions == nil {
+			continue // invalid rule, nothing to do
+		}
+		keep := 0
+		if ncve.NewerNoncurrentVersions != nil {
+			keep = int(*ncve.NewerNoncurrentVersions)
+		}
+		days := int32(0)
+		if ncve.NoncurrentDays != nil {
+			days = *ncve.NoncurrentDays
+		}
+
+		// Apply the full rule filter (size + per-version tags) per version, so a
+		// tag/size-filtered NCVE rule never expires an out-of-scope version.
+		// Prefix was already matched at the key level by noncurrentRules.
+		match := func(v storage.ObjectVersion) bool {
+			return e.versionMatchesFilter(ctx, bucket, key, v, rule.Filter)
+		}
+		for _, vid := range noncurrentExpiryCandidates(vs, keep, days, now, match) {
+			if _, ok := seen[vid]; ok {
+				continue
+			}
+			seen[vid] = struct{}{}
+			candidates = append(candidates, vid)
+		}
 	}
 
-	// Apply the full rule filter (size + per-version tags) per version, so a
-	// tag/size-filtered NCVE rule never expires an out-of-scope version. Prefix
-	// was already matched at the key level by noncurrentRule.
-	match := func(v storage.ObjectVersion) bool {
-		return e.versionMatchesFilter(ctx, bucket, key, v, rule.Filter)
-	}
-
-	for _, vid := range noncurrentExpiryCandidates(vs, keep, days, now, match) {
+	for _, vid := range candidates {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

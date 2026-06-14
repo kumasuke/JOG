@@ -142,12 +142,17 @@ func dateParseError(r storage.LifecycleRule) bool {
 	return !ok
 }
 
-// noncurrentRule returns the first enabled rule with a NoncurrentVersionExpiration
-// whose prefix matches the key. The caller applies the full filter (size/tag)
-// per version. v1 limitation: only the first prefix-matching rule is used; when
-// several NCVE rules overlap a key they are not merged (under-deletion, safe).
-// ok is false when none applies.
-func noncurrentRule(rules []storage.LifecycleRule, key string) (storage.LifecycleRule, bool) {
+// noncurrentRules returns every enabled rule with a NoncurrentVersionExpiration
+// whose prefix matches the key, in configuration order. The caller applies the
+// full filter (size/tag) per version and unions the per-rule deletion verdicts:
+// a version is expired when ANY matching rule expires it (S3 evaluates
+// overlapping rules independently and honors the shortest expiration —
+// lifecycle-conflicts.md). Merging the rules' fields (e.g. taking the minimum
+// keep and minimum days as one synthetic rule) would over-delete: it could
+// expire a version that no single rule's (keep, days) pair would, so the union
+// must be taken at the verdict level, not the field level.
+func noncurrentRules(rules []storage.LifecycleRule, key string) []storage.LifecycleRule {
+	var out []storage.LifecycleRule
 	for _, r := range rules {
 		if r.NoncurrentVersionExpiration == nil {
 			continue
@@ -155,9 +160,9 @@ func noncurrentRule(rules []storage.LifecycleRule, key string) (storage.Lifecycl
 		if r.Filter != nil && r.Filter.Prefix != "" && !strings.HasPrefix(key, r.Filter.Prefix) {
 			continue
 		}
-		return r, true
+		out = append(out, r)
 	}
-	return storage.LifecycleRule{}, false
+	return out
 }
 
 // noncurrentExpiryCandidates returns the version IDs of noncurrent, non-delete-
@@ -230,12 +235,14 @@ func eodmRuleMatches(rules []storage.LifecycleRule, key string) bool {
 	return false
 }
 
-// abortMPURule returns the first enabled rule with an
-// AbortIncompleteMultipartUpload action. S3 forbids combining a tag filter with
-// AIMU, so rules carrying a Tag filter are skipped. v1 limitation: only the
-// first such rule is applied; multiple AIMU rules with disjoint prefixes are
-// not all evaluated (under-action, safe).
-func abortMPURule(rules []storage.LifecycleRule) (storage.LifecycleRule, bool) {
+// abortMPURules returns every enabled rule with an
+// AbortIncompleteMultipartUpload action, in configuration order. S3 forbids
+// combining a tag filter with AIMU, so rules carrying a Tag filter are skipped.
+// The caller evaluates each upload against all returned rules and aborts it when
+// ANY rule's prefix matches and its DaysAfterInitiation has elapsed (the union /
+// shortest-expiration semantics S3 applies to overlapping rules).
+func abortMPURules(rules []storage.LifecycleRule) []storage.LifecycleRule {
+	var out []storage.LifecycleRule
 	for _, r := range rules {
 		if r.AbortIncompleteMultipartUpload == nil || r.AbortIncompleteMultipartUpload.DaysAfterInitiation == nil {
 			continue
@@ -243,7 +250,27 @@ func abortMPURule(rules []storage.LifecycleRule) (storage.LifecycleRule, bool) {
 		if r.Filter != nil && r.Filter.Tag != nil {
 			continue // S3: tag filter is incompatible with AIMU
 		}
-		return r, true
+		out = append(out, r)
 	}
-	return storage.LifecycleRule{}, false
+	return out
+}
+
+// aimuUploadEligible reports whether an upload initiated at `initiated` should be
+// aborted under any of the given AIMU rules: at least one rule whose prefix
+// matches the key has its DaysAfterInitiation elapsed as of `now`. Rules are the
+// output of abortMPURules (tag-filtered rules already excluded).
+func aimuUploadEligible(rules []storage.LifecycleRule, key string, initiated, now time.Time) bool {
+	for _, r := range rules {
+		prefix := ""
+		if r.Filter != nil {
+			prefix = r.Filter.Prefix
+		}
+		if prefix != "" && !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if eligibleByDays(now, initiated, *r.AbortIncompleteMultipartUpload.DaysAfterInitiation) {
+			return true
+		}
+	}
+	return false
 }
