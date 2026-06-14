@@ -102,6 +102,19 @@ JOG (Just Object Gateway) は、Go言語で実装されたS3互換のオブジ�
 - **リクエストボディサイズ上限**（#34）: XML系サブリソース API（ACL / CORS / 暗号化 / ライフサイクル / 通知 / オブジェクトロック / タグ付け / バージョニング / Website）と一括削除（DeleteObjects）・マルチパート完了は、AWS S3 に倣ったボディサイズ上限を持つ。上限超過時は HTTP 413 `EntityTooLarge` を返す。オブジェクト本体は単一 PUT / UploadPart ともに 5 GiB が上限。
 - **ライフサイクル EODM バリデーション**（#55）: `PutBucketLifecycleConfiguration` で `ExpiredObjectDeleteMarker` を `Expiration.Days` / `Expiration.Date` と同時指定したルールは HTTP 400 `InvalidRequest` で拒否する。
 - **削除パスの輻輳**（#54）: 書き込み競合で削除トランザクションが失敗した場合、HTTP 503 `SlowDown` を返してクライアントにバックオフ再試行を促す。
+- **SelectObjectContent**（S3 Select）: オブジェクトに対して SQL サブセットでクエリを実行し、合致した行だけを AWS EventStream バイナリ形式でストリーミング返却する。
+  - **エンドポイント**: `POST /{bucket}/{key}?select&select-type=2`
+  - **入力形式**: CSV（ヘッダー行あり/なし・任意の区切り文字）、JSON（Document / Lines）。JSON Document は単一 JSON オブジェクトを対象とし、配列ドキュメント（`[{...}, {...}]`）のイテレーションは未対応。**Parquet および gzip/bzip2 等の圧縮も未対応**（指定すると HTTP 400 `InvalidArgument`）
+  - **SQL サブセット**:
+    - 射影: `SELECT *` / 位置参照 `_1, _2, ...` / ヘッダー名 / テーブルエイリアス付き（例: `SELECT s.name FROM S3Object s`）
+    - フィルタ: `WHERE` 句、比較演算子（`=` `!=` `<>` `<` `<=` `>` `>=`）、論理演算子（`AND` / `OR` / `NOT`）、括弧グルーピング
+    - 制限: `LIMIT n`
+    - 型比較: 両辺が数値として解釈可能なら数値比較、それ以外は文字列比較（弱い型付け）
+    - **未対応**: 集約関数（`COUNT` / `SUM` / `AVG` / `MIN` / `MAX`）、SQL 組み込み関数、`CAST`（後続 PR で対応予定）
+  - **出力形式**: `OutputSerialization` に従い CSV または JSON Lines を生成
+  - **レスポンス**: AWS EventStream バイナリフレーム（`Records` イベント → `Stats` イベント → `End` イベント）
+  - **エラーコード**: バケット不在 → `NoSuchBucket`（404）、オブジェクト不在 → `NoSuchKey`（404）、不正な XML リクエスト → `MalformedXML`（400）、未対応の入力形式/不正な SQL → `InvalidArgument`（400）
+  - **実装**: `internal/api/select.go`（ハンドラ）、`internal/s3select/`（SQL パーサ・評価エンジン・CSV/JSON I/O）
 
 ---
 

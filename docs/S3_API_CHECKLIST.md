@@ -6,7 +6,7 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 - [x] Implemented
 - [ ] Not implemented
 
-**Last updated:** 2026-01-22
+**Last updated:** 2026-06-14
 
 ---
 
@@ -17,9 +17,9 @@ This document lists all Amazon S3 API operations and tracks JOG's implementation
 | Bucket - Basic | 5 | 6 | 83% |
 | Bucket - Configuration | 25 | 50+ | ~50% |
 | Object - Basic | 9 | 9 | 100% |
-| Object - Advanced | 13 | 15+ | ~87% |
+| Object - Advanced | 14 | 15+ | ~93% |
 | Multipart Upload | 7 | 7 | 100% |
-| **Total (Core APIs)** | **59** | **~87** | **~68%** |
+| **Total (Core APIs)** | **60** | **~87** | **~69%** |
 
 ---
 
@@ -232,7 +232,7 @@ Event delivery (beyond the configuration API above):
 | Operation | Status | Description |
 |-----------|--------|-------------|
 | RestoreObject | [ ] | Restore archived object (Glacier) |
-| SelectObjectContent | [ ] | Query object with SQL |
+| SelectObjectContent | [x] | Query object with SQL |
 | GetObjectTorrent | [ ] | Get torrent file |
 | WriteGetObjectResponse | [ ] | Lambda response streaming |
 
