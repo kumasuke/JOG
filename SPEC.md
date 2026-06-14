@@ -97,6 +97,12 @@ JOG (Just Object Gateway) は、Go言語で実装されたS3互換のオブジ�
 - [ ] ARM対応
 - [ ] レプリケーション機能
 
+### API制限・入力バリデーション
+
+- **リクエストボディサイズ上限**（#34）: XML系サブリソース API（ACL / CORS / 暗号化 / ライフサイクル / 通知 / オブジェクトロック / タグ付け / バージョニング / Website）と一括削除（DeleteObjects）・マルチパート完了は、AWS S3 に倣ったボディサイズ上限を持つ。上限超過時は HTTP 413 `EntityTooLarge` を返す。オブジェクト本体は単一 PUT / UploadPart ともに 5 GiB が上限。
+- **ライフサイクル EODM バリデーション**（#55）: `PutBucketLifecycleConfiguration` で `ExpiredObjectDeleteMarker` を `Expiration.Days` / `Expiration.Date` と同時指定したルールは HTTP 400 `InvalidRequest` で拒否する。
+- **削除パスの輻輳**（#54）: 書き込み競合で削除トランザクションが失敗した場合、HTTP 503 `SlowDown` を返してクライアントにバックオフ再試行を促す。
+
 ---
 
 ## アーキテクチャ

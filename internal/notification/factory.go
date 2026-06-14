@@ -27,7 +27,20 @@ func FromTargets(arnToURL map[string]string, region string, deliveryTimeout time
 		MaxIdleConnsPerHost: 8,
 		IdleConnTimeout:     90 * time.Second,
 	}
-	sink := NewWebhookSink(&http.Client{Timeout: deliveryTimeout, Transport: transport})
+	client := &http.Client{
+		Timeout:   deliveryTimeout,
+		Transport: transport,
+		// Refuse HTTP redirects. The default client follows up to 10 redirects,
+		// so a webhook endpoint that answers with a 3xx to an internal address
+		// (169.254.169.254 metadata, loopback, an RFC1918 service) would turn
+		// delivery into an SSRF vector. Returning ErrUseLastResponse stops the
+		// follow and hands the 3xx back to the sink, which reports it as a
+		// non-2xx delivery failure (best-effort, logged, not retried).
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	sink := NewWebhookSink(client)
 	resolver := NewResolver(arnToURL)
 	return NewDispatcher(sink, resolver, region, deliveryTimeout)
 }
