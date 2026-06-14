@@ -41,11 +41,28 @@ type LifecycleConfig struct {
 
 // Config holds the server configuration.
 type Config struct {
-	Server    ServerConfig    `yaml:"server"`
-	Storage   StorageConfig   `yaml:"storage"`
-	Auth      AuthConfig      `yaml:"auth"`
-	Logging   LoggingConfig   `yaml:"logging"`
-	Lifecycle LifecycleConfig `yaml:"lifecycle"`
+	Server       ServerConfig       `yaml:"server"`
+	Storage      StorageConfig      `yaml:"storage"`
+	Auth         AuthConfig         `yaml:"auth"`
+	Logging      LoggingConfig      `yaml:"logging"`
+	Lifecycle    LifecycleConfig    `yaml:"lifecycle"`
+	Notification NotificationConfig `yaml:"notification"`
+}
+
+// NotificationConfig holds bucket-notification event delivery settings. v1
+// delivers only via webhook (HTTP POST); SNS/SQS/Lambda/EventBridge are not yet
+// implemented (Issue #56). A bucket's notification configuration names a target
+// by ARN; Targets maps that ARN to the webhook URL the server actually POSTs to
+// (the MinIO model). An ARN with no mapping is dropped (logged), so notifications
+// are off by default until an operator wires a target here.
+type NotificationConfig struct {
+	// Region is stamped into each event's awsRegion field.
+	Region string `yaml:"region"`
+	// DeliveryTimeout caps a single webhook POST. Zero → 10s.
+	DeliveryTimeout Duration `yaml:"delivery_timeout"`
+	// Targets maps a notification ARN (TopicArn/QueueArn/LambdaFunctionArn from a
+	// bucket's PutBucketNotification) to a webhook URL.
+	Targets map[string]string `yaml:"targets"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -95,6 +112,11 @@ func DefaultConfig() *Config {
 			Enabled:            true,
 			Interval:           Duration(time.Hour),
 			MaxActionsPerCycle: 10000,
+		},
+		Notification: NotificationConfig{
+			Region:          "us-east-1",
+			DeliveryTimeout: Duration(10 * time.Second),
+			Targets:         map[string]string{},
 		},
 	}
 }
@@ -180,6 +202,12 @@ func applyEnv(cfg *Config) error {
 	if err := envInt("JOG_LIFECYCLE_MAX_ACTIONS", &cfg.Lifecycle.MaxActionsPerCycle); err != nil {
 		return err
 	}
+	envString("JOG_NOTIFICATION_REGION", &cfg.Notification.Region)
+	if err := envDuration("JOG_NOTIFICATION_DELIVERY_TIMEOUT", &cfg.Notification.DeliveryTimeout); err != nil {
+		return err
+	}
+	// ARN→URL target mappings are file-only: a map does not map cleanly onto a
+	// single env var, and operators set notification targets in config.yaml.
 	return nil
 }
 

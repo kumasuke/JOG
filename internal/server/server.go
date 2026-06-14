@@ -11,6 +11,7 @@ import (
 	"github.com/kumasuke/jog/internal/auth"
 	"github.com/kumasuke/jog/internal/config"
 	"github.com/kumasuke/jog/internal/lifecycle"
+	"github.com/kumasuke/jog/internal/notification"
 	"github.com/kumasuke/jog/internal/storage"
 	"github.com/rs/zerolog/log"
 )
@@ -59,6 +60,19 @@ func New(cfg *config.Config) (*Server, error) {
 		Interval:           cfg.Lifecycle.Interval.Std(),
 		MaxActionsPerCycle: cfg.Lifecycle.MaxActionsPerCycle,
 	}, time.Now)
+
+	// Wire lifecycle-expiration notifications when webhook targets are configured.
+	// FromTargets returns nil (notifications disabled) when no targets are set; in
+	// that case we leave the engine's notifier unset rather than installing a
+	// typed-nil interface.
+	if disp := notification.FromTargets(
+		cfg.Notification.Targets,
+		cfg.Notification.Region,
+		cfg.Notification.DeliveryTimeout.Std(),
+	); disp != nil {
+		lcEngine.SetNotifier(disp)
+		log.Info().Int("targets", len(cfg.Notification.Targets)).Msg("Lifecycle expiration notifications enabled (webhook)")
+	}
 
 	return &Server{
 		httpServer: httpServer,

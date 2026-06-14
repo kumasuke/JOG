@@ -8,6 +8,7 @@ import (
 
 	"github.com/kumasuke/jog/internal/config"
 	"github.com/kumasuke/jog/internal/lifecycle"
+	"github.com/kumasuke/jog/internal/notification"
 	"github.com/kumasuke/jog/internal/storage"
 	"github.com/spf13/cobra"
 )
@@ -78,6 +79,22 @@ func runLifecycle(cmd *cobra.Command, args []string) error {
 		DryRun:             lcDryRun,
 		OnlyBucket:         lcBucket,
 	}, nil)
+
+	// Wire lifecycle-expiration notifications for this manual run, matching the
+	// server's behavior. FromTargets returns nil (notifications disabled) when no
+	// targets are configured; a dry-run never emits regardless of wiring.
+	disp := notification.FromTargets(
+		cfg.Notification.Targets,
+		cfg.Notification.Region,
+		cfg.Notification.DeliveryTimeout.Std(),
+	)
+	if disp != nil {
+		eng.SetNotifier(disp)
+	}
+	// Block until async webhook deliveries finish so a short-lived CLI run does
+	// not exit before they are sent, even on the error path where some events
+	// may already have been dispatched. Wait is nil-safe.
+	defer disp.Wait()
 
 	report, err := eng.RunOnce(context.Background())
 	if err != nil {

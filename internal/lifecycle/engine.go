@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kumasuke/jog/internal/notification"
 	"github.com/kumasuke/jog/internal/objectlock"
 	"github.com/kumasuke/jog/internal/storage"
 	"github.com/rs/zerolog"
@@ -62,16 +63,30 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
+// Notifier publishes a lifecycle expiration event. The engine calls it only
+// after a guarded action actually deletes/creates (outcome == ExpireExpired),
+// never in dry-run and never on a skip/error. *notification.Dispatcher satisfies
+// this; a nil Notifier means notifications are disabled (no-op).
+type Notifier interface {
+	Dispatch(in notification.DispatchInput)
+}
+
 // Engine runs lifecycle cycles. It is single-goroutine by design: RunOnce must
 // not be called concurrently on the same instance.
 type Engine struct {
-	storage storage.Storage
-	cfg     Config
-	now     func() time.Time
-	log     zerolog.Logger
+	storage  storage.Storage
+	cfg      Config
+	now      func() time.Time
+	notifier Notifier
+	log      zerolog.Logger
 
 	actions  int  // per-cycle action counter (reset at the start of RunOnce)
 	needTags bool // per-bucket: do any Expiration rules use a tag filter?
+
+	// notifyConfig is the current bucket's notification configuration, loaded
+	// once per bucket in processBucket. nil when notifications are disabled or the
+	// bucket has no configuration, so the per-action emit path is a cheap no-op.
+	notifyConfig *storage.NotificationConfiguration
 }
 
 // NewEngine constructs an engine. now may be nil (defaults to time.Now); tests
@@ -87,6 +102,10 @@ func NewEngine(st storage.Storage, cfg Config, now func() time.Time) *Engine {
 		log:     log.With().Str("component", "lifecycle").Logger(),
 	}
 }
+
+// SetNotifier installs the lifecycle-expiration event notifier. Pass nil (or
+// don't call this) to disable notifications. Must be called before Run/RunOnce.
+func (e *Engine) SetNotifier(n Notifier) { e.notifier = n }
 
 // Config returns the effective (defaulted) configuration.
 func (e *Engine) EffectiveConfig() Config { return e.cfg }
@@ -236,6 +255,19 @@ func (e *Engine) processBucket(ctx context.Context, bucket string, versioning st
 	// version in versionMatchesFilter).
 	e.needTags = expirationRulesUseTags(rules)
 
+	// Load the bucket's notification configuration once per bucket so the
+	// per-action emit path is cheap. Skipped entirely in dry-run (no events) and
+	// when no notifier is installed. A read error disables events for the bucket
+	// this cycle (best-effort; never blocks deletions).
+	e.notifyConfig = nil
+	if e.notifier != nil && !e.cfg.DryRun {
+		if nc, err := e.storage.GetBucketNotification(ctx, bucket); err == nil {
+			e.notifyConfig = nc
+		} else {
+			e.log.Debug().Err(err).Str("bucket", bucket).Msg("read bucket notification config; events disabled this cycle")
+		}
+	}
+
 	if err := e.runAIMU(ctx, bucket, rules, now, br); err != nil {
 		return err
 	}
@@ -365,6 +397,10 @@ func (e *Engine) scanNonVersioned(ctx context.Context, bucket string, rules []st
 					continue
 				}
 				br.record(outcome)
+				if outcome == storage.ExpireExpired {
+					// Unversioned physical delete → :Delete with no versionId.
+					e.emitExpiration(bucket, notification.EventLifecycleExpirationDelete, key, obj.ETag, "", obj.Size, now)
+				}
 			}
 			if err := e.afterAction(ctx); err != nil {
 				return err
@@ -495,10 +531,14 @@ func (e *Engine) maybeExpireCurrentDM(ctx context.Context, bucket string, rules 
 		return nil
 	}
 	br.record(outcome)
-	if outcome == storage.ExpireExpired && locked {
-		br.LockedCurrentDMs++
-		e.log.Info().Str("bucket", bucket).Str("key", key).Str("marker", markerID).
-			Msg("expiration delete marker created over a locked current version (S3-compliant; version remains retrievable by versionId)")
+	if outcome == storage.ExpireExpired {
+		if locked {
+			br.LockedCurrentDMs++
+			e.log.Info().Str("bucket", bucket).Str("key", key).Str("marker", markerID).
+				Msg("expiration delete marker created over a locked current version (S3-compliant; version remains retrievable by versionId)")
+		}
+		// S3 fires DeleteMarkerCreated with the new marker's versionId.
+		e.emitExpiration(bucket, notification.EventLifecycleExpirationDeleteMarkerCreated, key, "", markerID, size, now)
 	}
 	return e.afterAction(ctx)
 }
@@ -548,12 +588,29 @@ func (e *Engine) expireNoncurrent(ctx context.Context, bucket string, rules []st
 				continue
 			}
 			br.record(outcome)
+			if outcome == storage.ExpireExpired {
+				// Permanent version delete → :Delete with the deleted versionId.
+				etag, size := versionETagSize(vs, vid)
+				e.emitExpiration(bucket, notification.EventLifecycleExpirationDelete, key, etag, vid, size, now)
+			}
 		}
 		if err := e.afterAction(ctx); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// versionETagSize returns the ETag and size of the version with the given ID
+// from vs (the per-key version slice already loaded for the scan). Returns
+// zero values when not found (defensive; the vid came from vs).
+func versionETagSize(vs []storage.ObjectVersion, versionID string) (string, int64) {
+	for i := range vs {
+		if vs[i].VersionID == versionID {
+			return vs[i].ETag, vs[i].Size
+		}
+	}
+	return "", 0
 }
 
 func (e *Engine) cleanupEODM(ctx context.Context, bucket string, rules []storage.LifecycleRule, key string, vs []storage.ObjectVersion, now time.Time, br *BucketReport) error {
@@ -601,6 +658,29 @@ func (e *Engine) afterAction(ctx context.Context) error {
 		return errMaxActions
 	}
 	return nil
+}
+
+// emitExpiration publishes a lifecycle expiration event for an action that
+// actually happened. It is a no-op when notifications are disabled (no notifier
+// or no bucket config) — callers may invoke it unconditionally after a confirmed
+// deletion/marker creation. It must NOT be called in dry-run or for skipped
+// actions: callers gate on outcome == ExpireExpired before calling. versionID is
+// the deleted version (or the new marker's ID for DeleteMarkerCreated); empty for
+// an unversioned physical delete.
+func (e *Engine) emitExpiration(bucket, eventName, key, etag, versionID string, size int64, now time.Time) {
+	if e.notifier == nil || e.notifyConfig == nil {
+		return
+	}
+	e.notifier.Dispatch(notification.DispatchInput{
+		Config:    e.notifyConfig,
+		EventName: eventName,
+		Bucket:    bucket,
+		Key:       key,
+		ETag:      etag,
+		VersionID: versionID,
+		Size:      size,
+		EventTime: now,
+	})
 }
 
 // lockVerdict reports whether (bucket,key,versionID) may be deleted under Object
