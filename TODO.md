@@ -134,6 +134,7 @@ Each feature follows TDD (Test-Driven Development):
 
 ### Not Prioritized
 - [x] Bucket Notification configuration API (GetBucketNotification / PutBucketNotification)
+- [x] Bucket Notification event delivery (Webhook / HTTP POST) — lifecycle expiration events `s3:LifecycleExpiration:Delete` / `:DeleteMarkerCreated` (#56)
 - [ ] Bucket Notification event delivery (SNS/SQS/Lambda/EventBridge)
 - [ ] Object Select (SelectObjectContent)
 

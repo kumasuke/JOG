@@ -103,6 +103,10 @@ Environment variables:
 - `JOG_LIFECYCLE_ENABLED` - Run the lifecycle engine (default: true)
 - `JOG_LIFECYCLE_INTERVAL` - Lifecycle cycle interval, Go duration (default: 1h)
 - `JOG_LIFECYCLE_MAX_ACTIONS` - Max actions per cycle (default: 10000)
+- `JOG_NOTIFICATION_REGION` - `awsRegion` stamped into notification events (default: us-east-1)
+- `JOG_NOTIFICATION_DELIVERY_TIMEOUT` - Per-webhook delivery timeout, Go duration (default: 10s)
+
+Webhook delivery targets (ARN → URL) are configured only via `notification.targets` in `config.yaml`; lifecycle expiration events (`s3:LifecycleExpiration:Delete` / `:DeleteMarkerCreated`) are POSTed to the matching URL when at least one target is set.
 
 ### Lifecycle engine
 

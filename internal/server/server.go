@@ -11,6 +11,7 @@ import (
 	"github.com/kumasuke/jog/internal/auth"
 	"github.com/kumasuke/jog/internal/config"
 	"github.com/kumasuke/jog/internal/lifecycle"
+	"github.com/kumasuke/jog/internal/notification"
 	"github.com/kumasuke/jog/internal/storage"
 	"github.com/rs/zerolog/log"
 )
@@ -21,6 +22,7 @@ type Server struct {
 	storage    storage.Storage
 	config     *config.Config
 	lifecycle  *lifecycle.Engine
+	notifier   *notification.Dispatcher
 	lcCancel   context.CancelFunc
 	lcDone     chan struct{}
 }
@@ -60,11 +62,27 @@ func New(cfg *config.Config) (*Server, error) {
 		MaxActionsPerCycle: cfg.Lifecycle.MaxActionsPerCycle,
 	}, time.Now)
 
+	// Wire lifecycle-expiration notifications when webhook targets are configured.
+	// FromTargets returns nil (notifications disabled) when no targets are set; in
+	// that case we leave the engine's notifier unset rather than installing a
+	// typed-nil interface. We retain disp on the Server so Shutdown can await any
+	// in-flight async deliveries (Wait is nil-safe).
+	disp := notification.FromTargets(
+		cfg.Notification.Targets,
+		cfg.Notification.Region,
+		cfg.Notification.DeliveryTimeout.Std(),
+	)
+	if disp != nil {
+		lcEngine.SetNotifier(disp)
+		log.Info().Int("targets", len(cfg.Notification.Targets)).Msg("Lifecycle expiration notifications enabled (webhook)")
+	}
+
 	return &Server{
 		httpServer: httpServer,
 		storage:    store,
 		config:     cfg,
 		lifecycle:  lcEngine,
+		notifier:   disp,
 	}, nil
 }
 
@@ -97,7 +115,8 @@ func (s *Server) Start() error {
 
 // Shutdown gracefully shuts down the server. The lifecycle engine is stopped
 // first (and awaited at a version-level boundary) so no guarded deletion is
-// interrupted mid-flight, then the HTTP server drains and storage closes.
+// interrupted mid-flight; then any in-flight notification deliveries are
+// awaited, and finally the HTTP server drains and storage closes.
 func (s *Server) Shutdown() error {
 	log.Info().Msg("Shutting down server")
 
@@ -105,6 +124,11 @@ func (s *Server) Shutdown() error {
 		s.lcCancel()
 		<-s.lcDone // wait for the engine to stop at a transaction boundary
 	}
+
+	// The engine has stopped, so no new events can be dispatched. Wait for any
+	// async webhook deliveries already in flight so we don't drop them on exit.
+	// Wait is nil-safe (no-op when notifications are disabled).
+	s.notifier.Wait()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
