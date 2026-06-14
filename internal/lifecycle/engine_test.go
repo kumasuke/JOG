@@ -351,18 +351,21 @@ func TestEngine_AbortIncompleteMultipartUpload(t *testing.T) {
 // version is expired when ANY rule expires it), matching S3's independent-rule /
 // shortest-expiration semantics.
 //
-// This case is constructed to FAIL under a naive field-merge (taking the minimum
-// keep and minimum days across rules as one synthetic rule), which is the
-// over-delete trap the implementation must avoid:
+// The rules are constructed so the correct union is exactly {v1}, and BOTH wrong
+// implementations the fix replaces produce a different set — so a single test
+// kills both mutants:
 //
 //	noncurrent versions: v1 (oldest), v2, v3   (v4 = current)
-//	Rule A (broad, prefix=""):    keep=2, days=1   → protects v3,v2; expires {v1}
-//	Rule B (narrow, prefix=logs/): keep=0, days=365 → 365d not elapsed → expires {}
-//	correct union:        {v1}
-//	field-merge(min keep=0, min days=1): would expire {v1,v2,v3}  ← WRONG
+//	Rule A (first, keep=0, days=365): 365d not elapsed → expires {}
+//	Rule B (second, keep=2, days=1):  protects v3,v2 → expires {v1}
+//	correct union:                    {v1}
+//	old first-match (Rule A only):    {}            → "v1 expired" assert goes RED
+//	field-merge(min keep=0, min days=1): {v1,v2,v3} → "v2/v3 survive" assert goes RED
 //
-// So the assertions (v1 gone, v2/v3/v4 kept) are green only for the union and red
-// for both the old first-match logic AND a field-merge.
+// The first rule is made inert via days (not keep) on purpose: an inert-by-keep
+// first rule would let a field-merge skip its keep and the test could not catch
+// field-merge. Verified with the engine.go mutation harness in both directions
+// (first-match and field-merge both fail; the real union passes).
 func TestEngine_NoncurrentVersionExpiration_OverlappingRules(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Add(100 * 24 * time.Hour)
@@ -373,20 +376,21 @@ func TestEngine_NoncurrentVersionExpiration_OverlappingRules(t *testing.T) {
 	v3 := putV(t, st, "b", "logs/k", "3") // noncurrent
 	v4 := putV(t, st, "b", "logs/k", "4") // current
 	setLifecycle(t, st, "b",
-		// Broad rule: keep newest 2 noncurrent (v3,v2), expire the rest (v1).
+		// First rule keeps none but requires 365 days — not elapsed, so on its own
+		// it expires nothing. Placing it first means the old first-match logic
+		// would stop here and delete nothing.
 		storage.LifecycleRule{
-			ID: "keep-2-all", Status: "Enabled",
+			ID: "keep-0-365d", Status: "Enabled",
+			NoncurrentVersionExpiration: &storage.NoncurrentVersionExpiration{NoncurrentDays: i32(365)},
+		},
+		// Second rule keeps the newest 2 noncurrent (v3,v2) and expires the rest
+		// (v1) at 1 day. The union must therefore expire exactly v1.
+		storage.LifecycleRule{
+			ID: "keep-2-1d", Status: "Enabled",
+			Filter: &storage.LifecycleRuleFilter{Prefix: "logs/"},
 			NoncurrentVersionExpiration: &storage.NoncurrentVersionExpiration{
 				NoncurrentDays: i32(1), NewerNoncurrentVersions: i32(2),
 			},
-		},
-		// Narrow rule: keep none but require 365 days — not elapsed, so it expires
-		// nothing here. A field-merge would borrow its keep=0 and the broad rule's
-		// days=1 and wrongly expire v2 and v3.
-		storage.LifecycleRule{
-			ID: "keep-0-logs-365d", Status: "Enabled",
-			Filter:                      &storage.LifecycleRuleFilter{Prefix: "logs/"},
-			NoncurrentVersionExpiration: &storage.NoncurrentVersionExpiration{NoncurrentDays: i32(365)},
 		},
 	)
 
@@ -398,10 +402,10 @@ func TestEngine_NoncurrentVersionExpiration_OverlappingRules(t *testing.T) {
 		return err == nil
 	}
 	if present(v1) {
-		t.Error("v1 (beyond keep=2 of the broad rule) should be expired")
+		t.Error("v1 should be expired by the union (second rule, keep=2); old first-match would wrongly keep it")
 	}
 	if !present(v2) {
-		t.Error("v2 should survive: the broad rule protects it (keep=2) and the narrow rule's 365d has not elapsed; a field-merge would wrongly delete it")
+		t.Error("v2 should survive: the second rule protects it (keep=2) and the first rule's 365d has not elapsed; a field-merge would wrongly delete it")
 	}
 	if !present(v3) {
 		t.Error("v3 should survive: same as v2; a field-merge would wrongly delete it")
