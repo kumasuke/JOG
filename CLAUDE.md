@@ -138,6 +138,7 @@ Environment variables:
 - `JOG_LIFECYCLE_MAX_ACTIONS` - Max actions applied per lifecycle cycle (default: 10000)
 - `JOG_NOTIFICATION_REGION` - AWS region stamped into event notifications (default: us-east-1)
 - `JOG_NOTIFICATION_DELIVERY_TIMEOUT` - Per-webhook delivery timeout, e.g. `10s` (default: 10s)
+- `JOG_NOTIFICATION_BLOCK_PRIVATE_TARGETS` - Refuse webhook delivery to loopback/link-local/private/unspecified addresses (SSRF guard; default: false)
 
 The notification target map (ARN → webhook URL) is file-only and has no env var;
 set it under `notification.targets` in `config.yaml` (see SPEC.md).

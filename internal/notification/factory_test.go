@@ -33,11 +33,68 @@ func TestFromTargets_DoesNotFollowRedirects(t *testing.T) {
 	defer redirector.Close()
 
 	const arn = "arn:aws:sns:us-east-1:000000000000:hook"
-	d := FromTargets(map[string]string{arn: redirector.URL}, "us-east-1", 2*time.Second)
+	d := FromTargets(map[string]string{arn: redirector.URL}, "us-east-1", 2*time.Second, false)
 	if d == nil {
 		t.Fatal("FromTargets returned nil for a non-empty target map")
 	}
 
+	dispatchOne(d, arn, "k")
+	d.Wait()
+
+	if internalHit.Load() {
+		t.Fatal("webhook delivery followed a redirect to an internal host (SSRF); redirects must be refused")
+	}
+}
+
+// TestFromTargets_BlockPrivateTargets_RefusesLoopback pins the opt-in SSRF
+// guard: with blockPrivate=true, delivery to a loopback/private address is
+// refused at dial time. httptest servers listen on 127.0.0.1, so a successful
+// block means the receiver records nothing.
+func TestFromTargets_BlockPrivateTargets_RefusesLoopback(t *testing.T) {
+	var hit atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hit.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	const arn = "arn:aws:sns:us-east-1:000000000000:hook"
+	d := FromTargets(map[string]string{arn: srv.URL}, "us-east-1", 2*time.Second, true)
+	if d == nil {
+		t.Fatal("FromTargets returned nil for a non-empty target map")
+	}
+
+	dispatchOne(d, arn, "k")
+	d.Wait()
+
+	if hit.Load() {
+		t.Fatal("delivery to a loopback address was not blocked despite block_private_targets=true")
+	}
+}
+
+// TestFromTargets_BlockPrivateTargets_Disabled_AllowsLoopback is the default:
+// without the opt-in, an internal (loopback) target is delivered normally, so
+// the common "webhook to a same-host/cluster service" deployment keeps working.
+func TestFromTargets_BlockPrivateTargets_Disabled_AllowsLoopback(t *testing.T) {
+	var hit atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hit.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	const arn = "arn:aws:sns:us-east-1:000000000000:hook"
+	d := FromTargets(map[string]string{arn: srv.URL}, "us-east-1", 2*time.Second, false)
+	dispatchOne(d, arn, "k")
+	d.Wait()
+
+	if !hit.Load() {
+		t.Fatal("loopback delivery should succeed when block_private_targets is off")
+	}
+}
+
+// dispatchOne fires a single lifecycle-expiration event subscribed to arn.
+func dispatchOne(d *Dispatcher, arn, key string) {
 	cfg := &storage.NotificationConfiguration{
 		TopicConfigurations: []storage.TopicNotificationConfiguration{
 			{ID: "cfg-1", TopicArn: arn, Events: []string{"s3:LifecycleExpiration:*"}},
@@ -46,12 +103,7 @@ func TestFromTargets_DoesNotFollowRedirects(t *testing.T) {
 	d.Dispatch(DispatchInput{
 		Config:    cfg,
 		EventName: EventLifecycleExpirationDelete,
-		Bucket:    "b", Key: "k",
+		Bucket:    "b", Key: key,
 		EventTime: time.Now(),
 	})
-	d.Wait()
-
-	if internalHit.Load() {
-		t.Fatal("webhook delivery followed a redirect to an internal host (SSRF); redirects must be refused")
-	}
 }

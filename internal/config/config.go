@@ -60,6 +60,12 @@ type NotificationConfig struct {
 	Region string `yaml:"region"`
 	// DeliveryTimeout caps a single webhook POST. Zero → 10s.
 	DeliveryTimeout Duration `yaml:"delivery_timeout"`
+	// BlockPrivateTargets, when true, refuses webhook delivery to loopback,
+	// link-local, private (RFC1918), or unspecified addresses — defense-in-depth
+	// against SSRF when a target (or a redirect, which is already refused) points
+	// at internal infrastructure. Default false because delivering to an internal
+	// service (same cluster/host) is a normal, intended deployment.
+	BlockPrivateTargets bool `yaml:"block_private_targets"`
 	// Targets maps a notification ARN (TopicArn/QueueArn/LambdaFunctionArn from a
 	// bucket's PutBucketNotification) to a webhook URL.
 	Targets map[string]string `yaml:"targets"`
@@ -114,9 +120,10 @@ func DefaultConfig() *Config {
 			MaxActionsPerCycle: 10000,
 		},
 		Notification: NotificationConfig{
-			Region:          "us-east-1",
-			DeliveryTimeout: Duration(10 * time.Second),
-			Targets:         map[string]string{},
+			Region:              "us-east-1",
+			DeliveryTimeout:     Duration(10 * time.Second),
+			BlockPrivateTargets: false,
+			Targets:             map[string]string{},
 		},
 	}
 }
@@ -204,6 +211,9 @@ func applyEnv(cfg *Config) error {
 	}
 	envString("JOG_NOTIFICATION_REGION", &cfg.Notification.Region)
 	if err := envDuration("JOG_NOTIFICATION_DELIVERY_TIMEOUT", &cfg.Notification.DeliveryTimeout); err != nil {
+		return err
+	}
+	if err := envBool("JOG_NOTIFICATION_BLOCK_PRIVATE_TARGETS", &cfg.Notification.BlockPrivateTargets); err != nil {
 		return err
 	}
 	// ARN→URL target mappings are file-only: a map does not map cleanly onto a

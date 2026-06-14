@@ -42,6 +42,11 @@ func (s *WebhookSink) Deliver(ctx context.Context, url string, env Envelope) err
 	if err != nil {
 		return fmt.Errorf("notification: build webhook request: %w", err)
 	}
+	// Only http(s) targets are deliverable. Reject anything else (file://, gopher://,
+	// a bare/relative URL, …) before dialing rather than handing it to the transport.
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		return fmt.Errorf("notification: unsupported webhook URL scheme %q (want http or https)", req.URL.Scheme)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := s.client.Do(req)

@@ -56,3 +56,22 @@ func TestWebhookSink_TransportErrorIsError(t *testing.T) {
 		t.Fatal("Deliver to an unreachable endpoint returned nil, want error")
 	}
 }
+
+// TestWebhookSink_RejectsNonHTTPScheme pins the scheme allowlist: a non-http(s)
+// target (file://, gopher://, a relative URL) is rejected before any dial, so a
+// misconfigured target cannot reach the local filesystem or odd protocols.
+func TestWebhookSink_RejectsNonHTTPScheme(t *testing.T) {
+	for _, url := range []string{
+		"file:///etc/passwd",
+		"gopher://example.test/_data",
+		"ftp://example.test/x",
+		"/relative/path",
+	} {
+		t.Run(url, func(t *testing.T) {
+			sink := NewWebhookSink(&http.Client{Timeout: 2 * time.Second})
+			if err := sink.Deliver(context.Background(), url, Envelope{Records: []Event{}}); err == nil {
+				t.Fatalf("Deliver to %q returned nil, want scheme rejection", url)
+			}
+		})
+	}
+}
