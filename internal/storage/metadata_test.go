@@ -3,9 +3,11 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -235,6 +237,71 @@ func TestObjectLockMigration_LegacyToV2(t *testing.T) {
 	// A physical backup must have been created.
 	if _, err := os.Stat(dbPath + ".pre-lockv2.bak"); err != nil {
 		t.Errorf("expected pre-migration backup file: %v", err)
+	}
+}
+
+// TestObjectLockMigration_IdempotentReopen verifies that re-opening an
+// already-migrated DB is a no-op: the user_version gate short-circuits the
+// migration, the renamed v2 tables are not migrated a second time, and the
+// migrated rows survive untouched. This guards the withImmediateTx-based
+// migration (issue #57) against accidentally re-running on a current-gen DB.
+func TestObjectLockMigration_IdempotentReopen(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/metadata.db"
+	openLegacyDB(t, dbPath)
+
+	// First open performs the legacy -> v2 migration.
+	m1, err := NewMetadata(dbPath)
+	if err != nil {
+		t.Fatalf("NewMetadata (first open): %v", err)
+	}
+	if err := m1.Close(); err != nil {
+		t.Fatalf("close first metadata: %v", err)
+	}
+
+	// Second open must be idempotent: the dispatcher sees a current-generation
+	// user_version and runs no migration.
+	m2, err := NewMetadata(dbPath)
+	if err != nil {
+		t.Fatalf("NewMetadata (reopen): %v", err)
+	}
+	defer m2.Close()
+
+	var uv int
+	if err := m2.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&uv); err != nil {
+		t.Fatalf("read user_version after reopen: %v", err)
+	}
+	if uv != aclTagsSchemaVersion {
+		t.Errorf("user_version after reopen = %d, want %d", uv, aclTagsSchemaVersion)
+	}
+
+	// Migrated rows must still be readable and unchanged after the no-op reopen.
+	mode, until, err := m2.GetObjectRetention(ctx, "b", "gov-key", "ver-1")
+	if err != nil {
+		t.Fatalf("GetObjectRetention after reopen: %v", err)
+	}
+	if mode != "GOVERNANCE" || until == nil {
+		t.Errorf("gov-key retention lost after idempotent reopen: mode=%q until=%v", mode, until)
+	}
+	status, err := m2.GetObjectLegalHold(ctx, "b", "hold-key", "")
+	if err != nil {
+		t.Fatalf("GetObjectLegalHold after reopen: %v", err)
+	}
+	if status != "ON" {
+		t.Errorf("hold-key legal hold lost after idempotent reopen: status=%q", status)
+	}
+
+	// The reopen must NOT create a second-generation legacy table (e.g.
+	// object_retention_legacy_v1_legacy_v1), which would prove the migration
+	// re-ran against the already-promoted tables.
+	var doubleMigrated int
+	if err := m2.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE '%legacy_v1_legacy_v1'`).
+		Scan(&doubleMigrated); err != nil {
+		t.Fatalf("inspect for double-migrated tables: %v", err)
+	}
+	if doubleMigrated != 0 {
+		t.Errorf("idempotent reopen re-ran the migration: %d double-migrated tables present", doubleMigrated)
 	}
 }
 
@@ -1207,5 +1274,127 @@ func TestValidateLockMigration_LegalHoldOrphanFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "legal hold rows reference a non-existent version") {
 		t.Fatalf("error = %v, want legal hold orphan message", err)
+	}
+}
+
+// TestWithImmediateTx_BusyTimeoutOption verifies that withBusyTimeout(ms) controls
+// how long withImmediateTx waits for a contended write lock, and that omitting the
+// option uses the engineBusyTimeoutMS (100 ms) default (fail-closed behaviour).
+//
+// The test pins a lock-holding connection that releases after ~300 ms. A call
+// with withBusyTimeout(defaultBusyTimeoutMS) (5000 ms) must succeed; the 100 ms
+// default would have timed out and returned ErrBusy. A separate subtest
+// confirms this by passing an artificially short timeout explicitly.
+func TestWithImmediateTx_BusyTimeoutOption(t *testing.T) {
+	ctx := context.Background()
+
+	// holdLock pins a write lock on m for holdDuration, signals ready on the
+	// returned channel when the lock is acquired, then releases it.
+	holdLock := func(t *testing.T, m *Metadata, holdDuration time.Duration) <-chan struct{} {
+		t.Helper()
+		ready := make(chan struct{})
+		go func() {
+			conn, err := m.db.Conn(ctx)
+			if err != nil {
+				t.Errorf("holdLock Conn: %v", err)
+				close(ready)
+				return
+			}
+			defer conn.Close()
+			if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+				t.Errorf("holdLock BEGIN IMMEDIATE: %v", err)
+				close(ready)
+				return
+			}
+			close(ready) // signal: lock is now held
+			time.Sleep(holdDuration)
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}()
+		return ready
+	}
+
+	t.Run("succeeds_with_long_timeout", func(t *testing.T) {
+		m := newTestMetadata(t)
+		if err := m.CreateBucket(ctx, "b", time.Now()); err != nil {
+			t.Fatalf("CreateBucket: %v", err)
+		}
+
+		// Hold the write lock for 300 ms — longer than engineBusyTimeoutMS (100 ms)
+		// but shorter than defaultBusyTimeoutMS (5000 ms).
+		ready := holdLock(t, m, 300*time.Millisecond)
+		<-ready // wait until the lock is actually held
+
+		// withBusyTimeout(defaultBusyTimeoutMS) must wait past the 300 ms hold and succeed.
+		err := m.withImmediateTx(ctx, func(conn *sql.Conn) error {
+			return nil
+		}, withBusyTimeout(defaultBusyTimeoutMS))
+		if err != nil {
+			t.Fatalf("withImmediateTx with 5000 ms timeout: want nil, got %v", err)
+		}
+	})
+
+	t.Run("fails_fast_with_short_timeout", func(t *testing.T) {
+		m := newTestMetadata(t)
+		if err := m.CreateBucket(ctx, "b", time.Now()); err != nil {
+			t.Fatalf("CreateBucket: %v", err)
+		}
+
+		// Hold the write lock for 300 ms.
+		ready := holdLock(t, m, 300*time.Millisecond)
+		<-ready
+
+		// With a 50 ms timeout the BEGIN IMMEDIATE should fail with ErrBusy.
+		var wg sync.WaitGroup
+		wg.Add(1)
+		var gotErr error
+		go func() {
+			defer wg.Done()
+			gotErr = m.withImmediateTx(ctx, func(conn *sql.Conn) error {
+				return nil
+			}, withBusyTimeout(50))
+		}()
+		wg.Wait()
+		if !errors.Is(gotErr, ErrBusy) {
+			t.Fatalf("withImmediateTx with 50 ms timeout: want ErrBusy, got %v", gotErr)
+		}
+	})
+}
+
+// TestWithImmediateTx_RestoresBusyTimeout verifies that after withImmediateTx
+// completes (regardless of which timeout was requested), the connection returned
+// to the pool has busy_timeout reset to defaultBusyTimeoutMS (5000 ms) so that
+// subsequent request-path writes get the full wait.
+func TestWithImmediateTx_RestoresBusyTimeout(t *testing.T) {
+	ctx := context.Background()
+
+	// Use a Metadata with MaxOpenConns=1 so the same physical connection is
+	// reused by both the withImmediateTx call and our follow-up PRAGMA read.
+	m := newTestMetadata(t)
+	m.db.SetMaxOpenConns(1)
+
+	// Run withImmediateTx with a non-default (short) timeout.
+	if err := m.withImmediateTx(ctx, func(conn *sql.Conn) error {
+		return nil
+	}, withBusyTimeout(42)); err != nil {
+		t.Fatalf("withImmediateTx: %v", err)
+	}
+
+	// The single connection should now be back in the pool with its timeout
+	// restored. Read busy_timeout from that same connection.
+	conn, err := m.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn after withImmediateTx: %v", err)
+	}
+	defer conn.Close()
+
+	var gotTimeout int
+	row := conn.QueryRowContext(ctx, "PRAGMA busy_timeout")
+	if err := row.Scan(&gotTimeout); err != nil {
+		t.Fatalf("PRAGMA busy_timeout scan: %v", err)
+	}
+
+	if gotTimeout != defaultBusyTimeoutMS {
+		t.Errorf("busy_timeout after withImmediateTx = %d, want %d (defaultBusyTimeoutMS)",
+			gotTimeout, defaultBusyTimeoutMS)
 	}
 }

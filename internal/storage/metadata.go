@@ -61,10 +61,12 @@ const (
 	// pooled connection via the DSN. Request-path writes wait this long for a
 	// momentarily-held write lock instead of failing fast with SQLITE_BUSY.
 	defaultBusyTimeoutMS = 5000
-	// engineBusyTimeoutMS is the shorter busy timeout used only inside
-	// withImmediateTx, so the background lifecycle engine skips a contended
-	// version quickly (fail-closed) rather than blocking a whole cycle behind
-	// request-path writes.
+	// engineBusyTimeoutMS is the shorter busy timeout used by the lifecycle
+	// engine calls to withImmediateTx (no opts = this default), so a contended
+	// BEGIN IMMEDIATE returns ErrBusy quickly (fail-closed) instead of blocking
+	// the cycle. Startup migrations pass withBusyTimeout(defaultBusyTimeoutMS)
+	// to wait up to 5 s for an overlapping writer (e.g. rolling-deploy double
+	// open, Litestream checkpoint) to release the lock.
 	engineBusyTimeoutMS = 100
 )
 
@@ -88,34 +90,61 @@ func wrapBusy(err error) error {
 	return err
 }
 
+// immediateTxOption configures optional parameters for withImmediateTx.
+type immediateTxOption func(*immediateTxConfig)
+
+type immediateTxConfig struct {
+	busyTimeoutMS int
+}
+
+// withBusyTimeout returns an immediateTxOption that overrides the busy_timeout
+// used for the BEGIN IMMEDIATE attempt. Use withBusyTimeout(defaultBusyTimeoutMS)
+// for startup migrations that must survive transient external lock holders
+// (rolling-deploy double open, Litestream checkpoint, etc.).
+func withBusyTimeout(ms int) immediateTxOption {
+	return func(c *immediateTxConfig) { c.busyTimeoutMS = ms }
+}
+
 // withImmediateTx pins a single pooled connection and runs fn inside a real
 // BEGIN IMMEDIATE transaction. BEGIN IMMEDIATE acquires the write lock up
 // front, so every read fn performs sees the latest committed state and no
 // concurrent writer can interleave before COMMIT. This is the exclusion
-// primitive for the lifecycle engine's guarded deletes — the migration code's
-// nested `BEGIN IMMEDIATE` inside BeginTx (metadata.go ~557/~947) is a no-op
-// and cannot be reused.
+// primitive for the lifecycle engine's guarded deletes and for the startup
+// schema migrations (runObjectLockMigration / runACLTagsMigration).
+//
+// The busy_timeout applied to the BEGIN IMMEDIATE attempt is caller-controlled
+// via opts (default: engineBusyTimeoutMS = 100 ms — lifecycle engine fails
+// closed fast). Startup migrations should pass withBusyTimeout(defaultBusyTimeoutMS)
+// to wait up to 5 s for an overlapping writer to release the lock.
 //
 // SQLITE_BUSY at BEGIN (after busy_timeout) is returned as ErrBusy so callers
 // can treat it as a fail-closed skip. fn returning an error rolls back; a nil
 // return commits. Errors from fn are returned verbatim (busy errors surfaced
 // by fn's own statements are also normalized to ErrBusy).
-func (m *Metadata) withImmediateTx(ctx context.Context, fn func(conn *sql.Conn) error) error {
+func (m *Metadata) withImmediateTx(ctx context.Context, fn func(conn *sql.Conn) error, opts ...immediateTxOption) error {
+	cfg := immediateTxConfig{busyTimeoutMS: engineBusyTimeoutMS}
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	conn, err := m.db.Conn(ctx)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
-	// Shorten busy_timeout for the duration of this guarded operation so a
-	// contended BEGIN IMMEDIATE returns ErrBusy quickly (engine skips, fail-
-	// closed) instead of blocking the cycle. Restore the pool default before
-	// the connection is reused by a request-path write, which wants the full
-	// timeout. busy_timeout is per-connection and is NOT reset by the pool.
-	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", engineBusyTimeoutMS)); err != nil {
+	// Set the caller-requested busy_timeout for the BEGIN IMMEDIATE attempt.
+	// Restore to defaultBusyTimeoutMS (the pool-wide default baked into the
+	// DSN) before the connection returns to the pool, so request-path writes
+	// get the full 5 s wait regardless of which timeout this call used.
+	// busy_timeout is per-connection and is NOT reset by the pool.
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", cfg.busyTimeoutMS)); err != nil {
 		return err
 	}
 	defer func() {
+		// Always restore to the pool default (5000 ms), not to cfg.busyTimeoutMS.
+		// This ensures callers that passed a shorter timeout (e.g. engine 100 ms)
+		// do not leave a short-timeout connection in the pool for request-path writes.
 		_, _ = conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout=%d", defaultBusyTimeoutMS))
 	}()
 
@@ -662,27 +691,21 @@ func (m *Metadata) runObjectLockMigration() error {
 		return fmt.Errorf("object lock migration aborted: %d legacy object_legal_hold rows have an invalid status; manual cleanup required", badStatus)
 	}
 
-	tx, err := m.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("object lock migration: failed to begin transaction: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
-	// Acquire an immediate write lock so any future concurrent opener blocks.
-	if _, err := tx.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		// modernc/sqlite already opened an implicit deferred transaction via
-		// BeginTx; a nested BEGIN may error. Fall through — the BeginTx
-		// transaction already provides isolation for our single-process use.
-		_ = err
-	}
-
-	// Step 3: create the v2 tables under temporary names.
-	if _, err := tx.ExecContext(ctx, `
+	// Run the whole migration inside a single real BEGIN IMMEDIATE transaction
+	// (withImmediateTx pins one pooled connection and issues a genuine BEGIN
+	// IMMEDIATE, acquiring the write lock up front so any concurrent opener
+	// blocks). The previous BeginTx + nested `BEGIN IMMEDIATE` was a no-op: the
+	// nested BEGIN ran inside BeginTx's implicit deferred transaction and never
+	// upgraded the lock. The callback returns nil only on full success, in which
+	// case withImmediateTx COMMITs; any error rolls back.
+	//
+	// withBusyTimeout(defaultBusyTimeoutMS): startup migrations must tolerate a
+	// transient external writer (rolling-deploy double open, Litestream
+	// checkpoint) holding the lock briefly. 5 s gives ample headroom; the
+	// lifecycle engine uses 100 ms (fail-closed), which is too short here.
+	if err := m.withImmediateTx(ctx, func(tx *sql.Conn) error {
+		// Step 3: create the v2 tables under temporary names.
+		if _, err := tx.ExecContext(ctx, `
 		CREATE TABLE object_retention_v2 (
 			bucket            TEXT NOT NULL,
 			key               TEXT NOT NULL,
@@ -692,9 +715,9 @@ func (m *Metadata) runObjectLockMigration() error {
 			PRIMARY KEY (bucket, key, version_id),
 			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
 		)`); err != nil {
-		return fmt.Errorf("object lock migration: failed to create object_retention_v2: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
+			return fmt.Errorf("object lock migration: failed to create object_retention_v2: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
 		CREATE TABLE object_legal_hold_v2 (
 			bucket     TEXT NOT NULL,
 			key        TEXT NOT NULL,
@@ -703,14 +726,14 @@ func (m *Metadata) runObjectLockMigration() error {
 			PRIMARY KEY (bucket, key, version_id),
 			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
 		)`); err != nil {
-		return fmt.Errorf("object lock migration: failed to create object_legal_hold_v2: %w", err)
-	}
+			return fmt.Errorf("object lock migration: failed to create object_legal_hold_v2: %w", err)
+		}
 
-	// Step 4: backfill. A legacy lock row protected "the current version" of
-	// the key, so bind it to the newest non-delete-marker version_id when one
-	// exists, else to '' (null version). mode / status / retain_until_date are
-	// copied verbatim (zero transformation = zero loss).
-	if _, err := tx.ExecContext(ctx, `
+		// Step 4: backfill. A legacy lock row protected "the current version" of
+		// the key, so bind it to the newest non-delete-marker version_id when one
+		// exists, else to '' (null version). mode / status / retain_until_date are
+		// copied verbatim (zero transformation = zero loss).
+		if _, err := tx.ExecContext(ctx, `
 		INSERT INTO object_retention_v2 (bucket, key, version_id, mode, retain_until_date)
 		SELECT
 			r.bucket,
@@ -728,9 +751,9 @@ func (m *Metadata) runObjectLockMigration() error {
 			r.mode,
 			r.retain_until_date
 		FROM object_retention r`); err != nil {
-		return fmt.Errorf("object lock migration: failed to backfill object_retention_v2: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
+			return fmt.Errorf("object lock migration: failed to backfill object_retention_v2: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
 		INSERT INTO object_legal_hold_v2 (bucket, key, version_id, status)
 		SELECT
 			h.bucket,
@@ -747,35 +770,36 @@ func (m *Metadata) runObjectLockMigration() error {
 			),
 			h.status
 		FROM object_legal_hold h`); err != nil {
-		return fmt.Errorf("object lock migration: failed to backfill object_legal_hold_v2: %w", err)
-	}
+			return fmt.Errorf("object lock migration: failed to backfill object_legal_hold_v2: %w", err)
+		}
 
-	// Step 5: in-transaction validation. Any mismatch aborts the migration.
-	if err := validateLockMigration(ctx, tx); err != nil {
+		// Step 5: in-transaction validation. Any mismatch aborts the migration.
+		if err := validateLockMigration(ctx, tx); err != nil {
+			return err
+		}
+
+		// Step 6: retire the legacy tables (rename, not drop) and promote v2.
+		for _, stmt := range []string{
+			`ALTER TABLE object_retention   RENAME TO object_retention_legacy_v1`,
+			`ALTER TABLE object_retention_v2 RENAME TO object_retention`,
+			`ALTER TABLE object_legal_hold   RENAME TO object_legal_hold_legacy_v1`,
+			`ALTER TABLE object_legal_hold_v2 RENAME TO object_legal_hold`,
+		} {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("object lock migration: rename step failed (%q): %w", stmt, err)
+			}
+		}
+
+		// Step 7: stamp the schema generation (user_version is transactional).
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, objectLockSchemaVersion)); err != nil {
+			return fmt.Errorf("object lock migration: failed to set user_version: %w", err)
+		}
+		return nil
+	}, withBusyTimeout(defaultBusyTimeoutMS)); err != nil {
+		// Inner errors already carry the "object lock migration: ..." prefix;
+		// busy errors surface as ErrBusy. Return verbatim, no double-wrap.
 		return err
 	}
-
-	// Step 6: retire the legacy tables (rename, not drop) and promote v2.
-	for _, stmt := range []string{
-		`ALTER TABLE object_retention   RENAME TO object_retention_legacy_v1`,
-		`ALTER TABLE object_retention_v2 RENAME TO object_retention`,
-		`ALTER TABLE object_legal_hold   RENAME TO object_legal_hold_legacy_v1`,
-		`ALTER TABLE object_legal_hold_v2 RENAME TO object_legal_hold`,
-	} {
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("object lock migration: rename step failed (%q): %w", stmt, err)
-		}
-	}
-
-	// Step 7: stamp the schema generation (user_version is transactional).
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, objectLockSchemaVersion)); err != nil {
-		return fmt.Errorf("object lock migration: failed to set user_version: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("object lock migration: commit failed: %w", err)
-	}
-	committed = true
 
 	// Step 8 (post-commit): the renamed schema must satisfy all FK constraints.
 	var fkViolations int
@@ -789,10 +813,20 @@ func (m *Metadata) runObjectLockMigration() error {
 	return nil
 }
 
+// migrationQuerier is the subset of *sql.Tx / *sql.Conn used by the migration
+// validation helpers. It lets a helper run either against a classic *sql.Tx
+// (the original BeginTx-based call sites and the unit tests that pin them) or
+// against the *sql.Conn that withImmediateTx pins for a real BEGIN IMMEDIATE
+// transaction. Both concrete types expose identical method signatures.
+type migrationQuerier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // validateLockMigration runs the design-doc verification queries against the
 // in-flight v2 tables. It returns a descriptive error on any discrepancy so
 // startup fails closed.
-func validateLockMigration(ctx context.Context, tx *sql.Tx) error {
+func validateLockMigration(ctx context.Context, tx migrationQuerier) error {
 	// (a) row-count parity for retention.
 	var oldN, newN int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM object_retention`).Scan(&oldN); err != nil {
@@ -1052,31 +1086,19 @@ func (m *Metadata) runACLTagsMigration() error {
 
 	ctx := context.Background()
 
-	tx, err := m.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("acl/tags migration: failed to begin transaction: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
-	// Acquire an immediate write lock so any future concurrent opener blocks.
-	if _, err := tx.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		// modernc/sqlite already opened an implicit deferred transaction via
-		// BeginTx; a nested BEGIN may error. Fall through — BeginTx already
-		// provides isolation for our single-process use.
-		_ = err
-	}
-
-	// Step 1: create the v2 tables under temporary names. The backfill binds a
-	// legacy (bucket, key) acl/tag row to the newest non-delete-marker
-	// version_id when one exists, else '' (null version) — same rule the #39
-	// lock migration used. acl_config / tag_key / tag_value are copied verbatim
-	// (zero transformation = zero loss).
-	if _, err := tx.ExecContext(ctx, `
+	// Run the whole migration inside a single real BEGIN IMMEDIATE transaction
+	// via withImmediateTx (see runObjectLockMigration for why the former BeginTx
+	// + nested `BEGIN IMMEDIATE` was a no-op). The callback returns nil only on
+	// full success, in which case withImmediateTx COMMITs; any error rolls back.
+	// withBusyTimeout(defaultBusyTimeoutMS): same rationale as runObjectLockMigration —
+	// 5 s headroom for transient external writers at startup.
+	if err := m.withImmediateTx(ctx, func(tx *sql.Conn) error {
+		// Step 1: create the v2 tables under temporary names. The backfill binds a
+		// legacy (bucket, key) acl/tag row to the newest non-delete-marker
+		// version_id when one exists, else '' (null version) — same rule the #39
+		// lock migration used. acl_config / tag_key / tag_value are copied verbatim
+		// (zero transformation = zero loss).
+		if _, err := tx.ExecContext(ctx, `
 		CREATE TABLE object_acls_v2 (
 			bucket     TEXT NOT NULL,
 			key        TEXT NOT NULL,
@@ -1085,9 +1107,9 @@ func (m *Metadata) runACLTagsMigration() error {
 			PRIMARY KEY (bucket, key, version_id),
 			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
 		)`); err != nil {
-		return fmt.Errorf("acl/tags migration: failed to create object_acls_v2: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
+			return fmt.Errorf("acl/tags migration: failed to create object_acls_v2: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
 		CREATE TABLE object_tags_v2 (
 			bucket     TEXT NOT NULL,
 			key        TEXT NOT NULL,
@@ -1097,11 +1119,11 @@ func (m *Metadata) runACLTagsMigration() error {
 			PRIMARY KEY (bucket, key, version_id, tag_key),
 			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE CASCADE
 		)`); err != nil {
-		return fmt.Errorf("acl/tags migration: failed to create object_tags_v2: %w", err)
-	}
+			return fmt.Errorf("acl/tags migration: failed to create object_tags_v2: %w", err)
+		}
 
-	// Step 2: backfill ACLs.
-	if _, err := tx.ExecContext(ctx, `
+		// Step 2: backfill ACLs.
+		if _, err := tx.ExecContext(ctx, `
 		INSERT INTO object_acls_v2 (bucket, key, version_id, acl_config)
 		SELECT
 			a.bucket,
@@ -1118,11 +1140,11 @@ func (m *Metadata) runACLTagsMigration() error {
 			),
 			a.acl_config
 		FROM object_acls a`); err != nil {
-		return fmt.Errorf("acl/tags migration: failed to backfill object_acls_v2: %w", err)
-	}
+			return fmt.Errorf("acl/tags migration: failed to backfill object_acls_v2: %w", err)
+		}
 
-	// Step 3: backfill tags.
-	if _, err := tx.ExecContext(ctx, `
+		// Step 3: backfill tags.
+		if _, err := tx.ExecContext(ctx, `
 		INSERT INTO object_tags_v2 (bucket, key, version_id, tag_key, tag_value)
 		SELECT
 			t.bucket,
@@ -1140,35 +1162,36 @@ func (m *Metadata) runACLTagsMigration() error {
 			t.tag_key,
 			t.tag_value
 		FROM object_tags t`); err != nil {
-		return fmt.Errorf("acl/tags migration: failed to backfill object_tags_v2: %w", err)
-	}
+			return fmt.Errorf("acl/tags migration: failed to backfill object_tags_v2: %w", err)
+		}
 
-	// Step 4: in-transaction validation. Any mismatch aborts the migration.
-	if err := validateACLTagsMigration(ctx, tx); err != nil {
+		// Step 4: in-transaction validation. Any mismatch aborts the migration.
+		if err := validateACLTagsMigration(ctx, tx); err != nil {
+			return err
+		}
+
+		// Step 5: retire the legacy tables (rename, not drop) and promote v2.
+		for _, stmt := range []string{
+			`ALTER TABLE object_acls    RENAME TO object_acls_legacy_v1`,
+			`ALTER TABLE object_acls_v2 RENAME TO object_acls`,
+			`ALTER TABLE object_tags    RENAME TO object_tags_legacy_v1`,
+			`ALTER TABLE object_tags_v2 RENAME TO object_tags`,
+		} {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("acl/tags migration: rename step failed (%q): %w", stmt, err)
+			}
+		}
+
+		// Step 6: stamp the schema generation (user_version is transactional).
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, aclTagsSchemaVersion)); err != nil {
+			return fmt.Errorf("acl/tags migration: failed to set user_version: %w", err)
+		}
+		return nil
+	}, withBusyTimeout(defaultBusyTimeoutMS)); err != nil {
+		// Inner errors already carry the "acl/tags migration: ..." prefix; busy
+		// errors surface as ErrBusy. Return verbatim, no double-wrap.
 		return err
 	}
-
-	// Step 5: retire the legacy tables (rename, not drop) and promote v2.
-	for _, stmt := range []string{
-		`ALTER TABLE object_acls    RENAME TO object_acls_legacy_v1`,
-		`ALTER TABLE object_acls_v2 RENAME TO object_acls`,
-		`ALTER TABLE object_tags    RENAME TO object_tags_legacy_v1`,
-		`ALTER TABLE object_tags_v2 RENAME TO object_tags`,
-	} {
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("acl/tags migration: rename step failed (%q): %w", stmt, err)
-		}
-	}
-
-	// Step 6: stamp the schema generation (user_version is transactional).
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, aclTagsSchemaVersion)); err != nil {
-		return fmt.Errorf("acl/tags migration: failed to set user_version: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("acl/tags migration: commit failed: %w", err)
-	}
-	committed = true
 
 	// Step 7 (post-commit): the renamed schema must satisfy all FK constraints.
 	var fkViolations int
@@ -1185,7 +1208,7 @@ func (m *Metadata) runACLTagsMigration() error {
 // validateACLTagsMigration runs row-count / value-loss verification against the
 // in-flight v2 tables. It returns a descriptive error on any discrepancy so
 // startup fails closed.
-func validateACLTagsMigration(ctx context.Context, tx *sql.Tx) error {
+func validateACLTagsMigration(ctx context.Context, tx migrationQuerier) error {
 	// (a) row-count parity for ACLs.
 	var oldA, newA int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM object_acls`).Scan(&oldA); err != nil {
