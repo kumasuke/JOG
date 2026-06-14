@@ -97,11 +97,23 @@ func TestDeleteObjectVersioned_NoRaceWithConcurrentPut(t *testing.T) {
 	}
 }
 
-// TestDeleteObjectVersioned_TargetedNull_NoRaceWithConcurrentPut exercises the
-// version-targeted null-version delete branch on a pre-versioning current
-// object racing a concurrent versioned PUT. Same I2 invariant on the current
-// file.
-func TestDeleteObjectVersioned_TargetedNull_NoRaceWithConcurrentPut(t *testing.T) {
+// TestDeleteObjectVersioned_TargetedNull_KeepsCurrentRowFileConsistent checks
+// that after a targeted null-version permanent delete races against a
+// concurrent PutObjectVersioned, the I2 invariant ("objects row ⇒ current
+// file") is preserved for the current version.
+//
+// Verified range: if the objects row exists after both goroutines complete,
+// the current file on disk must also exist (assertCurrentRowImpliesFile).
+//
+// Known remaining race (out of scope for this PR / issue #54):
+//
+//	PutObjectVersioned calls snapshotNullVersionIfNeeded outside the per-key
+//	lock. A targeted null delete that wins the lock and removes the null-version
+//	row while PUT is concurrently writing the snapshot can leave a null-version
+//	row in the versions table with no corresponding file on disk. This
+//	null-version row ⇒ file invariant is NOT checked here. The residual race is
+//	tracked separately (GitHub issue 67) and is beyond the scope of this PR.
+func TestDeleteObjectVersioned_TargetedNull_KeepsCurrentRowFileConsistent(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 200; i++ {
