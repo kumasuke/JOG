@@ -228,22 +228,104 @@ func TestEODMRuleMatches(t *testing.T) {
 	}
 }
 
-func TestAbortMPURule(t *testing.T) {
-	withTag := []storage.LifecycleRule{{
-		Status:                         "Enabled",
-		Filter:                         &storage.LifecycleRuleFilter{Tag: &storage.Tag{Key: "k", Value: "v"}},
-		AbortIncompleteMultipartUpload: &storage.AbortIncompleteMultipartUpload{DaysAfterInitiation: i32(7)},
-	}}
-	if _, ok := abortMPURule(withTag); ok {
-		t.Error("AIMU with tag filter must be skipped (S3 rule)")
+func TestAbortMPURules(t *testing.T) {
+	aimu := func(days int32) *storage.AbortIncompleteMultipartUpload {
+		return &storage.AbortIncompleteMultipartUpload{DaysAfterInitiation: i32(days)}
 	}
-	withPrefix := []storage.LifecycleRule{{
-		Status:                         "Enabled",
-		Filter:                         &storage.LifecycleRuleFilter{Prefix: "p/"},
-		AbortIncompleteMultipartUpload: &storage.AbortIncompleteMultipartUpload{DaysAfterInitiation: i32(7)},
-	}}
-	if _, ok := abortMPURule(withPrefix); !ok {
-		t.Error("AIMU with prefix filter should apply")
+	rules := []storage.LifecycleRule{
+		{ID: "disabled-not-enabled-yet", Status: "Enabled", AbortIncompleteMultipartUpload: aimu(3)}, // no filter
+		{ID: "tag", Status: "Enabled", Filter: &storage.LifecycleRuleFilter{Tag: &storage.Tag{Key: "k", Value: "v"}}, AbortIncompleteMultipartUpload: aimu(7)},
+		{ID: "prefix", Status: "Enabled", Filter: &storage.LifecycleRuleFilter{Prefix: "p/"}, AbortIncompleteMultipartUpload: aimu(7)},
+		{ID: "no-aimu", Status: "Enabled", Expiration: &storage.LifecycleExpiration{Days: i32(1)}},
+	}
+
+	got := abortMPURules(rules)
+	// The tag-filtered rule and the rule without an AIMU action are excluded; the
+	// no-filter and prefix rules are kept in configuration order.
+	var ids []string
+	for _, r := range got {
+		ids = append(ids, r.ID)
+	}
+	want := []string{"disabled-not-enabled-yet", "prefix"}
+	if len(ids) != len(want) {
+		t.Fatalf("abortMPURules ids = %v, want %v", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("abortMPURules ids = %v, want %v", ids, want)
+		}
+	}
+}
+
+func TestAIMUUploadEligible(t *testing.T) {
+	aimu := func(days int32) *storage.AbortIncompleteMultipartUpload {
+		return &storage.AbortIncompleteMultipartUpload{DaysAfterInitiation: i32(days)}
+	}
+	now := time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC)
+	// rule A: all keys, 30 days; rule B: only "logs/", 3 days.
+	rules := []storage.LifecycleRule{
+		{ID: "all-30", Status: "Enabled", AbortIncompleteMultipartUpload: aimu(30)},
+		{ID: "logs-3", Status: "Enabled", Filter: &storage.LifecycleRuleFilter{Prefix: "logs/"}, AbortIncompleteMultipartUpload: aimu(3)},
+	}
+	cases := []struct {
+		name      string
+		key       string
+		initiated time.Time
+		want      bool
+	}{
+		// logs/ upload 5 days old: rule B (3d) makes it eligible (shortest wins).
+		{"logs-eligible-by-short-rule", "logs/x", now.AddDate(0, 0, -5), true},
+		// non-logs upload 5 days old: only rule A (30d) applies, not yet eligible.
+		{"non-logs-not-yet", "data/x", now.AddDate(0, 0, -5), false},
+		// non-logs upload 40 days old: rule A (30d) makes it eligible.
+		{"non-logs-eligible-by-long-rule", "data/x", now.AddDate(0, 0, -40), true},
+		// logs/ upload 1 day old: neither rule's days elapsed.
+		{"logs-too-fresh", "logs/x", now.AddDate(0, 0, -1), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := aimuUploadEligible(rules, c.key, c.initiated, now); got != c.want {
+				t.Errorf("aimuUploadEligible(%q, %v) = %v, want %v", c.key, c.initiated, got, c.want)
+			}
+		})
+	}
+}
+
+func TestNoncurrentRules(t *testing.T) {
+	ncve := func(days int32) *storage.NoncurrentVersionExpiration {
+		return &storage.NoncurrentVersionExpiration{NoncurrentDays: i32(days)}
+	}
+	rules := []storage.LifecycleRule{
+		{ID: "all", Status: "Enabled", NoncurrentVersionExpiration: ncve(30)},
+		{ID: "logs", Status: "Enabled", Filter: &storage.LifecycleRuleFilter{Prefix: "logs/"}, NoncurrentVersionExpiration: ncve(3)},
+		{ID: "data", Status: "Enabled", Filter: &storage.LifecycleRuleFilter{Prefix: "data/"}, NoncurrentVersionExpiration: ncve(7)},
+		{ID: "no-ncve", Status: "Enabled", Expiration: &storage.LifecycleExpiration{Days: i32(1)}},
+	}
+	cases := []struct {
+		name string
+		key  string
+		want []string
+	}{
+		{"logs-key-matches-all-and-logs", "logs/a", []string{"all", "logs"}},
+		{"data-key-matches-all-and-data", "data/a", []string{"all", "data"}},
+		{"other-key-matches-only-all", "x", []string{"all"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := noncurrentRules(rules, c.key)
+			var ids []string
+			for _, r := range got {
+				ids = append(ids, r.ID)
+			}
+			if len(ids) != len(c.want) {
+				t.Fatalf("noncurrentRules(%q) = %v, want %v", c.key, ids, c.want)
+			}
+			for i := range c.want {
+				if ids[i] != c.want[i] {
+					t.Fatalf("noncurrentRules(%q) = %v, want %v", c.key, ids, c.want)
+				}
+			}
+		})
 	}
 }
 
