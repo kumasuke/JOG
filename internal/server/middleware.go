@@ -33,6 +33,16 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	return rw.ResponseWriter.Write(b)
 }
 
+// Flush delegates to the wrapped ResponseWriter so streaming handlers
+// (e.g. SelectObjectContent's event stream) can push bytes to the client
+// incrementally. Without this, a type assertion to http.Flusher fails and
+// the response is buffered until the handler returns.
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // LoggingMiddleware logs HTTP requests.
 func LoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

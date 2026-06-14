@@ -208,6 +208,9 @@ func (r *Router) routeRequest() http.HandlerFunc {
 				} else if query.Has("uploadId") {
 					// POST /{bucket}/{key}?uploadId={uploadId} - CompleteMultipartUpload
 					r.handler.CompleteMultipartUpload(w, req)
+				} else if query.Has("select") && query.Get("select-type") == "2" {
+					// POST /{bucket}/{key}?select&select-type=2 - SelectObjectContent
+					r.handler.SelectObjectContent(w, req)
 				} else {
 					api.WriteError(w, api.ErrInvalidRequest)
 				}
