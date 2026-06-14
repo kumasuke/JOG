@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -368,6 +369,14 @@ func (fs *FileSystem) HeadObject(ctx context.Context, bucket, key string) (*Obje
 }
 
 // DeleteObject deletes an object.
+//
+// Issue #54: this user delete path follows the same crash-/race-safe shape as
+// the lifecycle engine (LIFECYCLE_ENGINE_DESIGN §7-1, I2): take the per-key
+// lock first to serialize against a concurrent PUT of the same key, delete the
+// metadata rows inside a single BEGIN IMMEDIATE transaction, then unlink the
+// backing file only after the commit succeeds. Ordering "delete rows → commit →
+// unlink file" means a crash can only ever leave an orphan file (invisible,
+// GC-able), never a dangling row whose current file is missing.
 func (fs *FileSystem) DeleteObject(ctx context.Context, bucket, key string) error {
 	// Validate object key to prevent path traversal
 	objectPath, err := fs.validateObjectKey(bucket, key)
@@ -384,16 +393,27 @@ func (fs *FileSystem) DeleteObject(ctx context.Context, bucket, key string) erro
 		return ErrBucketNotFound
 	}
 
-	// Delete object file
+	// Serialize the row deletion + current-file unlink against a concurrent PUT
+	// to the same key so we never unlink a file a successful PUT just published
+	// (issue #54). On a non-versioned bucket that file is the only copy, so this
+	// prevents data loss. Lock order is keyMu -> SQLite (no deadlock).
+	defer fs.lockKey(bucket, key)()
+
+	// Delete metadata rows (objects + acl/tag) atomically, then unlink the file.
+	if err := fs.metadata.withImmediateTx(ctx, func(conn *sql.Conn) error {
+		if _, err := conn.ExecContext(ctx, `DELETE FROM objects WHERE bucket = ? AND key = ?`, bucket, key); err != nil {
+			return err
+		}
+		return deleteACLTagRowsTx(ctx, conn, bucket, key, "")
+	}); err != nil {
+		return err
+	}
+
+	// Delete object file (after commit; ENOENT is idempotent).
 	if err := os.Remove(objectPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to delete object file: %w", err)
 	}
-
-	// Delete object metadata
-	if err := fs.metadata.DeleteObject(ctx, bucket, key); err != nil {
-		return err
-	}
-	return fs.metadata.DeleteObjectACLTagRows(ctx, bucket, key, "")
+	return nil
 }
 
 // CopyObject copies an object from source to destination.
@@ -1885,6 +1905,13 @@ func (fs *FileSystem) DeleteObjectVersioned(ctx context.Context, bucket, key, ve
 		return "", false, ErrBucketNotFound
 	}
 
+	// Serialize the whole metadata-delete + current-/version-file unlink (and any
+	// rebuild of the current pointer) against a concurrent PUT to the same key,
+	// so we never unlink or clobber a current file a successful PUT just
+	// published (issue #54, LIFECYCLE_ENGINE_DESIGN §7-1/§7-7, I2). Lock order is
+	// keyMu -> SQLite (no deadlock).
+	defer fs.lockKey(bucket, key)()
+
 	// Version-targeted permanent delete (incl. the null version).
 	if versionTargeted {
 		version, err := fs.metadata.GetObjectVersion(ctx, bucket, key, versionID)
@@ -1912,6 +1939,16 @@ func (fs *FileSystem) DeleteObjectVersioned(ctx context.Context, bucket, key, ve
 				return "", false, nil
 			}
 			// Pre-versioning current object only — delete the null version.
+			// Delete rows in one tx (objects + lock + acl/tag), commit, then
+			// unlink files (issue #54): a crash leaves at worst orphan files.
+			if err := fs.metadata.withImmediateTx(ctx, func(conn *sql.Conn) error {
+				if _, err := conn.ExecContext(ctx, `DELETE FROM objects WHERE bucket = ? AND key = ?`, bucket, key); err != nil {
+					return err
+				}
+				return deleteLockACLTagRowsTx(ctx, conn, bucket, key, "")
+			}); err != nil {
+				return "", false, err
+			}
 			currentPath := filepath.Join(fs.dataDir, bucket, key)
 			if err := os.Remove(currentPath); err != nil && !os.IsNotExist(err) {
 				return "", false, fmt.Errorf("failed to delete current object file: %w", err)
@@ -1919,15 +1956,6 @@ func (fs *FileSystem) DeleteObjectVersioned(ctx context.Context, bucket, key, ve
 			nullVersionPath := fs.versionFilePath(bucket, key, "")
 			if err := os.Remove(nullVersionPath); err != nil && !os.IsNotExist(err) {
 				return "", false, fmt.Errorf("failed to delete null version file: %w", err)
-			}
-			if err := fs.metadata.DeleteObject(ctx, bucket, key); err != nil {
-				return "", false, err
-			}
-			if err := fs.metadata.DeleteObjectLockRows(ctx, bucket, key, ""); err != nil {
-				return "", false, err
-			}
-			if err := fs.metadata.DeleteObjectACLTagRows(ctx, bucket, key, ""); err != nil {
-				return "", false, err
 			}
 			return "", false, nil
 		}
@@ -1945,22 +1973,29 @@ func (fs *FileSystem) DeleteObjectVersioned(ctx context.Context, bucket, key, ve
 			}
 		}
 
+		// Delete the version row + its lock/acl/tag rows in one tx, commit, then
+		// unlink the version file (issue #54): "delete rows → commit → unlink"
+		// so a crash can only leave an orphan version file (GC-able), never a
+		// dangling row whose file is missing.
+		if err := fs.metadata.withImmediateTx(ctx, func(conn *sql.Conn) error {
+			if _, err := conn.ExecContext(ctx,
+				`DELETE FROM object_versions WHERE bucket = ? AND key = ? AND version_id = ?`,
+				bucket, key, versionID); err != nil {
+				return err
+			}
+			return deleteLockACLTagRowsTx(ctx, conn, bucket, key, versionID)
+		}); err != nil {
+			return "", false, err
+		}
+
 		objectPath := fs.versionFilePath(bucket, key, versionID)
 		if err := os.Remove(objectPath); err != nil && !os.IsNotExist(err) {
 			return "", false, fmt.Errorf("failed to delete version file: %w", err)
 		}
 
-		if err := fs.metadata.DeleteObjectVersion(ctx, bucket, key, versionID); err != nil {
-			return "", false, err
-		}
-
-		if err := fs.metadata.DeleteObjectLockRows(ctx, bucket, key, versionID); err != nil {
-			return "", false, err
-		}
-		if err := fs.metadata.DeleteObjectACLTagRows(ctx, bucket, key, versionID); err != nil {
-			return "", false, err
-		}
-
+		// Re-point the current object to the remaining newest version. This runs
+		// under the per-key lock (serialized vs PUT); its slow copyFile is kept
+		// here rather than inside the tx.
 		if wasLatest {
 			if err := fs.rebuildCurrentAfterVersionDelete(ctx, bucket, key); err != nil {
 				return "", false, err
@@ -1970,30 +2005,32 @@ func (fs *FileSystem) DeleteObjectVersioned(ctx context.Context, bucket, key, ve
 		return versionID, isDeleteMarker, nil
 	}
 
-	// Unspecified delete - create a delete marker
+	// Unspecified delete - create a delete marker.
 	deleteMarkerID := generateVersionID()
 	now := time.Now()
 
-	deleteMarker := &ObjectVersion{
-		Key:            key,
-		VersionID:      deleteMarkerID,
-		Size:           0,
-		LastModified:   now,
-		ETag:           "",
-		ContentType:    "",
-		IsDeleteMarker: true,
-	}
-
-	if err := fs.metadata.PutObjectVersion(ctx, bucket, deleteMarker); err != nil {
+	// Insert the delete marker and drop the current pointer in one tx, commit,
+	// then unlink the current file (issue #54). The lock above serializes this
+	// against a concurrent PUT to the same key, so we never unlink a current
+	// file a successful PUT just published; "drop pointer → commit → unlink"
+	// keeps a crash from leaving an objects row whose current file is missing.
+	nullMeta, _ := json.Marshal(map[string]string(nil))
+	if err := fs.metadata.withImmediateTx(ctx, func(conn *sql.Conn) error {
+		if _, err := conn.ExecContext(ctx, `
+			INSERT INTO object_versions (bucket, key, version_id, size, last_modified, etag, content_type, metadata, is_delete_marker)
+			VALUES (?, ?, ?, 0, ?, '', '', ?, 1)
+		`, bucket, key, deleteMarkerID, now, string(nullMeta)); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `DELETE FROM objects WHERE bucket = ? AND key = ?`, bucket, key); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
 		return "", false, err
 	}
 
-	// Remove from regular objects table
-	if err := fs.metadata.DeleteObject(ctx, bucket, key); err != nil {
-		return "", false, err
-	}
-
-	// Remove current file
+	// Remove current file (after commit; version data remains under .versions/).
 	currentPath := filepath.Join(fs.dataDir, bucket, key)
 	os.Remove(currentPath)
 

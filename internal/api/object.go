@@ -551,6 +551,14 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
+			if errors.Is(err, storage.ErrBusy) {
+				// The synchronous delete routed through the engine's fail-fast
+				// transaction (short busy_timeout) and lost the write lock.
+				// Tell the client to retry with backoff rather than reporting a
+				// permanent failure (issue #54 fix round 1).
+				WriteError(w, ErrSlowDown)
+				return
+			}
 			WriteError(w, ErrInternalError)
 			return
 		}
@@ -578,7 +586,19 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 			WriteErrorWithResource(w, ErrNoSuchBucket, "/"+bucket)
 			return
 		}
-		// S3 returns 204 even if object doesn't exist
+		if errors.Is(err, storage.ErrBusy) {
+			// The synchronous delete routed through the engine's fail-fast
+			// transaction (short busy_timeout) and lost the write lock. Tell
+			// the client to retry with backoff instead of swallowing the failed
+			// delete as a phantom 204 success (issue #54 fix round 1).
+			WriteError(w, ErrSlowDown)
+			return
+		}
+		// DeleteObject returns nil (not ErrObjectNotFound) for a missing
+		// object, so any remaining error here is a genuine backend failure.
+		// Surface it as 500 rather than reporting a phantom 204 success.
+		WriteError(w, ErrInternalError)
+		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -662,6 +682,14 @@ func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request) {
 					errInfos = append(errInfos, DeleteObjectsError{Key: obj.Key, Code: "InvalidArgument", Message: "Invalid object key"})
 					continue
 				}
+				if errors.Is(err, storage.ErrBusy) {
+					// DeleteObjectVersioned routes through the engine's
+					// fail-fast transaction (short busy_timeout), so ErrBusy is a
+					// routine contention outcome. Surface the retryable SlowDown
+					// per key instead of the non-canonical InternalError (#54).
+					errInfos = append(errInfos, DeleteObjectsError{Key: obj.Key, Code: ErrSlowDown.Code, Message: ErrSlowDown.Message})
+					continue
+				}
 				errInfos = append(errInfos, DeleteObjectsError{Key: obj.Key, Code: "InternalError", Message: "Internal error"})
 				continue
 			}
@@ -681,6 +709,14 @@ func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request) {
 		if err := h.storage.DeleteObject(r.Context(), bucket, obj.Key); err != nil {
 			if errors.Is(err, storage.ErrInvalidKey) {
 				errInfos = append(errInfos, DeleteObjectsError{Key: obj.Key, Code: "InvalidArgument", Message: "Invalid object key"})
+				continue
+			}
+			if errors.Is(err, storage.ErrBusy) {
+				// DeleteObject routes through the engine's fail-fast transaction
+				// (short busy_timeout), so ErrBusy is a routine contention
+				// outcome. Surface the retryable SlowDown per key instead of the
+				// non-canonical InternalError (#54).
+				errInfos = append(errInfos, DeleteObjectsError{Key: obj.Key, Code: ErrSlowDown.Code, Message: ErrSlowDown.Message})
 				continue
 			}
 			// S3 reports success even if the object did not exist; only a true
