@@ -286,6 +286,13 @@ func (m *Middleware) canonicalQueryString(r *http.Request) string {
 
 	var parts []string
 	for _, k := range keys {
+		// aws-sdk-go-v2 (aws/signer/v4/v4.go) sorts multi-value parameters
+		// with sort.Strings(query[key]) — on the raw (decoded) values —
+		// and then percent-encodes them via query.Encode(). JOG must follow
+		// the same order so the canonical query strings match. issue #65
+		// initially proposed encoding first and sorting the encoded forms,
+		// but that diverges from the SDK whenever encoding changes the sort
+		// order (e.g. "." < "@" in raw, but "." > "%40" in encoded).
 		values := query[k]
 		sort.Strings(values)
 		for _, v := range values {
