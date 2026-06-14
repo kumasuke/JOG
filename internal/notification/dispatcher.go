@@ -26,9 +26,25 @@ type Dispatcher struct {
 	// pin a goroutine forever.
 	deliverTimeout time.Duration
 
+	// sem bounds the number of in-flight delivery goroutines. It is a buffered
+	// channel of capacity maxConcurrentDeliveries: deliver() does a non-blocking
+	// try-acquire and drops the event when the channel is full. This caps both
+	// goroutines and (transitively) open sockets without ever blocking the
+	// single-goroutine lifecycle engine — preserving the "never blocks the
+	// caller" invariant for best-effort delivery.
+	sem chan struct{}
+
 	log zerolog.Logger
 	wg  sync.WaitGroup
 }
+
+// maxConcurrentDeliveries caps in-flight webhook deliveries. With
+// max_actions_per_cycle defaulting to 10000, an unbounded fan-out could spawn
+// up to 10k concurrent POSTs per cycle and exhaust fds/ports or DoS the
+// receiver. This bound keeps the fan-out predictable; excess events are dropped
+// and logged (best-effort, not retried in v1). Not configurable in v1 to keep
+// the wiring small; promote to config if a deployment needs to tune it.
+const maxConcurrentDeliveries = 64
 
 // NewDispatcher builds a dispatcher. region is stamped into every event's
 // awsRegion. A zero deliverTimeout defaults to 10s.
@@ -41,6 +57,7 @@ func NewDispatcher(sink Sink, resolver *Resolver, region string, deliverTimeout 
 		resolver:       resolver,
 		region:         region,
 		deliverTimeout: deliverTimeout,
+		sem:            make(chan struct{}, maxConcurrentDeliveries),
 		log:            log.With().Str("component", "notification").Logger(),
 	}
 }
@@ -102,9 +119,22 @@ func (d *Dispatcher) Dispatch(in DispatchInput) {
 }
 
 func (d *Dispatcher) deliver(url string, env Envelope, bucket, key string) {
+	// Non-blocking try-acquire: if the concurrency limit is reached, drop the
+	// event rather than block the lifecycle engine. This matches the best-effort
+	// contract — a backlogged or slow set of endpoints must not stall deletes.
+	select {
+	case d.sem <- struct{}{}:
+	default:
+		d.log.Warn().
+			Str("bucket", bucket).Str("key", key).Str("url", url).
+			Int("limit", cap(d.sem)).
+			Msg("notification dropped: delivery concurrency limit reached (best-effort, not retried)")
+		return
+	}
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
+		defer func() { <-d.sem }()
 		ctx, cancel := context.WithTimeout(context.Background(), d.deliverTimeout)
 		defer cancel()
 		if err := d.sink.Deliver(ctx, url, env); err != nil {

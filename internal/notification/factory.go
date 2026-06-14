@@ -17,7 +17,17 @@ func FromTargets(arnToURL map[string]string, region string, deliveryTimeout time
 	if deliveryTimeout <= 0 {
 		deliveryTimeout = 10 * time.Second
 	}
-	sink := NewWebhookSink(&http.Client{Timeout: deliveryTimeout})
+	// Bound sockets per webhook host so a burst of deliveries reuses connections
+	// instead of opening one socket per POST. The dispatcher's global goroutine
+	// semaphore is the primary cap; this is per-host, so multiple webhook URLs
+	// multiply it, but it still protects a single endpoint from a connection
+	// storm and keeps idle connections from lingering.
+	transport := &http.Transport{
+		MaxConnsPerHost:     maxConcurrentDeliveries,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	sink := NewWebhookSink(&http.Client{Timeout: deliveryTimeout, Transport: transport})
 	resolver := NewResolver(arnToURL)
 	return NewDispatcher(sink, resolver, region, deliveryTimeout)
 }

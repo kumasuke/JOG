@@ -1,6 +1,7 @@
 package notification
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -217,4 +218,92 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// blockingSink is a fake Sink that records how many Deliver calls run
+// concurrently. Each call blocks on release so the test can observe the peak
+// concurrency the dispatcher allows. Using a Sink (not a real HTTP server)
+// isolates the test from HTTP transport connection-pool behavior, so it
+// measures the dispatcher's own goroutine cap directly and never hangs.
+type blockingSink struct {
+	release  chan struct{}
+	arrived  chan struct{} // signaled once per Deliver entry
+	mu       sync.Mutex
+	inFlight int
+	maxSeen  int
+	total    int
+}
+
+func newBlockingSink() *blockingSink {
+	return &blockingSink{
+		release: make(chan struct{}),
+		arrived: make(chan struct{}, 1<<16),
+	}
+}
+
+func (s *blockingSink) Deliver(ctx context.Context, _ string, _ Envelope) error {
+	s.mu.Lock()
+	s.inFlight++
+	s.total++
+	if s.inFlight > s.maxSeen {
+		s.maxSeen = s.inFlight
+	}
+	s.mu.Unlock()
+	s.arrived <- struct{}{}
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+	}
+	s.mu.Lock()
+	s.inFlight--
+	s.mu.Unlock()
+	return nil
+}
+
+// TestDispatch_BoundsConcurrentDeliveries asserts the dispatcher never runs more
+// than maxConcurrentDeliveries deliveries in flight and drops the overflow
+// instead of spawning an unbounded number of goroutines/connections.
+func TestDispatch_BoundsConcurrentDeliveries(t *testing.T) {
+	sink := newBlockingSink()
+	resolver := NewResolver(map[string]string{"arn:topic:1": "http://example.invalid/webhook"})
+	d := NewDispatcher(sink, resolver, "us-east-1", 5*time.Second)
+
+	cfg := &storage.NotificationConfiguration{
+		TopicConfigurations: []storage.TopicNotificationConfiguration{
+			{ID: "cfg-1", TopicArn: "arn:topic:1", Events: []string{"s3:LifecycleExpiration:*"}},
+		},
+	}
+
+	// Fire well past the cap. Dispatch must never block (try-acquire): the
+	// overflow events are dropped, so this loop returns promptly.
+	const fired = maxConcurrentDeliveries + 50
+	for i := 0; i < fired; i++ {
+		d.Dispatch(DispatchInput{
+			Config:    cfg,
+			EventName: EventLifecycleExpirationDelete,
+			Bucket:    "b", Key: "k", EventTime: time.Now(),
+		})
+	}
+
+	// Wait until the cap's worth of deliveries are in flight and held.
+	for i := 0; i < maxConcurrentDeliveries; i++ {
+		select {
+		case <-sink.arrived:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d deliveries started, expected %d in flight", i, maxConcurrentDeliveries)
+		}
+	}
+
+	// Give any erroneously-spawned extra goroutines a moment to also start.
+	time.Sleep(100 * time.Millisecond)
+
+	sink.mu.Lock()
+	maxSeen := sink.maxSeen
+	sink.mu.Unlock()
+	if maxSeen > maxConcurrentDeliveries {
+		t.Fatalf("max concurrent deliveries = %d, want <= %d (fan-out is not bounded)", maxSeen, maxConcurrentDeliveries)
+	}
+
+	close(sink.release) // let the held deliveries finish
+	d.Wait()
 }
