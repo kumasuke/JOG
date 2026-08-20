@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // keyLockStripes bounds the per-(bucket,key) lock table. Striping means two
