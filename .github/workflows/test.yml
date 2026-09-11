@@ -4,7 +4,7 @@
 # Trigger: On push to all branches and pull requests
 # Actions:
 #   - Checkout code
-#   - Setup Go 1.25
+#   - Setup Go 1.27
 #   - Run unit tests (make test)
 #   - Run S3 compatibility tests (make test-s3compat)
 # Cache: Go modules are cached for faster builds
@@ -30,7 +30,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
-          go-version: '1.25'
+          go-version: '1.27'
           cache: true
 
       - name: Run unit tests

@@ -197,7 +197,7 @@ litestream restore -config /etc/litestream.yml /var/lib/jog/metadata.db
 
 ```dockerfile
 # Dockerfile
-FROM golang:1.25-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 # Install build dependencies for CGO (SQLite requires CGO)
 RUN apk add --no-cache gcc musl-dev sqlite-dev

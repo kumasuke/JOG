@@ -3,7 +3,7 @@
 # トリガー: v* タグのプッシュ時（例: v0.1.0, v1.0.0）
 # 動作内容:
 #   - コードをチェックアウト（フルヒストリー）
-#   - Go 1.25をセットアップ
+#   - Go 1.27をセットアップ
 #   - GoReleaserでビルド・リリースを実行
 
 name: Release
@@ -28,7 +28,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
-          go-version: "1.25"
+          go-version: "1.27"
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
