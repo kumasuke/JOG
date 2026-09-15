@@ -185,6 +185,33 @@ func (h *Handler) HandleCorsPreflightRequest(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusOK)
 }
 
+// ApplyCorsHeaders applies the CORS response headers for an actual request.
+// Preflight requests are handled separately by HandleCorsPreflightRequest.
+func (h *Handler) ApplyCorsHeaders(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin == "" || r.Method == http.MethodOptions {
+		return
+	}
+
+	cors, err := h.storage.GetBucketCors(r.Context(), GetBucket(r))
+	if err != nil {
+		return
+	}
+
+	for _, rule := range cors.Rules {
+		if !matchOrigin(origin, rule.AllowedOrigins) || !matchMethod(r.Method, rule.AllowedMethods) {
+			continue
+		}
+
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		if len(rule.ExposeHeaders) > 0 {
+			w.Header().Set("Access-Control-Expose-Headers", strings.Join(rule.ExposeHeaders, ", "))
+		}
+		w.Header().Set("Vary", "Origin")
+		return
+	}
+}
+
 // matchOrigin checks if the origin matches any of the allowed origins.
 func matchOrigin(origin string, allowedOrigins []string) bool {
 	// Parse origin to extract host
