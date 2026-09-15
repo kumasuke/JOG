@@ -56,6 +56,8 @@ func (r *Router) routeRequest() http.HandlerFunc {
 		req = api.WithBucket(req, bucket)
 		req = api.WithKey(req, key)
 
+		r.handler.ApplyCorsHeaders(w, req)
+
 		switch req.Method {
 		case http.MethodGet:
 			if bucket == "" {

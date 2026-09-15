@@ -228,6 +228,53 @@ func TestCorsPreflightRequest(t *testing.T) {
 	assert.Equal(t, "3600", resp.Header.Get("Access-Control-Max-Age"))
 }
 
+func TestCorsActualResponse(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	_, err := client.PutBucketCors(ctx, &s3.PutBucketCorsInput{
+		Bucket: aws.String(bucketName),
+		CORSConfiguration: &types.CORSConfiguration{
+			CORSRules: []types.CORSRule{
+				{
+					AllowedOrigins: []string{"http://console.example.com"},
+					AllowedMethods: []string{"GET"},
+					ExposeHeaders:  []string{"ETag", "Content-Length"},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	key := "object.txt"
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key),
+		Body:   nil,
+	})
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodGet, ts.Endpoint+"/"+bucketName+"/"+key, nil)
+	require.NoError(t, err)
+	req.Header.Set("Origin", "http://console.example.com")
+
+	resp, err := (&http.Client{}).Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "http://console.example.com", resp.Header.Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "ETag, Content-Length", resp.Header.Get("Access-Control-Expose-Headers"))
+	assert.Equal(t, "Origin", resp.Header.Get("Vary"))
+}
+
 func TestCorsPreflightRequestNoMatch(t *testing.T) {
 	ts := testutil.NewTestServer(t)
 	defer ts.Cleanup()
