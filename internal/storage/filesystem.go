@@ -707,64 +707,107 @@ func (fs *FileSystem) ListObjectsV2(ctx context.Context, input *ListObjectsInput
 		startKey = input.ContinuationToken
 	}
 
-	// Get objects with prefix, pagination handled by SQL
-	// Request more objects when delimiter is used (we may need to skip common prefixes).
-	// Use int64 arithmetic to prevent overflow before clamping back to int32 (H-14).
-	var fetchLimit int64 = int64(maxKeys)
-	if input.Delimiter != "" {
-		// Fetch more to account for common prefixes that will be collapsed
-		fetchLimit = int64(maxKeys) * 10
-		if fetchLimit > 10000 {
-			fetchLimit = 10000
+	if input.Delimiter == "" {
+		objects, err := fs.metadata.ListObjects(ctx, input.Bucket, input.Prefix, startKey, maxKeys)
+		if err != nil {
+			return nil, err
+		}
+		output := &ListObjectsOutput{Objects: objects}
+		if int32(len(objects)) > maxKeys {
+			output.IsTruncated = true
+			output.NextContinuationToken = objects[maxKeys-1].Key
+			output.Objects = objects[:maxKeys]
+		}
+		output.KeyCount = int32(len(output.Objects))
+		return output, nil
+	}
+
+	return fs.listObjectsV2WithDelimiter(ctx, input, maxKeys, startKey)
+}
+
+// listObjectsV2WithDelimiter collapses object keys into common prefixes while
+// continuing the underlying key scan until it can determine whether another
+// logical entry exists. A large common prefix must not hide later prefixes.
+func (fs *FileSystem) listObjectsV2WithDelimiter(ctx context.Context, input *ListObjectsInput, maxKeys int32, startKey string) (*ListObjectsOutput, error) {
+	// Request more objects when delimiters collapse many keys into one logical
+	// entry. The loop below continues past this batch when a common prefix is
+	// still open, so this is a batch size rather than a correctness limit.
+	fetchLimit := int64(maxKeys) * 10
+	if fetchLimit > 10000 {
+		fetchLimit = 10000
+	}
+	if fetchLimit < 1 {
+		fetchLimit = 1
+	}
+
+	resultObjects := make([]Object, 0, maxKeys)
+	commonPrefixes := make([]string, 0, maxKeys)
+	commonPrefixSet := make(map[string]struct{})
+	lastIncludedKey := startKey
+	currentStartKey := startKey
+	logicalCount := int32(0)
+
+	finish := func(truncated bool, continuation string) *ListObjectsOutput {
+		return &ListObjectsOutput{
+			Objects:               resultObjects,
+			CommonPrefixes:        commonPrefixes,
+			IsTruncated:           truncated,
+			NextContinuationToken: continuation,
+			KeyCount:              int32(len(resultObjects) + len(commonPrefixes)),
 		}
 	}
 
-	objects, err := fs.metadata.ListObjects(ctx, input.Bucket, input.Prefix, startKey, int32(fetchLimit))
-	if err != nil {
-		return nil, err
-	}
+	for {
+		objects, err := fs.metadata.ListObjects(ctx, input.Bucket, input.Prefix, currentStartKey, int32(fetchLimit))
+		if err != nil {
+			return nil, err
+		}
+		if len(objects) == 0 {
+			return finish(false, ""), nil
+		}
+		hasMoreObjects := int64(len(objects)) > fetchLimit
 
-	// Handle delimiter for common prefixes
-	var resultObjects []Object
-	var commonPrefixes []string
-	commonPrefixMap := make(map[string]bool)
-
-	if input.Delimiter != "" {
 		for _, obj := range objects {
-			// Find delimiter after prefix
+			prefixKey := ""
 			if len(obj.Key) > len(input.Prefix) {
 				suffix := obj.Key[len(input.Prefix):]
-				idx := strings.Index(suffix, input.Delimiter)
-				if idx >= 0 {
-					// This is a common prefix
-					prefixKey := obj.Key[:len(input.Prefix)+idx+len(input.Delimiter)]
-					if !commonPrefixMap[prefixKey] {
-						commonPrefixMap[prefixKey] = true
-						commonPrefixes = append(commonPrefixes, prefixKey)
-					}
-					continue
+				if idx := strings.Index(suffix, input.Delimiter); idx >= 0 {
+					prefixKey = obj.Key[:len(input.Prefix)+idx+len(input.Delimiter)]
 				}
 			}
+
+			if prefixKey != "" {
+				if _, seen := commonPrefixSet[prefixKey]; seen {
+					lastIncludedKey = obj.Key
+					continue
+				}
+				if logicalCount >= maxKeys {
+					return finish(true, lastIncludedKey), nil
+				}
+				commonPrefixSet[prefixKey] = struct{}{}
+				commonPrefixes = append(commonPrefixes, prefixKey)
+				logicalCount++
+				lastIncludedKey = obj.Key
+				continue
+			}
+
+			if logicalCount >= maxKeys {
+				return finish(true, lastIncludedKey), nil
+			}
 			resultObjects = append(resultObjects, obj)
+			logicalCount++
+			lastIncludedKey = obj.Key
 		}
-	} else {
-		resultObjects = objects
+
+		if !hasMoreObjects {
+			return finish(false, ""), nil
+		}
+		nextStartKey := objects[len(objects)-1].Key
+		if nextStartKey == currentStartKey {
+			return finish(false, ""), nil
+		}
+		currentStartKey = nextStartKey
 	}
-
-	output := &ListObjectsOutput{}
-
-	// Check if we need pagination
-	if int32(len(resultObjects)) > maxKeys {
-		output.IsTruncated = true
-		output.NextContinuationToken = resultObjects[maxKeys-1].Key
-		resultObjects = resultObjects[:maxKeys]
-	}
-
-	output.Objects = resultObjects
-	output.CommonPrefixes = commonPrefixes
-	output.KeyCount = int32(len(resultObjects))
-
-	return output, nil
 }
 
 // CreateMultipartUpload initiates a multipart upload.
