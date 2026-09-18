@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -59,6 +60,69 @@ func TestFileSystemBucketLifecycle(t *testing.T) {
 	}
 	if _, err := fs.HeadBucket(ctx, "bucket"); !errors.Is(err, ErrBucketNotFound) {
 		t.Fatalf("HeadBucket() after delete error = %v, want %v", err, ErrBucketNotFound)
+	}
+}
+
+func TestFileSystemListObjectsV2DelimiterContinuesPastLargeCommonPrefix(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	if err := fs.CreateBucket(ctx, "bucket"); err != nil {
+		t.Fatalf("CreateBucket() error = %v", err)
+	}
+
+	tx, err := fs.metadata.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx() error = %v", err)
+	}
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO objects (bucket, key, size, last_modified, etag, content_type, metadata)
+		VALUES (?, ?, 0, ?, '', 'application/octet-stream', NULL)
+	`)
+	if err != nil {
+		tx.Rollback()
+		t.Fatalf("PrepareContext() error = %v", err)
+	}
+	for i := 0; i < 1001; i++ {
+		key := fmt.Sprintf("archive/nodes/node-a/object-%04d", i)
+		if _, err := stmt.ExecContext(ctx, "bucket", key, time.Unix(int64(i), 0).UTC()); err != nil {
+			stmt.Close()
+			tx.Rollback()
+			t.Fatalf("insert %q: %v", key, err)
+		}
+	}
+	if _, err := stmt.ExecContext(ctx, "bucket", "archive/nodes/node-b/object-0000", time.Unix(2000, 0).UTC()); err != nil {
+		stmt.Close()
+		tx.Rollback()
+		t.Fatalf("insert second prefix: %v", err)
+	}
+	if err := stmt.Close(); err != nil {
+		tx.Rollback()
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+
+	result, err := fs.ListObjectsV2(ctx, &ListObjectsInput{
+		Bucket:    "bucket",
+		Prefix:    "archive/nodes/",
+		Delimiter: "/",
+		MaxKeys:   100,
+	})
+	if err != nil {
+		t.Fatalf("ListObjectsV2() error = %v", err)
+	}
+	if result.IsTruncated {
+		t.Fatal("ListObjectsV2() marked the complete prefix listing as truncated")
+	}
+	if result.KeyCount != 2 {
+		t.Fatalf("KeyCount = %d, want 2", result.KeyCount)
+	}
+	if len(result.Objects) != 0 {
+		t.Fatalf("Objects = %#v, want none", result.Objects)
+	}
+	if len(result.CommonPrefixes) != 2 || result.CommonPrefixes[0] != "archive/nodes/node-a/" || result.CommonPrefixes[1] != "archive/nodes/node-b/" {
+		t.Fatalf("CommonPrefixes = %#v, want both node prefixes", result.CommonPrefixes)
 	}
 }
 
