@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func newTestFileSystem(t *testing.T) *FileSystem {
+func newTestFileSystem(t testing.TB) *FileSystem {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -322,6 +322,157 @@ func TestFileSystemListObjectsV2DelimiterEmptyResult(t *testing.T) {
 	}
 }
 
+// SQLite's LIKE is case-insensitive for ASCII, so a prefix that differs only by
+// case must still survive the seek past another prefix.
+func TestFileSystemListObjectsV2DelimiterKeepsCaseDistinctPrefixes(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	if err := fs.CreateBucket(ctx, "bucket"); err != nil {
+		t.Fatalf("CreateBucket() error = %v", err)
+	}
+	insertTestObjects(t, fs, "bucket", []string{"BIG/0000.txt", "big/0000.txt", "next.txt"})
+
+	result, err := fs.ListObjectsV2(ctx, &ListObjectsInput{
+		Bucket:    "bucket",
+		Delimiter: "/",
+		MaxKeys:   10,
+	})
+	if err != nil {
+		t.Fatalf("ListObjectsV2() error = %v", err)
+	}
+	if !reflect.DeepEqual(result.CommonPrefixes, []string{"BIG/", "big/"}) {
+		t.Fatalf("CommonPrefixes = %#v, want BIG/ and big/", result.CommonPrefixes)
+	}
+	if len(result.Objects) != 1 || result.Objects[0].Key != "next.txt" {
+		t.Fatalf("Objects = %#v, want next.txt", result.Objects)
+	}
+
+	var objects []string
+	var prefixes []string
+	token := ""
+	for page := 0; page < 5; page++ {
+		result, err := fs.ListObjectsV2(ctx, &ListObjectsInput{
+			Bucket:            "bucket",
+			Delimiter:         "/",
+			MaxKeys:           1,
+			ContinuationToken: token,
+		})
+		if err != nil {
+			t.Fatalf("page %d: ListObjectsV2() error = %v", page, err)
+		}
+		for _, obj := range result.Objects {
+			objects = append(objects, obj.Key)
+		}
+		prefixes = append(prefixes, result.CommonPrefixes...)
+		if !result.IsTruncated {
+			break
+		}
+		token = result.NextContinuationToken
+	}
+	if !reflect.DeepEqual(prefixes, []string{"BIG/", "big/"}) {
+		t.Fatalf("prefixes across pages = %#v, want BIG/ and big/", prefixes)
+	}
+	if !reflect.DeepEqual(objects, []string{"next.txt"}) {
+		t.Fatalf("objects across pages = %#v, want next.txt", objects)
+	}
+}
+
+// GLOB metacharacters inside a common prefix must not widen the skip pattern.
+func TestFileSystemListObjectsV2DelimiterKeepsGlobLikePrefixes(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	if err := fs.CreateBucket(ctx, "bucket"); err != nil {
+		t.Fatalf("CreateBucket() error = %v", err)
+	}
+	insertTestObjects(t, fs, "bucket", []string{
+		"a[b]/1.txt", "a[b2]/2.txt",
+		"a*b/1.txt", "aXb/2.txt",
+		"a?b/1.txt", "aZb/2.txt",
+		"a%c/1.txt", "a%c2/2.txt",
+		"a_d/1.txt", "axe/2.txt",
+		"a]b/1.txt", "a]c/2.txt",
+	})
+
+	result, err := fs.ListObjectsV2(ctx, &ListObjectsInput{
+		Bucket:    "bucket",
+		Delimiter: "/",
+		MaxKeys:   100,
+	})
+	if err != nil {
+		t.Fatalf("ListObjectsV2() error = %v", err)
+	}
+	want := []string{"a%c/", "a%c2/", "a*b/", "a?b/", "aXb/", "aZb/", "a[b2]/", "a[b]/", "a]b/", "a]c/", "a_d/", "axe/"}
+	if !reflect.DeepEqual(result.CommonPrefixes, want) {
+		t.Fatalf("CommonPrefixes = %#v, want %#v", result.CommonPrefixes, want)
+	}
+	if result.KeyCount != int32(len(want)) {
+		t.Fatalf("KeyCount = %d, want %d", result.KeyCount, len(want))
+	}
+}
+
+// Skipping a common prefix must cost a bounded number of queries no matter how
+// many keys live under it.
+func TestFileSystemListObjectsV2DelimiterQueryCountIsIndependentOfKeyCount(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	for _, bucket := range []string{"small", "large"} {
+		if err := fs.CreateBucket(ctx, bucket); err != nil {
+			t.Fatalf("CreateBucket(%q) error = %v", bucket, err)
+		}
+	}
+
+	build := func(prefix string, n int) []string {
+		keys := make([]string, 0, n+2)
+		for i := 0; i < n; i++ {
+			keys = append(keys, fmt.Sprintf("%s/%06d", prefix, i))
+		}
+		return append(keys, "next/object.txt", "zzz.txt")
+	}
+	insertTestObjects(t, fs, "small", build("big", 5000))
+	insertTestObjects(t, fs, "large", build("big", 20000))
+
+	count := func(bucket string) int64 {
+		before := fs.metadata.ListObjectQueries()
+		result, err := fs.ListObjectsV2(ctx, &ListObjectsInput{Bucket: bucket, Delimiter: "/", MaxKeys: 10})
+		if err != nil {
+			t.Fatalf("ListObjectsV2(%q) error = %v", bucket, err)
+		}
+		if result.KeyCount != 3 {
+			t.Fatalf("ListObjectsV2(%q) KeyCount = %d, want 3", bucket, result.KeyCount)
+		}
+		return fs.metadata.ListObjectQueries() - before
+	}
+
+	small := count("small")
+	large := count("large")
+	if small != large {
+		t.Fatalf("queries = %d for 5,000 keys and %d for 20,000 keys, want the same", small, large)
+	}
+	if large > 6 {
+		t.Fatalf("listing used %d queries, want a bounded number", large)
+	}
+}
+
+func TestEscapeGlobPattern(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{in: "plain/", want: "plain/*"},
+		{in: "a[b]/", want: "a[[]b]/*"},
+		{in: "a*b/", want: "a[*]b/*"},
+		{in: "a?b/", want: "a[?]b/*"},
+		{in: "a]b/", want: "a]b/*"},
+		{in: `a\b/`, want: `a\b/*`},
+		{in: "a%b_/", want: "a%b_/*"},
+	}
+	for _, tc := range cases {
+		if got := escapeGlobPattern(tc.in); got != tc.want {
+			t.Errorf("escapeGlobPattern(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestFileSystemListObjectsV2TruncatedPagesCarryContinuationToken(t *testing.T) {
 	ctx := context.Background()
 	fs := newTestFileSystem(t)
@@ -355,6 +506,114 @@ func TestFileSystemListObjectsV2TruncatedPagesCarryContinuationToken(t *testing.
 		if truncatedPages == 0 {
 			t.Fatalf("delimiter=%q: the fixture never produced a truncated page", delimiter)
 		}
+	}
+}
+
+// insertTestObjects inserts keys with raw SQL so tests can build large
+// fixtures without paying the per-object write path.
+func insertTestObjects(t testing.TB, fs *FileSystem, bucket string, keys []string) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := fs.metadata.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx() error = %v", err)
+	}
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO objects (bucket, key, size, last_modified, etag, content_type, metadata)
+		VALUES (?, ?, 0, ?, '', 'application/octet-stream', NULL)
+	`)
+	if err != nil {
+		tx.Rollback()
+		t.Fatalf("PrepareContext() error = %v", err)
+	}
+	for i, key := range keys {
+		if _, err := stmt.ExecContext(ctx, bucket, key, time.Unix(int64(i), 0).UTC()); err != nil {
+			stmt.Close()
+			tx.Rollback()
+			t.Fatalf("insert %q: %v", key, err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		tx.Rollback()
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+}
+
+// One huge common prefix must cost a bounded number of queries instead of one
+// query per batch of skipped keys.
+func TestFileSystemListObjectsV2DelimiterSeeksPastLargeCommonPrefix(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	if err := fs.CreateBucket(ctx, "bucket"); err != nil {
+		t.Fatalf("CreateBucket() error = %v", err)
+	}
+
+	keys := make([]string, 0, 20002)
+	for i := 0; i < 20000; i++ {
+		keys = append(keys, fmt.Sprintf("big/%05d", i))
+	}
+	keys = append(keys, "next/object.txt", "zzz.txt")
+	insertTestObjects(t, fs, "bucket", keys)
+
+	before := fs.metadata.ListObjectQueries()
+	result, err := fs.ListObjectsV2(ctx, &ListObjectsInput{
+		Bucket:    "bucket",
+		Delimiter: "/",
+		MaxKeys:   10,
+	})
+	if err != nil {
+		t.Fatalf("ListObjectsV2() error = %v", err)
+	}
+	queries := fs.metadata.ListObjectQueries() - before
+	if result.KeyCount != 3 {
+		t.Fatalf("KeyCount = %d, want 3", result.KeyCount)
+	}
+	if len(result.CommonPrefixes) != 2 || result.CommonPrefixes[0] != "big/" || result.CommonPrefixes[1] != "next/" {
+		t.Fatalf("CommonPrefixes = %#v, want big/ and next/", result.CommonPrefixes)
+	}
+	if len(result.Objects) != 1 || result.Objects[0].Key != "zzz.txt" {
+		t.Fatalf("Objects = %#v, want zzz.txt", result.Objects)
+	}
+	if queries > 10 {
+		t.Fatalf("listing used %d queries for a 20,000 key prefix, want a bounded number", queries)
+	}
+
+	// Continue past the skipped prefix on the next page as well.
+	before = fs.metadata.ListObjectQueries()
+	var objects []string
+	var prefixes []string
+	token := ""
+	for page := 0; page < 5; page++ {
+		result, err := fs.ListObjectsV2(ctx, &ListObjectsInput{
+			Bucket:            "bucket",
+			Delimiter:         "/",
+			MaxKeys:           2,
+			ContinuationToken: token,
+		})
+		if err != nil {
+			t.Fatalf("page %d: ListObjectsV2() error = %v", page, err)
+		}
+		for _, obj := range result.Objects {
+			objects = append(objects, obj.Key)
+		}
+		prefixes = append(prefixes, result.CommonPrefixes...)
+		if !result.IsTruncated {
+			break
+		}
+		token = result.NextContinuationToken
+	}
+	queries = fs.metadata.ListObjectQueries() - before
+	if !reflect.DeepEqual(prefixes, []string{"big/", "next/"}) {
+		t.Fatalf("prefixes across pages = %#v, want big/ and next/", prefixes)
+	}
+	if !reflect.DeepEqual(objects, []string{"zzz.txt"}) {
+		t.Fatalf("objects across pages = %#v, want zzz.txt", objects)
+	}
+	if queries > 20 {
+		t.Fatalf("paginated listing used %d queries, want a bounded number", queries)
 	}
 }
 
@@ -1104,3 +1363,28 @@ func ptrTime(t time.Time) *time.Time {
 }
 
 func testInt32Ptr(v int32) *int32 { return &v }
+
+// BenchmarkFileSystemListObjectsV2DelimiterLargeCommonPrefix measures a listing
+// where one common prefix holds 50,000 keys that must be skipped.
+func BenchmarkFileSystemListObjectsV2DelimiterLargeCommonPrefix(b *testing.B) {
+	ctx := context.Background()
+	fs := newTestFileSystem(b)
+	if err := fs.CreateBucket(ctx, "bucket"); err != nil {
+		b.Fatalf("CreateBucket() error = %v", err)
+	}
+
+	keys := make([]string, 0, 50002)
+	for i := 0; i < 50000; i++ {
+		keys = append(keys, fmt.Sprintf("big/%06d", i))
+	}
+	keys = append(keys, "next/object.txt", "zzz.txt")
+	insertTestObjects(b, fs, "bucket", keys)
+
+	input := &ListObjectsInput{Bucket: "bucket", Delimiter: "/", MaxKeys: 10}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := fs.ListObjectsV2(ctx, input); err != nil {
+			b.Fatalf("ListObjectsV2() error = %v", err)
+		}
+	}
+}

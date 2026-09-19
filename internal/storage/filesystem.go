@@ -727,12 +727,9 @@ func (fs *FileSystem) ListObjectsV2(ctx context.Context, input *ListObjectsInput
 
 // listObjectsV2WithDelimiter collapses object keys into common prefixes while
 // continuing the underlying key scan until it can determine whether another
-// logical entry exists. A large common prefix must not hide later prefixes.
-//
-// Determining IsTruncated exactly means scanning through a common prefix until
-// the next logical entry (or the end of the key space) is found, so a single
-// prefix holding millions of keys dominates the response time. Seeking past the
-// prefix in SQL is a possible future optimization.
+// logical entry exists. A large common prefix must not hide later prefixes,
+// and it must not cost one query per batch of skipped keys either: once a
+// prefix is seen, the whole subtree is skipped in a single query.
 func (fs *FileSystem) listObjectsV2WithDelimiter(ctx context.Context, input *ListObjectsInput, maxKeys int32, startKey string) (*ListObjectsOutput, error) {
 	// Request more objects when delimiters collapse many keys into one logical
 	// entry. The loop below continues past this batch when a common prefix is
@@ -750,6 +747,7 @@ func (fs *FileSystem) listObjectsV2WithDelimiter(ctx context.Context, input *Lis
 	commonPrefixSet := make(map[string]struct{})
 	lastIncludedKey := startKey
 	currentStartKey := startKey
+	excludePrefix := ""
 	logicalCount := int32(0)
 
 	finish := func(truncated bool, continuation string) *ListObjectsOutput {
@@ -763,15 +761,25 @@ func (fs *FileSystem) listObjectsV2WithDelimiter(ctx context.Context, input *Lis
 	}
 
 	for {
-		objects, err := fs.metadata.ListObjects(ctx, input.Bucket, input.Prefix, currentStartKey, int32(fetchLimit))
+		var (
+			objects []Object
+			err     error
+		)
+		if excludePrefix == "" {
+			objects, err = fs.metadata.ListObjects(ctx, input.Bucket, input.Prefix, currentStartKey, int32(fetchLimit))
+		} else {
+			objects, err = fs.metadata.ListObjectsExcludingPrefix(ctx, input.Bucket, input.Prefix, currentStartKey, excludePrefix, int32(fetchLimit))
+		}
 		if err != nil {
 			return nil, err
 		}
+		excludePrefix = ""
 		if len(objects) == 0 {
 			return finish(false, ""), nil
 		}
 		hasMoreObjects := int64(len(objects)) > fetchLimit
 
+		skippedPrefix := ""
 		for _, obj := range objects {
 			prefixKey := ""
 			if len(obj.Key) > len(input.Prefix) {
@@ -785,22 +793,17 @@ func (fs *FileSystem) listObjectsV2WithDelimiter(ctx context.Context, input *Lis
 				// S3 drops a common prefix that is not lexicographically greater
 				// than StartAfter (or the continuation marker), even when an
 				// object under it sorts after the marker.
-				if prefixKey <= startKey {
-					lastIncludedKey = obj.Key
-					continue
+				if _, seen := commonPrefixSet[prefixKey]; !seen && prefixKey > startKey {
+					if logicalCount >= maxKeys {
+						return finish(true, lastIncludedKey), nil
+					}
+					commonPrefixSet[prefixKey] = struct{}{}
+					commonPrefixes = append(commonPrefixes, prefixKey)
+					logicalCount++
 				}
-				if _, seen := commonPrefixSet[prefixKey]; seen {
-					lastIncludedKey = obj.Key
-					continue
-				}
-				if logicalCount >= maxKeys {
-					return finish(true, lastIncludedKey), nil
-				}
-				commonPrefixSet[prefixKey] = struct{}{}
-				commonPrefixes = append(commonPrefixes, prefixKey)
-				logicalCount++
 				lastIncludedKey = obj.Key
-				continue
+				skippedPrefix = prefixKey
+				break
 			}
 
 			if logicalCount >= maxKeys {
@@ -809,6 +812,13 @@ func (fs *FileSystem) listObjectsV2WithDelimiter(ctx context.Context, input *Lis
 			resultObjects = append(resultObjects, obj)
 			logicalCount++
 			lastIncludedKey = obj.Key
+		}
+
+		if skippedPrefix != "" {
+			// Jump past the whole subtree instead of walking it batch by batch.
+			currentStartKey = skippedPrefix
+			excludePrefix = skippedPrefix
+			continue
 		}
 
 		if !hasMoreObjects {

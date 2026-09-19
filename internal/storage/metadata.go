@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	sqlite "modernc.org/sqlite"
@@ -19,6 +20,15 @@ import (
 type Metadata struct {
 	db     *sql.DB
 	dbPath string
+
+	// listQueries counts listing queries so tests can assert that pagination
+	// does not degrade into one query per batch of skipped keys.
+	listQueries atomic.Int64
+}
+
+// ListObjectQueries reports how many listing queries this store has served.
+func (m *Metadata) ListObjectQueries() int64 {
+	return m.listQueries.Load()
 }
 
 // NewMetadata creates a new metadata store.
@@ -179,6 +189,18 @@ func escapeLikePattern(s string) string {
 	s = strings.ReplaceAll(s, "%", `\%`)
 	s = strings.ReplaceAll(s, "_", `\_`)
 	return s
+}
+
+// escapeGlobPattern escapes the GLOB metacharacters so the pattern matches the
+// prefix literally, then appends the wildcard for the subtree. GLOB is used
+// instead of LIKE because SQLite's LIKE is case-insensitive for ASCII, which
+// would also skip a prefix that differs only by case.
+func escapeGlobPattern(s string) string {
+	return strings.NewReplacer(
+		"[", "[[]",
+		"*", "[*]",
+		"?", "[?]",
+	).Replace(s) + "*"
 }
 
 func (m *Metadata) initialize() error {
@@ -1545,6 +1567,7 @@ func (m *Metadata) IsBucketEmpty(ctx context.Context, bucket string) (bool, erro
 // startAfter specifies the key to start after (exclusive).
 // maxKeys limits the number of results (0 means default 1000).
 func (m *Metadata) ListObjects(ctx context.Context, bucket, prefix, startAfter string, maxKeys int32) ([]Object, error) {
+	m.listQueries.Add(1)
 	if maxKeys <= 0 {
 		maxKeys = 1000
 	}
@@ -1571,6 +1594,44 @@ func (m *Metadata) ListObjects(ctx context.Context, bucket, prefix, startAfter s
 		`, bucket, likePrefix, maxKeys+1)
 	}
 
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var objects []Object
+	for rows.Next() {
+		var obj Object
+		if err := rows.Scan(&obj.Key, &obj.Size, &obj.LastModified, &obj.ETag, &obj.ContentType); err != nil {
+			return nil, err
+		}
+		objects = append(objects, obj)
+	}
+	return objects, rows.Err()
+}
+
+// ListObjectsExcludingPrefix lists objects after startAfter while skipping the
+// subtree under excludePrefix. A delimiter listing uses it to jump over a large
+// common prefix in one query instead of walking it batch by batch.
+//
+// excludePrefix is matched case-sensitively. An empty excludePrefix means there
+// is no subtree to skip, so the plain listing is used.
+func (m *Metadata) ListObjectsExcludingPrefix(ctx context.Context, bucket, prefix, startAfter, excludePrefix string, maxKeys int32) ([]Object, error) {
+	if excludePrefix == "" {
+		return m.ListObjects(ctx, bucket, prefix, startAfter, maxKeys)
+	}
+	m.listQueries.Add(1)
+	if maxKeys <= 0 {
+		maxKeys = 1000
+	}
+
+	rows, err := m.db.QueryContext(ctx, `
+		SELECT key, size, last_modified, etag, content_type
+		FROM objects
+		WHERE bucket = ? AND key LIKE ? ESCAPE '\' AND key > ? AND key NOT GLOB ?
+		ORDER BY key
+		LIMIT ?
+	`, bucket, escapeLikePattern(prefix)+"%", startAfter, escapeGlobPattern(excludePrefix), maxKeys+1)
 	if err != nil {
 		return nil, err
 	}
