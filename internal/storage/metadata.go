@@ -191,6 +191,18 @@ func escapeLikePattern(s string) string {
 	return s
 }
 
+// escapeGlobPattern escapes the GLOB metacharacters so the pattern matches the
+// prefix literally, then appends the wildcard for the subtree. GLOB is used
+// instead of LIKE because SQLite's LIKE is case-insensitive for ASCII, which
+// would also skip a prefix that differs only by case.
+func escapeGlobPattern(s string) string {
+	return strings.NewReplacer(
+		"[", "[[]",
+		"*", "[*]",
+		"?", "[?]",
+	).Replace(s) + "*"
+}
+
 func (m *Metadata) initialize() error {
 	// Create buckets table
 	_, err := m.db.Exec(`
@@ -1601,7 +1613,13 @@ func (m *Metadata) ListObjects(ctx context.Context, bucket, prefix, startAfter s
 // ListObjectsExcludingPrefix lists objects after startAfter while skipping the
 // subtree under excludePrefix. A delimiter listing uses it to jump over a large
 // common prefix in one query instead of walking it batch by batch.
+//
+// excludePrefix is matched case-sensitively. An empty excludePrefix means there
+// is no subtree to skip, so the plain listing is used.
 func (m *Metadata) ListObjectsExcludingPrefix(ctx context.Context, bucket, prefix, startAfter, excludePrefix string, maxKeys int32) ([]Object, error) {
+	if excludePrefix == "" {
+		return m.ListObjects(ctx, bucket, prefix, startAfter, maxKeys)
+	}
 	m.listQueries.Add(1)
 	if maxKeys <= 0 {
 		maxKeys = 1000
@@ -1610,10 +1628,10 @@ func (m *Metadata) ListObjectsExcludingPrefix(ctx context.Context, bucket, prefi
 	rows, err := m.db.QueryContext(ctx, `
 		SELECT key, size, last_modified, etag, content_type
 		FROM objects
-		WHERE bucket = ? AND key LIKE ? ESCAPE '\' AND key > ? AND key NOT LIKE ? ESCAPE '\'
+		WHERE bucket = ? AND key LIKE ? ESCAPE '\' AND key > ? AND key NOT GLOB ?
 		ORDER BY key
 		LIMIT ?
-	`, bucket, escapeLikePattern(prefix)+"%", startAfter, escapeLikePattern(excludePrefix)+"%", maxKeys+1)
+	`, bucket, escapeLikePattern(prefix)+"%", startAfter, escapeGlobPattern(excludePrefix), maxKeys+1)
 	if err != nil {
 		return nil, err
 	}
