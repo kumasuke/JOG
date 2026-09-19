@@ -390,6 +390,7 @@ func TestFileSystemListObjectsV2DelimiterKeepsGlobLikePrefixes(t *testing.T) {
 		"a?b/1.txt", "aZb/2.txt",
 		"a%c/1.txt", "a%c2/2.txt",
 		"a_d/1.txt", "axe/2.txt",
+		"a]b/1.txt", "a]c/2.txt",
 	})
 
 	result, err := fs.ListObjectsV2(ctx, &ListObjectsInput{
@@ -400,7 +401,7 @@ func TestFileSystemListObjectsV2DelimiterKeepsGlobLikePrefixes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListObjectsV2() error = %v", err)
 	}
-	want := []string{"a%c/", "a%c2/", "a*b/", "a?b/", "aXb/", "aZb/", "a[b2]/", "a[b]/", "a_d/", "axe/"}
+	want := []string{"a%c/", "a%c2/", "a*b/", "a?b/", "aXb/", "aZb/", "a[b2]/", "a[b]/", "a]b/", "a]c/", "a_d/", "axe/"}
 	if !reflect.DeepEqual(result.CommonPrefixes, want) {
 		t.Fatalf("CommonPrefixes = %#v, want %#v", result.CommonPrefixes, want)
 	}
@@ -449,6 +450,26 @@ func TestFileSystemListObjectsV2DelimiterQueryCountIsIndependentOfKeyCount(t *te
 	}
 	if large > 6 {
 		t.Fatalf("listing used %d queries, want a bounded number", large)
+	}
+}
+
+func TestEscapeGlobPattern(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{in: "plain/", want: "plain/*"},
+		{in: "a[b]/", want: "a[[]b]/*"},
+		{in: "a*b/", want: "a[*]b/*"},
+		{in: "a?b/", want: "a[?]b/*"},
+		{in: "a]b/", want: "a]b/*"},
+		{in: `a\b/`, want: `a\b/*`},
+		{in: "a%b_/", want: "a%b_/*"},
+	}
+	for _, tc := range cases {
+		if got := escapeGlobPattern(tc.in); got != tc.want {
+			t.Errorf("escapeGlobPattern(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 
