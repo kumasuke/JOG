@@ -1107,9 +1107,13 @@ func (h *Handler) ListObjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Set NextMarker if truncated (use the last key in the result)
-	if output.IsTruncated && len(output.Objects) > 0 {
-		result.NextMarker = output.Objects[len(output.Objects)-1].Key
+	// Set NextMarker if truncated. A page can end on a common prefix, so the
+	// storage continuation position is the reliable resume point.
+	if output.IsTruncated {
+		result.NextMarker = output.NextContinuationToken
+		if result.NextMarker == "" && len(output.Objects) > 0 {
+			result.NextMarker = output.Objects[len(output.Objects)-1].Key
+		}
 	}
 
 	for _, prefix := range output.CommonPrefixes {
