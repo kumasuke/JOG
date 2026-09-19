@@ -322,6 +322,42 @@ func TestFileSystemListObjectsV2DelimiterEmptyResult(t *testing.T) {
 	}
 }
 
+func TestFileSystemListObjectsV2TruncatedPagesCarryContinuationToken(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	if err := fs.CreateBucket(ctx, "bucket"); err != nil {
+		t.Fatalf("CreateBucket() error = %v", err)
+	}
+	putTestObjects(t, fs, "a.txt", "b/1.txt", "b/2.txt", "c.txt")
+
+	for _, delimiter := range []string{"", "/"} {
+		token := ""
+		truncatedPages := 0
+		for page := 0; page < 10; page++ {
+			result, err := fs.ListObjectsV2(ctx, &ListObjectsInput{
+				Bucket:            "bucket",
+				Delimiter:         delimiter,
+				MaxKeys:           1,
+				ContinuationToken: token,
+			})
+			if err != nil {
+				t.Fatalf("delimiter=%q page %d: ListObjectsV2() error = %v", delimiter, page, err)
+			}
+			if !result.IsTruncated {
+				break
+			}
+			truncatedPages++
+			if result.NextContinuationToken == "" {
+				t.Fatalf("delimiter=%q page %d: truncated without a continuation token", delimiter, page)
+			}
+			token = result.NextContinuationToken
+		}
+		if truncatedPages == 0 {
+			t.Fatalf("delimiter=%q: the fixture never produced a truncated page", delimiter)
+		}
+	}
+}
+
 func TestFileSystemObjectCRUDAndRange(t *testing.T) {
 	ctx := context.Background()
 	fs := newTestFileSystem(t)
