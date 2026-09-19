@@ -124,6 +124,39 @@ func TestFileSystemListObjectsV2DelimiterContinuesPastLargeCommonPrefix(t *testi
 	if len(result.CommonPrefixes) != 2 || result.CommonPrefixes[0] != "archive/nodes/node-a/" || result.CommonPrefixes[1] != "archive/nodes/node-b/" {
 		t.Fatalf("CommonPrefixes = %#v, want both node prefixes", result.CommonPrefixes)
 	}
+
+	firstPage, err := fs.ListObjectsV2(ctx, &ListObjectsInput{
+		Bucket:    "bucket",
+		Prefix:    "archive/nodes/",
+		Delimiter: "/",
+		MaxKeys:   1,
+	})
+	if err != nil {
+		t.Fatalf("ListObjectsV2() first page error = %v", err)
+	}
+	if !firstPage.IsTruncated || firstPage.NextContinuationToken == "" {
+		t.Fatalf("first page pagination = truncated:%v token:%q, want truncated with token", firstPage.IsTruncated, firstPage.NextContinuationToken)
+	}
+	if len(firstPage.CommonPrefixes) != 1 || firstPage.CommonPrefixes[0] != "archive/nodes/node-a/" {
+		t.Fatalf("first page CommonPrefixes = %#v, want node-a", firstPage.CommonPrefixes)
+	}
+
+	secondPage, err := fs.ListObjectsV2(ctx, &ListObjectsInput{
+		Bucket:            "bucket",
+		Prefix:            "archive/nodes/",
+		Delimiter:         "/",
+		MaxKeys:           1,
+		ContinuationToken: firstPage.NextContinuationToken,
+	})
+	if err != nil {
+		t.Fatalf("ListObjectsV2() second page error = %v", err)
+	}
+	if secondPage.IsTruncated {
+		t.Fatal("second page unexpectedly truncated")
+	}
+	if len(secondPage.CommonPrefixes) != 1 || secondPage.CommonPrefixes[0] != "archive/nodes/node-b/" {
+		t.Fatalf("second page CommonPrefixes = %#v, want node-b", secondPage.CommonPrefixes)
+	}
 }
 
 func TestFileSystemObjectCRUDAndRange(t *testing.T) {
