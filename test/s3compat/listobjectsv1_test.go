@@ -180,6 +180,112 @@ func TestListObjectsPagination(t *testing.T) {
 	assert.NotEqual(t, result.Contents[0].Key, result2.Contents[0].Key)
 }
 
+// A V1 page can end on a common prefix. Without NextMarker the client has no
+// way to continue the listing.
+func TestListObjectsDelimiterPaginationUsesNextMarker(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	for _, key := range []string{"a/one.txt", "b/two.txt"} {
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucketName),
+			Key:    aws.String(key),
+			Body:   strings.NewReader("content"),
+		})
+		require.NoError(t, err)
+	}
+
+	first, err := client.ListObjects(ctx, &s3.ListObjectsInput{
+		Bucket:    aws.String(bucketName),
+		Delimiter: aws.String("/"),
+		MaxKeys:   aws.Int32(1),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, first.IsTruncated)
+	assert.True(t, *first.IsTruncated)
+	assert.Empty(t, first.Contents)
+	require.Len(t, first.CommonPrefixes, 1)
+	assert.Equal(t, "a/", *first.CommonPrefixes[0].Prefix)
+	require.NotNil(t, first.NextMarker, "a page that ends on a common prefix must return NextMarker")
+
+	second, err := client.ListObjects(ctx, &s3.ListObjectsInput{
+		Bucket:    aws.String(bucketName),
+		Delimiter: aws.String("/"),
+		MaxKeys:   aws.Int32(1),
+		Marker:    first.NextMarker,
+	})
+	require.NoError(t, err)
+	require.Len(t, second.CommonPrefixes, 1)
+	assert.Equal(t, "b/", *second.CommonPrefixes[0].Prefix)
+	assert.Empty(t, second.Contents)
+	require.NotNil(t, second.IsTruncated)
+	assert.False(t, *second.IsTruncated)
+}
+
+// Pages that mix common prefixes and objects must also resume without gaps.
+func TestListObjectsDelimiterPaginationMixedEntries(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	for _, key := range []string{"a/one.txt", "b/two.txt", "root.txt"} {
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucketName),
+			Key:    aws.String(key),
+			Body:   strings.NewReader("content"),
+		})
+		require.NoError(t, err)
+	}
+
+	first, err := client.ListObjects(ctx, &s3.ListObjectsInput{
+		Bucket:    aws.String(bucketName),
+		Delimiter: aws.String("/"),
+		MaxKeys:   aws.Int32(1),
+	})
+	require.NoError(t, err)
+	require.Len(t, first.CommonPrefixes, 1)
+	assert.Equal(t, "a/", *first.CommonPrefixes[0].Prefix)
+	require.NotNil(t, first.NextMarker)
+
+	second, err := client.ListObjects(ctx, &s3.ListObjectsInput{
+		Bucket:    aws.String(bucketName),
+		Delimiter: aws.String("/"),
+		MaxKeys:   aws.Int32(1),
+		Marker:    first.NextMarker,
+	})
+	require.NoError(t, err)
+	require.Len(t, second.CommonPrefixes, 1)
+	assert.Equal(t, "b/", *second.CommonPrefixes[0].Prefix)
+	assert.Empty(t, second.Contents)
+	require.NotNil(t, second.NextMarker)
+
+	third, err := client.ListObjects(ctx, &s3.ListObjectsInput{
+		Bucket:    aws.String(bucketName),
+		Delimiter: aws.String("/"),
+		MaxKeys:   aws.Int32(1),
+		Marker:    second.NextMarker,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, third.CommonPrefixes)
+	require.Len(t, third.Contents, 1)
+	assert.Equal(t, "root.txt", *third.Contents[0].Key)
+	require.NotNil(t, third.IsTruncated)
+	assert.False(t, *third.IsTruncated)
+}
+
 func TestListObjectsBucketNotFound(t *testing.T) {
 	ts := testutil.NewTestServer(t)
 	defer ts.Cleanup()
