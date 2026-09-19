@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -156,6 +157,168 @@ func TestFileSystemListObjectsV2DelimiterContinuesPastLargeCommonPrefix(t *testi
 	}
 	if len(secondPage.CommonPrefixes) != 1 || secondPage.CommonPrefixes[0] != "archive/nodes/node-b/" {
 		t.Fatalf("second page CommonPrefixes = %#v, want node-b", secondPage.CommonPrefixes)
+	}
+}
+
+// putTestObjects creates small objects through the public API so pagination
+// tests can exercise object/prefix collapsing without raw SQL inserts.
+func putTestObjects(t *testing.T, fs *FileSystem, keys ...string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, key := range keys {
+		if _, err := fs.PutObject(ctx, "bucket", key, strings.NewReader("x"), 1, "text/plain", nil); err != nil {
+			t.Fatalf("PutObject(%q) error = %v", key, err)
+		}
+	}
+}
+
+// S3 filters out a common prefix that is not lexicographically greater than
+// StartAfter, even when an object under that prefix sorts after StartAfter.
+func TestFileSystemListObjectsV2DelimiterDropsCommonPrefixesNotAfterStartAfter(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	if err := fs.CreateBucket(ctx, "bucket"); err != nil {
+		t.Fatalf("CreateBucket() error = %v", err)
+	}
+	putTestObjects(t, fs, "photos/zz/file.txt", "photos/zzz/file.txt", "videos/a.mp4")
+
+	cases := []struct {
+		name       string
+		startAfter string
+		want       []string
+	}{
+		{name: "StartAfter inside a prefix", startAfter: "photos/z", want: []string{"videos/"}},
+		{name: "StartAfter equal to a prefix", startAfter: "photos/", want: []string{"videos/"}},
+		{name: "StartAfter equal to the last prefix", startAfter: "videos/", want: []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := fs.ListObjectsV2(ctx, &ListObjectsInput{
+				Bucket:     "bucket",
+				Delimiter:  "/",
+				MaxKeys:    10,
+				StartAfter: tc.startAfter,
+			})
+			if err != nil {
+				t.Fatalf("ListObjectsV2() error = %v", err)
+			}
+			if result.IsTruncated {
+				t.Fatal("ListObjectsV2() marked the complete listing as truncated")
+			}
+			if result.NextContinuationToken != "" {
+				t.Fatalf("NextContinuationToken = %q, want empty", result.NextContinuationToken)
+			}
+			if len(result.Objects) != 0 {
+				t.Fatalf("Objects = %#v, want none", result.Objects)
+			}
+			if len(result.CommonPrefixes) != len(tc.want) {
+				t.Fatalf("CommonPrefixes = %#v, want %#v", result.CommonPrefixes, tc.want)
+			}
+			for i := range tc.want {
+				if result.CommonPrefixes[i] != tc.want[i] {
+					t.Fatalf("CommonPrefixes = %#v, want %#v", result.CommonPrefixes, tc.want)
+				}
+			}
+			if result.KeyCount != int32(len(tc.want)) {
+				t.Fatalf("KeyCount = %d, want %d", result.KeyCount, len(tc.want))
+			}
+		})
+	}
+}
+
+func TestFileSystemListObjectsV2DelimiterPaginatesMixedEntries(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	if err := fs.CreateBucket(ctx, "bucket"); err != nil {
+		t.Fatalf("CreateBucket() error = %v", err)
+	}
+	putTestObjects(t, fs, "a.txt", "b/1.txt", "b/2.txt", "b/3.txt", "c.txt", "d/1.txt")
+
+	wantObjects := []string{"a.txt", "c.txt"}
+	wantPrefixes := []string{"b/", "d/"}
+	for _, maxKeys := range []int32{1, 2, 3, 4, 10} {
+		t.Run(fmt.Sprintf("maxKeys=%d", maxKeys), func(t *testing.T) {
+			var (
+				objects  []string
+				prefixes []string
+				token    string
+				pages    int
+			)
+			for pages = 1; pages <= 10; pages++ {
+				result, err := fs.ListObjectsV2(ctx, &ListObjectsInput{
+					Bucket:            "bucket",
+					Delimiter:         "/",
+					MaxKeys:           maxKeys,
+					ContinuationToken: token,
+				})
+				if err != nil {
+					t.Fatalf("page %d: ListObjectsV2() error = %v", pages, err)
+				}
+				returned := int32(len(result.Objects) + len(result.CommonPrefixes))
+				if result.KeyCount != returned {
+					t.Fatalf("page %d: KeyCount = %d, want %d", pages, result.KeyCount, returned)
+				}
+				if returned > maxKeys {
+					t.Fatalf("page %d: returned %d entries, want at most %d", pages, returned, maxKeys)
+				}
+				for _, obj := range result.Objects {
+					objects = append(objects, obj.Key)
+				}
+				prefixes = append(prefixes, result.CommonPrefixes...)
+
+				if !result.IsTruncated {
+					if result.NextContinuationToken != "" {
+						t.Fatalf("page %d: NextContinuationToken = %q, want empty on the final page", pages, result.NextContinuationToken)
+					}
+					break
+				}
+				if result.NextContinuationToken == "" {
+					t.Fatalf("page %d: truncated without a continuation token", pages)
+				}
+				if result.NextContinuationToken == token {
+					t.Fatalf("page %d: continuation token did not advance", pages)
+				}
+				token = result.NextContinuationToken
+			}
+			if pages > 10 {
+				t.Fatalf("pagination did not finish: objects=%#v prefixes=%#v", objects, prefixes)
+			}
+			wantPages := (len(wantObjects) + len(wantPrefixes) + int(maxKeys) - 1) / int(maxKeys)
+			if pages != wantPages {
+				t.Fatalf("pages = %d, want %d", pages, wantPages)
+			}
+			if !reflect.DeepEqual(objects, wantObjects) {
+				t.Fatalf("objects = %#v, want %#v", objects, wantObjects)
+			}
+			if !reflect.DeepEqual(prefixes, wantPrefixes) {
+				t.Fatalf("prefixes = %#v, want %#v", prefixes, wantPrefixes)
+			}
+		})
+	}
+}
+
+func TestFileSystemListObjectsV2DelimiterEmptyResult(t *testing.T) {
+	ctx := context.Background()
+	fs := newTestFileSystem(t)
+	if err := fs.CreateBucket(ctx, "bucket"); err != nil {
+		t.Fatalf("CreateBucket() error = %v", err)
+	}
+	putTestObjects(t, fs, "other/1.txt")
+
+	result, err := fs.ListObjectsV2(ctx, &ListObjectsInput{
+		Bucket:    "bucket",
+		Prefix:    "archive/",
+		Delimiter: "/",
+		MaxKeys:   10,
+	})
+	if err != nil {
+		t.Fatalf("ListObjectsV2() error = %v", err)
+	}
+	if result.IsTruncated {
+		t.Fatal("ListObjectsV2() marked an empty listing as truncated")
+	}
+	if result.KeyCount != 0 || len(result.Objects) != 0 || len(result.CommonPrefixes) != 0 {
+		t.Fatalf("empty listing = %#v, want no entries", result)
 	}
 }
 

@@ -728,6 +728,11 @@ func (fs *FileSystem) ListObjectsV2(ctx context.Context, input *ListObjectsInput
 // listObjectsV2WithDelimiter collapses object keys into common prefixes while
 // continuing the underlying key scan until it can determine whether another
 // logical entry exists. A large common prefix must not hide later prefixes.
+//
+// Determining IsTruncated exactly means scanning through a common prefix until
+// the next logical entry (or the end of the key space) is found, so a single
+// prefix holding millions of keys dominates the response time. Seeking past the
+// prefix in SQL is a possible future optimization.
 func (fs *FileSystem) listObjectsV2WithDelimiter(ctx context.Context, input *ListObjectsInput, maxKeys int32, startKey string) (*ListObjectsOutput, error) {
 	// Request more objects when delimiters collapse many keys into one logical
 	// entry. The loop below continues past this batch when a common prefix is
@@ -777,6 +782,13 @@ func (fs *FileSystem) listObjectsV2WithDelimiter(ctx context.Context, input *Lis
 			}
 
 			if prefixKey != "" {
+				// S3 drops a common prefix that is not lexicographically greater
+				// than StartAfter (or the continuation marker), even when an
+				// object under it sorts after the marker.
+				if prefixKey <= startKey {
+					lastIncludedKey = obj.Key
+					continue
+				}
 				if _, seen := commonPrefixSet[prefixKey]; seen {
 					lastIncludedKey = obj.Key
 					continue
@@ -804,7 +816,7 @@ func (fs *FileSystem) listObjectsV2WithDelimiter(ctx context.Context, input *Lis
 		}
 		nextStartKey := objects[len(objects)-1].Key
 		if nextStartKey == currentStartKey {
-			return finish(false, ""), nil
+			return nil, fmt.Errorf("storage: list objects scan did not advance past %q", currentStartKey)
 		}
 		currentStartKey = nextStartKey
 	}

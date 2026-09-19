@@ -457,6 +457,44 @@ func TestListObjectsV2Pagination(t *testing.T) {
 	assert.Len(t, result2.Contents, 2)
 }
 
+// S3 drops a common prefix that is not lexicographically greater than
+// StartAfter, even when an object under that prefix sorts after StartAfter.
+func TestListObjectsV2DelimiterStartAfter(t *testing.T) {
+	ts := testutil.NewTestServer(t)
+	defer ts.Cleanup()
+
+	client := ts.S3Client(t)
+	ctx := context.Background()
+
+	bucketName := testutil.RandomBucketName()
+	cleanup := ts.CreateTestBucket(t, bucketName)
+	defer cleanup()
+
+	for _, key := range []string{"photos/zz/file.txt", "photos/zzz/file.txt", "videos/a.mp4"} {
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucketName),
+			Key:    aws.String(key),
+			Body:   strings.NewReader("content"),
+		})
+		require.NoError(t, err)
+	}
+
+	result, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:     aws.String(bucketName),
+		Delimiter:  aws.String("/"),
+		StartAfter: aws.String("photos/z"),
+	})
+	require.NoError(t, err)
+
+	require.Len(t, result.CommonPrefixes, 1)
+	assert.Equal(t, "videos/", *result.CommonPrefixes[0].Prefix)
+	assert.Empty(t, result.Contents)
+	require.NotNil(t, result.KeyCount)
+	assert.Equal(t, int32(1), *result.KeyCount)
+	require.NotNil(t, result.IsTruncated)
+	assert.False(t, *result.IsTruncated)
+}
+
 func TestPutGetLargeObject(t *testing.T) {
 	ts := testutil.NewTestServer(t)
 	defer ts.Cleanup()
