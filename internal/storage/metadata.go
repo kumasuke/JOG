@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	sqlite "modernc.org/sqlite"
@@ -19,6 +20,15 @@ import (
 type Metadata struct {
 	db     *sql.DB
 	dbPath string
+
+	// listQueries counts listing queries so tests can assert that pagination
+	// does not degrade into one query per batch of skipped keys.
+	listQueries atomic.Int64
+}
+
+// ListObjectQueries reports how many listing queries this store has served.
+func (m *Metadata) ListObjectQueries() int64 {
+	return m.listQueries.Load()
 }
 
 // NewMetadata creates a new metadata store.
@@ -1545,6 +1555,7 @@ func (m *Metadata) IsBucketEmpty(ctx context.Context, bucket string) (bool, erro
 // startAfter specifies the key to start after (exclusive).
 // maxKeys limits the number of results (0 means default 1000).
 func (m *Metadata) ListObjects(ctx context.Context, bucket, prefix, startAfter string, maxKeys int32) ([]Object, error) {
+	m.listQueries.Add(1)
 	if maxKeys <= 0 {
 		maxKeys = 1000
 	}
@@ -1571,6 +1582,38 @@ func (m *Metadata) ListObjects(ctx context.Context, bucket, prefix, startAfter s
 		`, bucket, likePrefix, maxKeys+1)
 	}
 
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var objects []Object
+	for rows.Next() {
+		var obj Object
+		if err := rows.Scan(&obj.Key, &obj.Size, &obj.LastModified, &obj.ETag, &obj.ContentType); err != nil {
+			return nil, err
+		}
+		objects = append(objects, obj)
+	}
+	return objects, rows.Err()
+}
+
+// ListObjectsExcludingPrefix lists objects after startAfter while skipping the
+// subtree under excludePrefix. A delimiter listing uses it to jump over a large
+// common prefix in one query instead of walking it batch by batch.
+func (m *Metadata) ListObjectsExcludingPrefix(ctx context.Context, bucket, prefix, startAfter, excludePrefix string, maxKeys int32) ([]Object, error) {
+	m.listQueries.Add(1)
+	if maxKeys <= 0 {
+		maxKeys = 1000
+	}
+
+	rows, err := m.db.QueryContext(ctx, `
+		SELECT key, size, last_modified, etag, content_type
+		FROM objects
+		WHERE bucket = ? AND key LIKE ? ESCAPE '\' AND key > ? AND key NOT LIKE ? ESCAPE '\'
+		ORDER BY key
+		LIMIT ?
+	`, bucket, escapeLikePattern(prefix)+"%", startAfter, escapeLikePattern(excludePrefix)+"%", maxKeys+1)
 	if err != nil {
 		return nil, err
 	}
